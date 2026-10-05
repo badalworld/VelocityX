@@ -282,10 +282,6 @@ export interface Stats {
 }
 
 export interface Mtf { symbol?: string; timeframes: { tf: string; bull: boolean }[]; atr: number; ribbonBull: boolean; overall: string; bullCount?: number }
-export interface ScreenerData {
-  rows: { symbol: string; full?: string; state: string; volatility?: number; trend?: string; tradable?: boolean }[];
-}
-
 export interface ScannerSettings {
   enabled: boolean;
   intervalSec: number;
@@ -321,18 +317,4 @@ export interface Settings {
     testnet: { key: string; secret: string; configured?: boolean };
     live: { key: string; secret: string; configured?: boolean };
   };
-}
-
-export interface Diagnostics {
-  feed: FeedInfo & { reachable: boolean | null; demoFeedAllowed: boolean };
-  ping: { ok: boolean; latencyMs: number; serverTimeOffsetMs: number; error?: string };
-  ws: {
-    market: { connected: boolean; lastMessageAt: number };
-    user: { connected: boolean; lastMessageAt: number; mode: Mode };
-  };
-  engine: { activeSymbols: string[]; lastTickAt: number; lastClosedCandleTime: number };
-  scanner: { at: number; universe: number; analysed: number; selected: string[] };
-  limiter: LimitStatus;
-  account: { source: string | null; at: number; errors: string[] };
-  now: number;
 }

@@ -64,8 +64,8 @@ class Trader {
   private priceQueue: { symbol: string; price: number } | null = null;
   private processing = false;
   private slBusy = new Set<string>();
-  /** intended cancellations — don't treat as unexpected in reconcile */
-  private intentionalCancel = new Set<string>();
+  /** Symbols with an entry round-trip in flight — blocks duplicate entries. */
+  private entering = new Set<string>();
 
   /** Symbols with an OPEN bot trade. */
   managedSymbols(): string[] {
@@ -118,7 +118,9 @@ class Trader {
       for (const lv of levels) {
         if (lv.filled || lv.qty <= 0) continue;
         const reached = d > 0 ? price >= lv.px : price <= lv.px;
-        if (reached) this.fillTP(t, lv.n, lv.px);
+        // A resting stop/take-profit market order fills at the market that
+        // crossed it, not at the level itself — so book the observed tick.
+        if (reached) this.fillTP(t, lv.n, price);
         if ((t.status as string) === 'CLOSED') break;
       }
       if (t.status === 'OPEN' && !t.tp3Filled) {
@@ -164,7 +166,26 @@ class Trader {
     await this.openTrade(sig);
   }
 
+  /**
+   * Entry gate: one entry round-trip per symbol at a time. Signals arrive from
+   * a single engine loop today, but a duplicate/retried signal must never be
+   * able to open a second position on the same market.
+   */
   private async openTrade(sig: OpenSignal): Promise<void> {
+    const symbol = sig.record.symbol;
+    if (this.entering.has(symbol)) {
+      this.log('info', `${symbol}: entry already in flight — duplicate signal ignored`);
+      return;
+    }
+    this.entering.add(symbol);
+    try {
+      await this.placeEntry(sig);
+    } finally {
+      this.entering.delete(symbol);
+    }
+  }
+
+  private async placeEntry(sig: OpenSignal): Promise<void> {
     const s = getSettings();
     const symbol = sig.record.symbol;
     try {
@@ -174,19 +195,45 @@ class Trader {
       let available: number;
       let marginUsed = openTrades().reduce((a, t) => a + t.margin, 0);
       let margin: number;
-      let balanceSource: 'paper' | 'real';
+      let canTrade = true;
+
+      // ---- production guard 1: the market must be empty -------------------
+      // If a position already exists on this symbol (manual or from another
+      // tool) the bot refuses to trade it. Two owners on one symbol would make
+      // the reduceOnly ladder ambiguous — refusing is the only safe option.
+      if (s.mode !== 'paper') {
+        const existing = await api.positionAmount(symbol);
+        if (Math.abs(existing) > info.stepSize / 2) {
+          throw new Error(
+            `${symbol} already carries a position (${fmtQty(existing)}) that the bot did not open — refusing to trade this market`,
+          );
+        }
+      }
 
       if (s.mode === 'paper') {
-        balanceSource = 'paper';
         const bal = getPaperBalance(PAPER_START_BALANCE);
         const realized = allTrades().reduce((a, t) => a + (t.status === 'CLOSED' ? t.realizedPnl : 0), 0);
         equity = bal + realized;
         available = Math.max(0, equity - marginUsed);
       } else {
-        balanceSource = 'real';
         const bal = await api.accountSnapshot();
         equity = bal.equity;
         available = bal.availableBalance;
+        canTrade = bal.canTrade;
+      }
+      // ---- production guard 2: the key must be allowed to trade -----------
+      if (!canTrade) throw new Error('Binance API key reports canTrade=false — order placement is disabled');
+
+      // ---- production guard 3: leverage must fit the exchange bracket -----
+      // Binance publishes a max leverage per symbol; requesting more fails the
+      // whole entry. Clamp down instead of losing the trade.
+      let leverage = s.leverage;
+      if (s.mode !== 'paper') {
+        const maxLev = await api.maxLeverage(symbol);
+        if (maxLev > 0 && leverage > maxLev) {
+          this.log('info', `${symbol}: leverage clamped ${leverage}x → ${maxLev}x (exchange bracket)`);
+          leverage = maxLev;
+        }
       }
 
       // Per-trade margin = tradeSizePercent of equity, but never consume more
@@ -200,13 +247,13 @@ class Trader {
       const usable = Math.max(0, freeUsable - reserved);
       margin = Math.max(0, Math.min(perTrade, usable > 0 ? usable : freeUsable));
 
-      let qty = floorToStep((margin * s.leverage) / entry, info.stepSize);
+      let qty = floorToStep((margin * leverage) / entry, info.stepSize);
       const needQty = Math.max(
         info.minQty,
         Math.ceil((info.minNotional / entry) / info.stepSize - 1e-9) * info.stepSize,
       );
       if (qty < needQty) {
-        const needMargin = (needQty * entry) / s.leverage;
+        const needMargin = (needQty * entry) / leverage;
         if (needMargin > Math.max(0, Math.min(available, equity) * 0.95 - marginUsed)) {
           throw new Error(
             `Not enough free margin for ${symbol}: need ~${needMargin.toFixed(2)} USDT (min notional ${info.minNotional}), available ${Math.max(0, available).toFixed(2)}`,
@@ -216,7 +263,7 @@ class Trader {
       }
       if (qty <= 0) throw new Error('Computed quantity is zero — increase trade size or balance');
       const notional = qty * entry;
-      margin = notional / s.leverage;
+      margin = notional / leverage;
 
       const slDist = sig.atr * s.atrSlMultiplier;
       const sl = entry - dir(sig.side) * slDist;
@@ -245,7 +292,7 @@ class Trader {
         tp3: roundToTick(tp3, info.tickSize),
         notional,
         margin,
-        leverage: s.leverage,
+        leverage,
         openedAt: Date.now(),
         closedAt: null,
         closeReason: null,
@@ -266,8 +313,6 @@ class Trader {
           ? { volatility: scanRow.volatility, adx: scanRow.adx, atrPct: scanRow.atrPct, rank: (scanner.result()?.rows.indexOf(scanRow) ?? -1) + 1 }
           : null,
       };
-      void balanceSource;
-      void marginUsed;
 
       if (s.mode === 'paper') {
         const bal = getPaperBalance(PAPER_START_BALANCE);
@@ -286,7 +331,7 @@ class Trader {
         } as any;
         this.log('info', `PAPER ${trade.side} ${fmtQty(qty)} ${symbol} @ ${entry} | SL ${trade.slInitial} | TP ${trade.tp1}/${trade.tp2}/${trade.tp3}`);
       } else {
-        await api.setLeverage(symbol, s.leverage);
+        await api.setLeverage(symbol, leverage);
         await api.setIsolated(symbol);
         const openSide: 'BUY' | 'SELL' = trade.side === 'LONG' ? 'BUY' : 'SELL';
         const entryRes = await api.marketOrder(symbol, openSide, qty, { newClientOrderId: `${prefix}E` });
@@ -295,7 +340,7 @@ class Trader {
           entry = avg;
           trade.entryPrice = avg;
           trade.notional = qty * avg;
-          trade.margin = trade.notional / s.leverage;
+          trade.margin = trade.notional / leverage;
           const sl2 = entry - dir(trade.side) * slDist;
           trade.slInitial = roundToTick(sl2, info.tickSize);
           trade.slCurrent = trade.slInitial;
@@ -306,11 +351,10 @@ class Trader {
         }
         trade.orders.entry = `${prefix}E`;
         try {
-          const slOrder = await api.stopMarket(symbol, closeSide(trade.side), trade.slInitial, {
-            closePosition: true, newClientOrderId: `${prefix}S0`,
-          });
+          // Explicit size + reduceOnly (one-way) / positionSide (hedge): the
+          // protective stop can never close more than the bot's own quantity.
+          await api.protectiveStop(symbol, closeSide(trade.side), trade.slInitial, qty, `${prefix}S0`);
           trade.orders.sl = `${prefix}S0`;
-          void slOrder;
           if (q1 > 0) {
             await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp1, q1, { newClientOrderId: `${prefix}1` });
             trade.orders.tp1 = `${prefix}1`;
@@ -403,7 +447,10 @@ class Trader {
       this.finalize(t, 'TP3', stopPrice);
       return;
     }
-    const fill = stopPrice;
+    // A stop that gapped through fills at the market, never better than the
+    // stop itself. This keeps the paper simulation honest on gaps.
+    const market = Number.isFinite(marketPrice) && marketPrice > 0 ? marketPrice : stopPrice;
+    const fill = d > 0 ? Math.min(stopPrice, market) : Math.max(stopPrice, market);
     if (t.mode === 'paper') {
       const gross = (fill - t.entryPrice) * d * remaining;
       const fee = fill * remaining * s.feeRate;
@@ -420,7 +467,6 @@ class Trader {
       level: anyTP ? 'win' : 'loss',
       msg: `${t.symbol} SL ${anyTP ? '(after TP — still a WIN 🟢)' : '🔴'} hit @ ${fill}, PnL ${t.realizedPnl.toFixed(2)} USDT`,
     });
-    void marketPrice;
     this.finalize(t, reason, fill);
   }
 
@@ -536,13 +582,14 @@ class Trader {
     }
     saveTrade(t);
     if (t.mode !== 'paper') {
+      // Cancel what is left of OUR ladder (TPs, and the stop if the position was
+      // already flattened). Only client ids tagged VX<tradeId> are ever touched.
       for (const key of ['sl', 'tp1', 'tp2', 'tp3'] as const) {
         const cid = t.orders[key];
         if (!cid) continue;
-        this.intentionalCancel.add(cid);
         try {
           await api.cancelOrder(t.symbol, undefined, cid);
-        } catch { /* gone */ }
+        } catch { /* already gone */ }
       }
     }
     emit('trade', { event: 'closed', trade: t, price });
@@ -561,7 +608,6 @@ class Trader {
       t.slCurrent = newStop;
       const oldCid = t.orders.sl;
       if (oldCid) {
-        this.intentionalCancel.add(oldCid);
         try {
           await api.cancelOrder(t.symbol, undefined, oldCid);
         } catch (e: any) {
@@ -569,10 +615,15 @@ class Trader {
         }
       }
       const newCid = `VX${t.id}S${t.slStage}`;
+      const qty = remainingQtyOf(t);
+      if (qty <= 0) {
+        await this.closeByMarket(t, 'KILL');
+        return;
+      }
       try {
-        await api.stopMarket(t.symbol, closeSide(t.side), newStop, {
-          closePosition: true, newClientOrderId: newCid,
-        });
+        // Explicit quantity + reduceOnly: the stop can only ever close the
+        // bot's remaining size — never a manual position on the same symbol.
+        await api.protectiveStop(t.symbol, closeSide(t.side), newStop, qty, newCid);
         t.orders.sl = newCid;
         saveTrade(t);
         emit('trade', { event: 'sl-moved', trade: t });
@@ -674,9 +725,13 @@ class Trader {
         if (!slAlive) {
           this.log('error', `${t.symbol}: SL order missing while position open — re-arming SL`);
           const cid = `VX${t.id}S${t.slStage}`;
-          await api.stopMarket(t.symbol, closeSide(t.side), roundToTick(t.slCurrent, info.tickSize), {
-            closePosition: true, newClientOrderId: cid,
-          });
+          await api.protectiveStop(
+            t.symbol,
+            closeSide(t.side),
+            roundToTick(t.slCurrent, info.tickSize),
+            remainingQtyOf(t),
+            cid,
+          );
           t.orders.sl = cid;
           saveTrade(t);
           emit('trade', { event: 'sl-rearmed', trade: t });
@@ -714,6 +769,3 @@ class Trader {
 }
 
 export const trader = new Trader();
-
-/** Test helper: expose cancel-intent set. */
-export const __intentional = (trader as any).intentionalCancel as Set<string>;

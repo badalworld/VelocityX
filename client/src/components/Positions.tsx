@@ -10,13 +10,24 @@ import { IconAlert, IconKill, IconScale, IconShield, IconTarget, IconWallet } fr
                   never counted in the bot's PnL/ROI.
    ========================================================================== */
 
-function LevelRow({ label, price, value, hit, tone }: { label: string; price: number; value?: string; hit: boolean; tone: string }) {
+function progressTo(mark: number, entry: number, level: number): number {
+  const span = level - entry;
+  if (!Number.isFinite(span) || Math.abs(span) < 1e-12) return 0;
+  return Math.max(0, Math.min(1, (mark - entry) / span));
+}
+
+function LevelRow({
+  label, price, value, hit, tone, fill,
+}: { label: string; price: number; value?: string; hit: boolean; tone: string; fill: number }) {
+  const pct = hit ? 100 : Math.round(Math.max(0, Math.min(1, fill)) * 100);
   return (
     <div className={`lad-row ${tone} ${hit ? 'is-hit' : ''}`}>
-      <span className="lad-lvl" style={{ color: tone === 'lvl-sl' ? 'var(--red)' : 'var(--green)' }}>
+      <span className="lad-lvl" style={{ color: tone.includes('lvl-sl') ? 'var(--red)' : 'var(--green)' }}>
         {label}
       </span>
-      <span className="lad-track" />
+      <span className="lad-track" title={`${pct}% of the way from entry to ${label}`}>
+        <span className="lad-fill" style={{ width: `${pct}%` }} />
+      </span>
       <span className="lad-px">{fmtPrice(price)}</span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' }}>
         {value && <span className="lad-note hide-sm">{value}</span>}
@@ -100,10 +111,17 @@ export function PositionCard({ pos, slot, max, onClose }: { pos: ManagedPosition
       </div>
 
       <div className="ladder">
-        <LevelRow label="SL" price={t.slCurrent} value={slLabel} hit={t.slStage > 0} tone="lvl-sl" />
-        <LevelRow label="TP1" price={t.tp1} value={`${fmtQtyN(t.q1)} · SL→BE`} hit={t.tp1Filled} tone="lvl-tp" />
-        <LevelRow label="TP2" price={t.tp2} value={`${fmtQtyN(t.q2)} · SL→TP1`} hit={t.tp2Filled} tone="lvl-tp" />
-        <LevelRow label="TP3" price={t.tp3} value={`${fmtQtyN(t.q3)} · full exit`} hit={t.tp3Filled} tone="lvl-tp" />
+        <LevelRow
+          label="SL"
+          price={t.slCurrent}
+          value={slLabel}
+          hit={t.slStage > 0}
+          tone={t.slStage >= 1 ? 'lvl-sl lvl-be' : 'lvl-sl'}
+          fill={progressTo(pos.markPrice, t.entryPrice, t.slCurrent)}
+        />
+        <LevelRow label="TP1" price={t.tp1} value={`${fmtQtyN(t.q1)} · SL→BE`} hit={t.tp1Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp1)} />
+        <LevelRow label="TP2" price={t.tp2} value={`${fmtQtyN(t.q2)} · SL→TP1`} hit={t.tp2Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp2)} />
+        <LevelRow label="TP3" price={t.tp3} value={`${fmtQtyN(t.q3)} · full exit`} hit={t.tp3Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp3)} />
       </div>
 
       <div className="row mt" style={{ flexWrap: 'wrap' }}>

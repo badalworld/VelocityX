@@ -226,18 +226,6 @@ export class BinanceApi {
     }
   }
 
-  async price(symbol: string): Promise<number> {
-    if (offlineFeed.active) return offlineFeed.price(symbol);
-    try {
-      const d = (await this.publicGet('/fapi/v1/ticker/price', { symbol }, 'market', ENDPOINT_WEIGHT.tickerPrice)) as any;
-      return num(d.price);
-    } catch (e) {
-      this.goOffline();
-      if (!offlineFeed.active) throw e;
-      return offlineFeed.price(symbol);
-    }
-  }
-
   /** One call for the whole universe: 24h stats (weight 40) — scanner step 1. */
   async ticker24hrAll(): Promise<
     { symbol: string; lastPrice: number; priceChangePercent: number; highPrice: number; lowPrice: number; quoteVolume: number; volume: number }[]
@@ -374,15 +362,36 @@ export class BinanceApi {
     }
   }
 
-  async balanceUSDT(): Promise<{ total: number; available: number }> {
-    const snap = await this.accountSnapshot();
-    return { total: snap.equity, available: snap.availableBalance };
-  }
-
   async positionAmount(symbol: string): Promise<number> {
     const rows = (await this.signed('GET', '/fapi/v2/positionRisk', { symbol }, 'account', ENDPOINT_WEIGHT.positionRisk)) as any[];
     const r = rows.find((x) => x.symbol === symbol);
     return r ? num(r.positionAmt) : 0;
+  }
+
+  /**
+   * Max leverage the exchange allows for a symbol (leverage brackets).
+   * Cached for 1h. Used to clamp the configured leverage BEFORE the entry so a
+   * 10× setting on a 5× market is downgraded instead of failing the trade.
+   */
+  private bracketCache: { at: number; list: Map<string, number> } | null = null;
+  async maxLeverage(symbol: string): Promise<number> {
+    if (this.bracketCache && Date.now() - this.bracketCache.at < 3600_000) {
+      return this.bracketCache.list.get(symbol) ?? 0;
+    }
+    try {
+      const rows = (await this.signed('GET', '/fapi/v1/leverageBracket', {}, 'account', ENDPOINT_WEIGHT.leverageBracket)) as any[];
+      const list = new Map<string, number>();
+      for (const r of rows || []) {
+        const max = Math.max(1, ...(r?.brackets || []).map((b: any) => num(b?.initialLeverage)));
+        if (r?.symbol) list.set(String(r.symbol), max);
+      }
+      this.bracketCache = { at: Date.now(), list };
+      return list.get(symbol) ?? 0;
+    } catch {
+      // Bracket lookup is best-effort: without it we keep the operator's value
+      // and let the exchange reject an out-of-range leverage explicitly.
+      return 0;
+    }
   }
 
   /** Full exchange metadata (cached 1h) — the scanner universe comes from here. */
@@ -654,6 +663,15 @@ export class BinanceApi {
     return this.newOrder(p);
   }
 
+  /**
+   * STOP_MARKET protective order.
+   *
+   * The executor always sends an explicit `quantity` with `reduceOnly` (one-way
+   * mode) so the stop can only ever shrink OUR position — it can never exceed
+   * the bot's own size and therefore can never touch a manual/external
+   * position that happens to live on the same symbol. Hedge mode uses
+   * `positionSide` for the same guarantee (Binance forbids reduceOnly there).
+   */
   async stopMarket(
     symbol: string,
     side: 'BUY' | 'SELL',
@@ -662,11 +680,30 @@ export class BinanceApi {
   ): Promise<any> {
     const p: any = { symbol, side, type: 'STOP_MARKET', stopPrice: fmtPrice(stopPrice) };
     if (opts.closePosition) p.closePosition = 'true';
-    if (opts.reduceOnly) p.reduceOnly = 'true';
-    if (opts.qty) p.quantity = fmtQty(opts.qty);
+    if (opts.reduceOnly && !opts.closePosition) p.reduceOnly = 'true';
+    if (opts.qty && opts.qty > 0) p.quantity = fmtQty(opts.qty);
     if (opts.newClientOrderId) p.newClientOrderId = opts.newClientOrderId;
     if (opts.positionSide) p.positionSide = opts.positionSide;
     return this.newOrder(p);
+  }
+
+  /** Protective STOP_MARKET for `qty` of the bot position — never close-all. */
+  async protectiveStop(
+    symbol: string,
+    closeSide: 'BUY' | 'SELL',
+    stopPrice: number,
+    qty: number,
+    newClientOrderId: string,
+  ): Promise<any> {
+    const dual = await this.isDualSide();
+    return this.stopMarket(symbol, closeSide, stopPrice, {
+      qty,
+      // Hedge mode: positionSide (inferred in newOrder) scopes the stop to the
+      // bot's own side, which is the strongest guarantee Binance offers there.
+      reduceOnly: !dual,
+      positionSide: dual ? (closeSide === 'SELL' ? 'LONG' : 'SHORT') : undefined,
+      newClientOrderId,
+    });
   }
 
   async takeProfitMarket(

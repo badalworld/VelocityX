@@ -7,6 +7,7 @@
  */
 import express from 'express';
 import { api } from './binance';
+import { authRequired, rateLimit, requireToken } from './auth';
 import { engine, mtfDashboard } from './engine';
 import { computeStats } from './stats';
 import { getSettings, publicSettings, updateSettings } from './settings';
@@ -21,6 +22,24 @@ import { limiter } from './ratelimit';
 
 export function apiRouter(): express.Router {
   const r = express.Router();
+
+  // Liveness/readiness for process supervisors. Deliberately tiny and always
+  // unauthenticated so a container orchestrator can probe it.
+  r.get('/health', (_req, res) => {
+    res.json({
+      ok: true,
+      uptime: process.uptime(),
+      feed: api.isOffline() ? 'offline-demo' : 'binance',
+      authRequired: authRequired(),
+      mode: getSettings().mode,
+    });
+  });
+
+  // Every API route is token-gated when VX_API_TOKEN is set (open by default,
+  // with a loud boot warning — see index.ts).
+  r.use(requireToken);
+  // State-changing routes are rate limited per IP.
+  const mutate = rateLimit({ perMinute: 60, burst: 20 });
 
   const feedInfo = () => {
     const offline = api.isOffline();
@@ -39,10 +58,6 @@ export function apiRouter(): express.Router {
       candles: candleStore.stats(),
     };
   };
-
-  r.get('/health', (_req, res) => {
-    res.json({ ok: true, uptime: process.uptime(), feed: api.isOffline() ? 'offline-demo' : 'binance' });
-  });
 
   r.get('/status', async (_req, res) => {
     const s = getSettings();
@@ -123,8 +138,14 @@ export function apiRouter(): express.Router {
     });
   });
 
+  const numQuery = (v: unknown): number | undefined => {
+    if (v === undefined || v === null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
   r.get('/account', async (req, res) => {
-    const days = req.query.days ? Number(req.query.days) : undefined;
+    const days = numQuery(req.query.days);
     let view = accountService.get();
     if (!view || Date.now() - view.at > 5000) {
       try {
@@ -153,18 +174,12 @@ export function apiRouter(): express.Router {
   });
 
   r.get('/income', async (req, res) => {
-    const days = req.query.days ? Number(req.query.days) : getSettings().historyDays;
+    const days = numQuery(req.query.days) ?? getSettings().historyDays;
     try {
       res.json(await accountService.incomeSummary(days));
     } catch (e: any) {
       res.status(502).json({ error: e?.message });
     }
-  });
-
-  r.get('/chart', (req, res) => {
-    const limit = Math.min(1500, Math.max(50, Number(req.query.limit) || 300));
-    const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
-    res.json(engine.chart(limit, symbol));
   });
 
   // ---------------- market scanner ----------------
@@ -185,9 +200,33 @@ export function apiRouter(): express.Router {
 
   r.get('/settings', (_req, res) => res.json(publicSettings()));
 
-  r.post('/settings', (req, res) => {
+  /**
+   * Update settings. Switching to LIVE (real money) needs an explicit
+   * `confirmLive: true` in the body — a stray click, a stale tab or a scripted
+   * POST can no longer move real funds by accident.
+   */
+  r.post('/settings', mutate, (req, res) => {
     const before = getSettings();
     const patch = req.body || {};
+    const wantsLive = patch.mode === 'live' && before.mode !== 'live';
+
+    if (patch.mode !== undefined && !['paper', 'testnet', 'live'].includes(patch.mode)) {
+      return res.status(400).json({ error: 'mode must be paper | testnet | live' });
+    }
+    if (wantsLive && patch.confirmLive !== true) {
+      return res.status(400).json({
+        error: 'Switching to LIVE places real orders — resend with confirmLive: true after testing on paper/testnet',
+      });
+    }
+    if (patch.symbol !== undefined && !/^[A-Z0-9]{4,24}$/.test(String(patch.symbol).toUpperCase())) {
+      return res.status(400).json({ error: 'symbol must be a Binance USD-M symbol like BTCUSDT' });
+    }
+    if (wantsLive) {
+      // Entering LIVE always lands DISARMED: auto-trade must be switched on
+      // again deliberately (with its own confirmation) before any order is sent.
+      patch.autoTrade = false;
+    }
+
     const s = updateSettings(patch);
     if (patch.symbol && patch.symbol !== before.symbol) {
       emit('log', { level: 'info', msg: `Primary symbol changed to ${s.symbol}` });
@@ -196,10 +235,17 @@ export function apiRouter(): express.Router {
       if (s.mode === 'paper' || s.keys[s.mode]?.key) {
         userStream.start();
         void accountService.refresh();
-        emit('log', { level: 'info', msg: `Mode switched to ${s.mode.toUpperCase()}` });
+        emit('log', {
+          level: s.mode === 'live' ? 'error' : 'info',
+          msg:
+            s.mode === 'live'
+              ? 'Mode switched to LIVE — real mainnet account armed with auto-trade OFF; enable auto-trade to start executing'
+              : `Mode switched to ${s.mode.toUpperCase()}`,
+        });
       } else {
         emit('error', { message: `No API keys configured for ${s.mode} mode` });
         updateSettings({ mode: before.mode });
+        return res.status(400).json({ error: `No API keys configured for ${s.mode} mode` });
       }
     }
     if (patch.scanner && JSON.stringify(patch.scanner) !== JSON.stringify(before.scanner)) {
@@ -213,16 +259,29 @@ export function apiRouter(): express.Router {
     res.json(publicSettings());
   });
 
-  r.post('/autotrade', (req, res) => {
+  /**
+   * Auto-trade master switch. Enabling it while LIVE is a real-money action and
+   * therefore needs `confirmLive: true` too.
+   */
+  r.post('/autotrade', mutate, (req, res) => {
     const enabled = !!req.body?.enabled;
+    const mode = getSettings().mode;
+    if (enabled && mode === 'live' && req.body?.confirmLive !== true) {
+      return res.status(400).json({
+        error: 'Enabling auto-trade in LIVE mode executes real orders — resend with confirmLive: true',
+      });
+    }
     updateSettings({ autoTrade: enabled });
-    emit('log', { level: enabled ? 'win' : 'error', msg: `Auto-trade ${enabled ? 'ENABLED' : 'DISABLED'}` });
+    emit('log', {
+      level: enabled ? (mode === 'live' ? 'error' : 'win') : 'info',
+      msg: `Auto-trade ${enabled ? 'ENABLED' : 'DISABLED'}${enabled && mode === 'live' ? ' in LIVE mode — real orders active' : ''}`,
+    });
     emit('status', { autoTrade: enabled });
     res.json({ autoTrade: enabled });
   });
 
   /** Close ONE bot-owned position at market (external positions are never touched). */
-  r.post('/positions/close', async (req, res) => {
+  r.post('/positions/close', mutate, async (req, res) => {
     const id = String(req.body?.id || '');
     const trade = openTrades().find((t) => t.id === id);
     if (!trade) return res.status(404).json({ error: 'No open bot position with that id' });
@@ -232,7 +291,7 @@ export function apiRouter(): express.Router {
     res.json({ ok: true, id, closed: allTrades().find((t) => t.id === id) || null, openTrades: openTrades() });
   });
 
-  r.post('/kill', async (_req, res) => {
+  r.post('/kill', mutate, async (_req, res) => {
     const closed = await trader.kill();
     void accountService.refresh();
     res.json({ ok: true, closed, openTrades: openTrades() });
@@ -283,22 +342,6 @@ export function apiRouter(): express.Router {
     }
   });
 
-  /** Back-compat: the old screener is now the live volatility scanner. */
-  r.get('/screener', (_req, res) => {
-    const result = scanner.result();
-    if (!result) return res.json({ rows: [] });
-    res.json({
-      rows: result.rows.slice(0, 12).map((row) => ({
-        symbol: row.symbol.replace(/USDT$/, ''),
-        full: row.symbol,
-        state: row.marketType === 'TRENDING' ? `${row.trend === 'UP' ? 'Bullish' : 'Bearish'} · ADX ${row.adx.toFixed(0)}` : row.marketType,
-        volatility: row.volatility,
-        trend: row.trend,
-        tradable: row.tradable,
-      })),
-    });
-  });
-
   // ---------------- diagnostics & limits ----------------
 
   r.get('/limits', (_req, res) => {
@@ -337,6 +380,9 @@ export function apiRouter(): express.Router {
       now: Date.now(),
     });
   });
+
+  // Unknown API route → JSON 404 (never the SPA fallback).
+  r.use((_req, res) => res.status(404).json({ error: 'Unknown API endpoint' }));
 
   return r;
 }

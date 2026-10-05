@@ -129,27 +129,40 @@ class AccountService {
     return this.view;
   }
 
-  /** Real-time balance/position push from the user-data stream (no REST weight). */
+  /**
+   * Real-time balance/position push from the user-data stream (no REST weight).
+   *
+   * Binance ACCOUNT_UPDATE semantics: `a.B[].wb` is the asset wallet balance,
+   * `a.B[].cw` is the CROSS wallet balance (not a PnL!), and unrealised PnL
+   * lives in `a.P[].up` per position. Equity is therefore wallet + Σup — the
+   * same identity `/fapi/v2/account` reports. (Older builds mis-read `cw` as
+   * PnL, which made equity jump before the next REST poll corrected it.)
+   */
   onUserStreamAccount(payload: any): void {
     this.lastUserEventAt = Date.now();
     if (!this.view) return;
     try {
       const bal = (payload?.a?.B || []).find((b: any) => b.a === 'USDT');
-      if (bal) {
-        const wallet = Number(bal.wb);
-        const crossUnPnl = Number(bal.cw);
-        if (Number.isFinite(wallet)) {
-          const unreal = Number.isFinite(crossUnPnl) ? crossUnPnl : this.view.unrealizedPnl ?? 0;
-          this.view = {
-            ...this.view,
-            at: Date.now(),
-            walletBalance: wallet,
-            unrealizedPnl: unreal,
-            equity: wallet + unreal,
-            availableBalance: Number.isFinite(Number(bal.bc)) ? Number(bal.bc) : this.view.availableBalance,
-            roiOnWalletPct: wallet > 0 ? (unreal / wallet) * 100 : 0,
-          };
-        }
+      const positions: any[] = Array.isArray(payload?.a?.P) ? payload.a.P : [];
+      const wallet = Number(bal?.wb);
+      if (Number.isFinite(wallet) && wallet >= 0) {
+        const hasPositions = positions.length > 0;
+        const unreal = hasPositions
+          ? positions.reduce((a, p) => a + (Number(p?.up) || 0), 0)
+          : this.view.unrealizedPnl ?? 0;
+        const initialMargin = hasPositions
+          ? positions.reduce((a, p) => a + (Number(p?.iw) || 0), 0)
+          : this.view.initialMargin;
+        this.view = {
+          ...this.view,
+          at: Date.now(),
+          walletBalance: wallet,
+          unrealizedPnl: unreal,
+          equity: wallet + unreal,
+          initialMargin,
+          roiOnWalletPct: wallet > 0 ? (unreal / wallet) * 100 : 0,
+          roiPct: initialMargin && initialMargin > 0 ? (unreal / initialMargin) * 100 : this.view.roiPct,
+        };
       }
       emit('account', { at: this.view.at, equity: this.view.equity, unrealizedPnl: this.view.unrealizedPnl });
     } catch {

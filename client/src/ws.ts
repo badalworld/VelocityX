@@ -1,3 +1,4 @@
+import { getApiToken } from './api';
 export interface WsEvent { type: string; data: any; t: number }
 
 type Listener = (e: WsEvent) => void;
@@ -10,7 +11,9 @@ let closedByUs = false;
 function connect(): void {
   if (closedByUs) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url = `${proto}://${location.host}/ws`;
+  // The server requires the same token as the REST API when VX_API_TOKEN is set.
+  const token = getApiToken();
+  const url = `${proto}://${location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
   try {
     ws = new WebSocket(url);
   } catch {
@@ -43,12 +46,22 @@ function connect(): void {
   };
 }
 
+/** Re-open the socket (used after the API token changes). */
+export function reconnect(): void {
+  closedByUs = false;
+  if (ws) {
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+    ws = null;
+  }
+  connect();
+}
+
 export function subscribe(l: Listener): () => void {
   listeners.add(l);
   if (!ws) connect();
   return () => listeners.delete(l);
-}
-
-export function wsConnected(): boolean {
-  return !!ws && ws.readyState === WebSocket.OPEN;
 }

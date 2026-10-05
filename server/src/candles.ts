@@ -110,10 +110,6 @@ class CandleStore {
     return candle;
   }
 
-  noteWsMessage(symbol: string, interval: string): void {
-    this.wsAt.set(CandleStore.key(symbol, interval), Date.now());
-  }
-
   stats(): { symbols: number; series: number; bars: number; lastWsAt: number } {
     let bars = 0;
     let lastWsAt = 0;

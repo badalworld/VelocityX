@@ -119,7 +119,7 @@ async function timed(url, init) {
     const status = await jget('/api/status');
     ok(!!status, `dashboard server reachable at ${SERVER}`);
     if (status) {
-        ok(['binance', 'binance-unreachable', 'offline-demo'].includes(status.feed), `feed reports ${status.feed}`, `reachable=${status.feedInfo?.reachable}`);
+      ok(['binance', 'binance-unreachable', 'offline-demo'].includes(status.feed), `feed reports ${status.feed}`, `reachable=${status.feedInfo?.reachable}`);
       if (exchangeUp) ok(status.feed === 'binance', 'dashboard feed is the real Binance feed (exchange reachable)', `feed=${status.feed}`);
       else ok(status.feed !== 'binance', 'dashboard never claims a live feed while Binance is unreachable', `feed=${status.feed}`);
       ok(Array.isArray(status.prices) ? status.prices.length > 0 : !!status.engine, 'status carries live engine data');

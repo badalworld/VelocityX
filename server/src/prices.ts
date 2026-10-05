@@ -19,7 +19,3 @@ export function setPrice(symbol: string, price: number): void {
 export function priceOf(symbol: string): number {
   return prices.get(String(symbol).toUpperCase()) ?? 0;
 }
-
-export function allPrices(): Record<string, number> {
-  return Object.fromEntries(prices);
-}

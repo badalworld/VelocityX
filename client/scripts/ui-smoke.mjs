@@ -154,7 +154,7 @@ const routes = {
     openTrade: openTrade,
     slots: { used: 1, max: 8 },
     scanner: { at: now, selected: scannerView.selected, universe: 214, analysed: 30 },
-    feedInfo: { feed: 'binance', source: 'binance-usdm', reachable: true, demoFeedAllowed: false, lastRestOkAt: now - 1200, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300, candles: { symbols: 4, intervals: ['5m', '15m', '1h'] } },
+    feedInfo: { feed: 'binance', source: 'binance-usdm', reachable: true, demoFeedAllowed: false, lastRestOkAt: now - 1200, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300, candles: { symbols: 4, series: 4, bars: 812, lastWsAt: now - 300 } },
     limits: { plannedLimitPerMin: 2280, usedWeight: 412, usedPct: 17.2, cooldownMsLeft: 0, areas: [ { area: 'scanner', sharePct: 40, weightUsed: 220, weightCap: 912, calls: 12, waiting: 0, avgWaitMs: 3 }, { area: 'market', sharePct: 25, weightUsed: 96, weightCap: 570, calls: 40, waiting: 0, avgWaitMs: 1 }, { area: 'account', sharePct: 20, weightUsed: 76, weightCap: 456, calls: 8, waiting: 0, avgWaitMs: 2 }, { area: 'orders', sharePct: 10, weightUsed: 15, weightCap: 228, calls: 6, waiting: 0, avgWaitMs: 0 }, { area: 'stream', sharePct: 5, weightUsed: 5, weightCap: 114, calls: 2, waiting: 0, avgWaitMs: 0 } ] },
     account: accountView,
     logs: [
@@ -176,29 +176,39 @@ const routes = {
   '/api/scanner': scannerView,
   '/api/limits': { limiter: {}, telemetry: {}, candles: {}, note: '' },
   '/api/diagnostics': { ok: true, feed: 'binance', reachable: true, latencyMs: 42, ws: { market: true, user: true }, candles: { symbols: 4 }, limits: { usedWeight: 412, plannedLimitPerMin: 2280 }, errors: [] },
-  '/api/mtf': { 5: { bull: true, emaFast: 61300, emaSlow: 60800 }, 15: { bull: true, emaFast: 61100, emaSlow: 60600 }, 30: { bull: false, emaFast: 60500, emaSlow: 60700 } },
+  '/api/mtf': {
+    symbol,
+    timeframes: [ { tf: '5m', bull: true }, { tf: '15m', bull: true }, { tf: '30m', bull: false } ],
+    atr: 210.4,
+    ribbonBull: true,
+    overall: 'BULLISH',
+    bullCount: 2,
+    at: now,
+  },
   '/api/settings': {
     mode: 'paper',
-    symbol,
     autoTrade: true,
     autoScan: true,
-    leverage: 10,
-    tradeSizePercent: 5,
-    maxPositions: 8,
-    historyDays: 30,
-    feeRate: 0.0005,
-    slAtrMultiplier: 2,
-    tpRrFactor: 1.5,
-    emaFast: 11,
-    emaSlow: 34,
-    atrPeriod: 14,
+    symbol,
     interval: '5m',
-    mtfTimeframes: ['5m', '15m', '30m'],
-    hasTestnetKeys: false,
-    hasLiveKeys: false,
-    testnetKeyMask: '',
-    liveKeyMask: '',
-    scanner: { enabled: true, intervalSec: 60, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, candidates: 30, topN: 8, interval: '5m' },
+    tradeSizePercent: 5,
+    leverage: 10,
+    maxPositions: 8,
+    feeRate: 0.0005,
+    emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
+    emaExtraLength: 200,
+    atrLength: 14,
+    atrSlMultiplier: 2,
+    tpRrFactor: 1.5,
+    tp1ClosePct: 33,
+    tp2ClosePct: 50,
+    historyDays: 30,
+    dashboardTimeframes: ['5', '15', '30'],
+    scanner: { enabled: true, intervalSec: 60, candidates: 30, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, topN: 8 },
+    keys: {
+      testnet: { key: '', secret: '', configured: false },
+      live: { key: '', secret: '', configured: false },
+    },
   },
 };
 
@@ -364,10 +374,24 @@ check('four KPI pods', doc.querySelectorAll('.kpi').length === 4);
   // one 4-level ladder (SL + TP1..TP3) per managed position
   const rungs = doc.querySelectorAll('.lad-row').length;
   checkSoft(!LIVE || liveManaged > 0, 'position ladder (4 levels per position)', rungs >= 4 && rungs % 4 === 0, `${rungs} rungs`);
+  const fills = [...doc.querySelectorAll('.lad-fill')];
+  const widthsOk =
+    fills.length === rungs &&
+    fills.every((f) => /^\d{1,3}%$/.test(f.style.width || '') && Number((f.style.width || '0%').replace('%', '')) <= 100);
+  checkSoft(
+    !LIVE || liveManaged > 0,
+    'ladder fill bars show distance-to-level progress',
+    widthsOk,
+    `${fills.length} fills`,
+    'no managed position in this feed',
+  );
 }
 check('stats rings', doc.querySelectorAll('.ring').length === 3);
 check('hit-rate bars', doc.querySelectorAll('.bar-row').length >= 5);
 check('MTF gauge', !!doc.querySelector('.gauge-svg .gauge-fill'));
+check('MTF timeframe chips', doc.querySelectorAll('.tf-chip').length >= 3);
+check('execution rules panel', /execution rules/i.test(doc.body.textContent));
+check('live banner hidden while paper', !doc.querySelector('.feed-banner[role="alert"]'));
 checkSoft(
   !LIVE || liveScannerRows > 0,
   'scanner top picks',
@@ -464,6 +488,13 @@ check('signal log renders table or empty state', !!doc.querySelector('.tbl') || 
 check('settings tab clickable', clickTab('settings'));
 await sleep(800);
 check('settings inputs', doc.querySelectorAll('.input, .select, .textarea').length >= 6);
+{
+  // Connection tab: the API-token field must be there (server hardening).
+  const connTab = [...doc.querySelectorAll('.seg-item')].find((n) => /connection/i.test(n.textContent || ''));
+  connTab?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  check('connection tab renders (incl. API token field)', /API token/i.test(doc.body.textContent));
+}
 check('scanner settings tab', (() => { const t = [...doc.querySelectorAll('.settings-sec h4')].some((h) => /market scanner/i.test(h.textContent || '')) || true; return t; })());
 check('guardrails panel', /execution guardrails/i.test(doc.body.textContent));
 

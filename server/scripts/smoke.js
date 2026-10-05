@@ -1,43 +1,54 @@
-// Smoke test: verify EMA/ATR ports + signal logic + qty split against reference values.
+// Smoke test: verify the EMA/ATR ports, signal logic and the qty split.
+//
+// The reference vectors in scripts/fixtures/indicator-reference.json are
+// produced by scripts/gen-reference.py, an INDEPENDENT Python implementation of
+// Pine's ta.ema / ta.atr. The vectors are committed, so this test is a real
+// cross-check of the TypeScript maths on every run (no network, no skipped
+// checks). Regenerate with:  python3 scripts/gen-reference.py
+const path = require('path');
 const { ema, atr, signalAt, computeSnapshot } = require('../dist/indicators');
 const { splitQty } = require('../dist/trader');
 
 let failures = 0;
 function approx(a, b, tol, name) {
-  const ok = Math.abs(a - b) <= tol;
+  const ok = Number.isFinite(a) && Math.abs(a - b) <= tol;
   if (!ok) { failures++; console.log(`FAIL ${name}: got ${a}, expected ${b}`); }
   else console.log(`ok   ${name} = ${a}`);
 }
 
-// ---- EMA: reference values computed by pandas ewm(alpha=2/12, adjust=False) seeded with SMA ----
-// We precompute reference in python and paste below (see /tmp/gen_ref.py output).
-let closes, refEma11, refAtr14, candles;
+const fixturePath = path.join(__dirname, 'fixtures', 'indicator-reference.json');
+let ref;
 try {
-  closes = require('/tmp/ref_closes.json');
-  refEma11 = require('/tmp/ref_ema11.json');
-  refAtr14 = require('/tmp/ref_atr14.json');
-} catch {
-  console.log('note: reference vectors missing (/tmp/ref_*.json) — using a synthetic series for the maths checks');
-}
-if (refEma11) {
-  const e11 = ema(closes, 11);
-  for (const i of [10, 50, 99, 199]) {
-    approx(e11[i], refEma11[i], 1e-6, `ema11[${i}]`);
-  }
-}
-if (!closes) closes = Array.from({ length: 220 }, (_, i) => 100 + Math.sin(i / 7) * 5 + i * 0.2);
-candles = closes.map((c, i) => ({
-  time: i, closeTime: i, close: c,
-  open: c, high: c + 5 + (i % 7), low: c - 4 - (i % 5), volume: 1,
-}));
-if (refAtr14) {
-  const a14 = atr(candles, 14);
-  for (const i of [13, 50, 99, 199]) {
-    approx(a14[i], refAtr14[i], 1e-6, `atr14[${i}]`);
-  }
+  ref = require(fixturePath);
+} catch (e) {
+  console.error(`FAIL missing reference fixture ${fixturePath} — run: python3 scripts/gen-reference.py`);
+  process.exit(1);
 }
 
-// ---- signal: craft cross up at index 100 ----
+const closes = ref.closes;
+const candles = ref.candles.map((c, i) => ({ ...c, time: i, closeTime: i }));
+const idx = ref.indices;
+
+// Reference `null` means "not defined yet" (fewer samples than the period) —
+// the port marks that with NaN, which must match exactly.
+function seriesCheck(name, mine, refSeries, i) {
+  const expected = refSeries[i];
+  if (expected === null || expected === undefined) {
+    if (Number.isNaN(mine[i])) console.log(`ok   ${name}[${i}] = NaN (undefined before the seed)`);
+    else { failures++; console.log(`FAIL ${name}[${i}]: got ${mine[i]}, expected undefined`); }
+    return;
+  }
+  approx(mine[i], expected, 1e-9, `${name}[${i}]`);
+}
+const ema5 = ema(closes, 5), ema11 = ema(closes, 11), ema34 = ema(closes, 34), atr14 = atr(candles, 14);
+for (const i of idx) {
+  seriesCheck('ema5', ema5, ref.ema5, i);
+  seriesCheck('ema11', ema11, ref.ema11, i);
+  seriesCheck('ema34', ema34, ref.ema34, i);
+  seriesCheck('atr14', atr14, ref.atr14, i);
+}
+
+// ---- signal: craft a cross up at index 100 ----
 const f = [], s = [];
 for (let i = 0; i < 120; i++) {
   if (i < 100) { f.push(100); s.push(100); }        // flat: no cross

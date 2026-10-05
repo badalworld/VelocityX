@@ -141,29 +141,9 @@ export const IconKill = (p: P) => (
   </Base>
 );
 
-export const IconPlay = (p: P) => (
-  <Base {...p}>
-    <path d="M8 5.6 18 12 8 18.4V5.6Z" />
-  </Base>
-);
 
-export const IconPause = (p: P) => (
-  <Base {...p}>
-    <path d="M9.5 5.5v13M14.5 5.5v13" />
-  </Base>
-);
 
-export const IconArrowUp = (p: P) => (
-  <Base {...p}>
-    <path d="M12 19V5M6.4 10.6 12 5l5.6 5.6" />
-  </Base>
-);
 
-export const IconArrowDown = (p: P) => (
-  <Base {...p}>
-    <path d="M12 5v14M17.6 13.4 12 19l-5.6-5.6" />
-  </Base>
-);
 
 export const IconInfo = (p: P) => (
   <Base {...p}>
@@ -185,17 +165,7 @@ export const IconAlert = (p: P) => (
   </Base>
 );
 
-export const IconClose = (p: P) => (
-  <Base {...p}>
-    <path d="M6.4 6.4 17.6 17.6M17.6 6.4 6.4 17.6" />
-  </Base>
-);
 
-export const IconChevron = (p: P) => (
-  <Base {...p}>
-    <path d="m6.5 9.5 5.5 5.5 5.5-5.5" />
-  </Base>
-);
 
 export const IconCoins = (p: P) => (
   <Base {...p}>
@@ -212,14 +182,6 @@ export const IconScale = (p: P) => (
   </Base>
 );
 
-export const IconGrid = (p: P) => (
-  <Base {...p}>
-    <rect x="3.5" y="3.5" width="7" height="7" rx="1.6" />
-    <rect x="13.5" y="3.5" width="7" height="7" rx="1.6" />
-    <rect x="3.5" y="13.5" width="7" height="7" rx="1.6" />
-    <rect x="13.5" y="13.5" width="7" height="7" rx="1.6" />
-  </Base>
-);
 
 export const IconCrown = (p: P) => (
   <Base {...p}>

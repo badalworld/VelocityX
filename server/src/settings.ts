@@ -192,6 +192,32 @@ function sanitize(s: Settings): Settings {
   sc.enabled = sc.enabled !== false;
 
   if (!['paper', 'testnet', 'live'].includes(s.mode)) s.mode = 'paper';
+
+  // ---- connection / identity ------------------------------------------------
+  s.symbol = String(s.symbol || DEFAULT_SETTINGS.symbol).toUpperCase().trim();
+  if (!/^[A-Z0-9]{4,24}$/.test(s.symbol)) s.symbol = DEFAULT_SETTINGS.symbol;
+  s.interval = '5m';
+  s.emaExtraLength = Math.round(clamp(num(s.emaExtraLength, 200), 1, 1000));
+  s.dashboardTimeframes = Array.isArray(s.dashboardTimeframes) && s.dashboardTimeframes.length
+    ? s.dashboardTimeframes.filter((t) => ['5', '15', '30', '60', '240', 'D'].includes(t)).slice(0, 6)
+    : [...DEFAULT_SETTINGS.dashboardTimeframes];
+  if (!s.dashboardTimeframes.length) s.dashboardTimeframes = [...DEFAULT_SETTINGS.dashboardTimeframes];
+  s.tp1ClosePct = clamp(num(s.tp1ClosePct, 33), 1, 90);
+  s.tp2ClosePct = clamp(num(s.tp2ClosePct, 50), 1, 90);
+  s.emaLengths = (Array.isArray(s.emaLengths) ? s.emaLengths : [])
+    .map((x) => Math.round(Number(x)))
+    .filter((x) => Number.isFinite(x) && x > 0 && x <= 1000)
+    .slice(0, 12);
+  if (s.emaLengths.length < 2) s.emaLengths = [...DEFAULT_SETTINGS.emaLengths];
+
+  // ---- exchange keys: opaque strings only ----------------------------------
+  for (const env of ['testnet', 'live'] as const) {
+    const k = s.keys?.[env];
+    s.keys[env] = {
+      key: typeof k?.key === 'string' ? k.key.trim() : '',
+      secret: typeof k?.secret === 'string' ? k.secret.trim() : '',
+    };
+  }
   return s;
 }
 
@@ -230,8 +256,12 @@ export function updateSettings(patch: any): Settings {
 export function persistSettings(): void {
   ensureDir();
   const tmp = SETTINGS_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(current, null, 2));
+  // 0600: this file holds exchange API secrets — never world-readable.
+  fs.writeFileSync(tmp, JSON.stringify(current, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, SETTINGS_FILE);
+  try {
+    fs.chmodSync(SETTINGS_FILE, 0o600);
+  } catch { /* best effort (non-POSIX filesystems) */ }
 }
 
 /** Settings with secrets masked — safe to send to the browser. */

@@ -71,11 +71,28 @@ const TRADES_FILE = dataPath('trades.json');
 const SIGNALS_FILE = dataPath('signals.json');
 const PAPER_FILE = dataPath('paper.json');
 
+/**
+ * Read a persisted JSON document. A corrupt journal is NEVER silently dropped:
+ * the bad file is moved aside (`<name>.corrupt-<ts>`) so the operator can
+ * recover it, and the problem is logged — losing a trade journal silently is
+ * exactly the kind of failure a trading bot must never have.
+ */
 function readJson<T>(file: string, fallback: T): T {
+  if (!fs.existsSync(file)) return fallback;
+  const raw = fs.readFileSync(file, 'utf8');
+  if (!raw.trim()) return fallback;
   try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
-  } catch { /* ignore */ }
-  return fallback;
+    return JSON.parse(raw) as T;
+  } catch (e: any) {
+    const backup = `${file}.corrupt-${Date.now()}`;
+    try {
+      fs.renameSync(file, backup);
+    } catch { /* keep going with defaults */ }
+    console.error(
+      `[store] ${path.basename(file)} is not valid JSON (${e?.message}) — moved to ${path.basename(backup)} and starting from defaults`,
+    );
+    return fallback;
+  }
 }
 
 function writeJson(file: string, data: unknown): void {
@@ -112,9 +129,6 @@ export function openTradeOn(symbol: string): Trade | null {
 /** Back-compat helper: the most recent OPEN trade (or null). */
 export function activeTrade(): Trade | null {
   return trades.find((t) => t.status === 'OPEN') || null;
-}
-export function openSymbols(): string[] {
-  return [...new Set(trades.filter((t) => t.status === 'OPEN').map((t) => t.symbol))];
 }
 export function saveTrade(t: Trade): void {
   const idx = trades.findIndex((x) => x.id === t.id);

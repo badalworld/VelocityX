@@ -1,26 +1,46 @@
 import { useMemo } from 'react';
-import { AccountView, PositionsPayload, ScanResult, ScreenerData, Stats, Status, Trade } from '../types';
+import { AccountView, Mtf, PositionsPayload, ScanResult, Stats, Status, Trade } from '../types';
 import { fmt, timeAgo } from '../api';
 import { AnimatedNumber, Panel, Sparkline } from '../motion/primitives';
 import { ManagedPositions } from '../components/Positions';
 import StatsPanel from '../components/StatsPanel';
 import { ActivityPanel } from '../components/Panels';
 import { ScannerPanel, TopPicks } from '../components/ScannerPanel';
+import { MtfPanel } from '../components/MtfPanel';
 import { IconAlert, IconBolt, IconCoins, IconPulse, IconShield, IconSparkles, IconTarget, IconTrend } from '../motion/Icons';
 
 interface Props {
   status: Status | null;
   stats: Stats | null;
-  screener: ScreenerData | null;
   scan: ScanResult | null;
   account: AccountView | null;
   positions: PositionsPayload | null;
   trades: Trade[];
   logs: { t: number; level: string; msg: string }[];
-  onKill: () => void;
+  mtf: Mtf | null;
   onClose: (id: string) => void;
   onScan: () => void;
   scanning: boolean;
+}
+
+/* ---------------------------------------------------------------------------
+   Real-money banner — impossible to miss while LIVE is armed.
+   ------------------------------------------------------------------------- */
+export function LiveTradingBanner({ status }: { status: Status | null }) {
+  if (status?.mode !== 'live') return null;
+  const armed = !!status?.autoTrade;
+  return (
+    <div className={`feed-banner ${armed ? 'error' : 'warn'}`} data-reveal="true" role="alert">
+      <IconAlert style={{ width: 14, height: 14 }} />
+      <b>{armed ? 'LIVE MONEY — AUTO-TRADING ARMED' : 'LIVE MONEY MODE'}</b>
+      <span>
+        {armed
+          ? 'The engine is placing real orders on Binance mainnet. The Kill switch closes every bot position at market.'
+          : 'Real mainnet account connected; signals are logged but no order is sent until auto-trade is enabled.'}
+      </span>
+      <span className="chip">{status?.maxPositions ?? 8} max positions</span>
+    </div>
+  );
 }
 
 function MiniBar({ pct, tone = 'cyan' }: { pct: number; tone?: 'cyan' | 'green' | 'red' }) {
@@ -86,7 +106,7 @@ export default function Overview({
   positions,
   trades,
   logs,
-  onKill,
+  mtf,
   onClose,
   onScan,
   scanning,
@@ -120,6 +140,7 @@ export default function Overview({
   return (
     <>
       <FeedBanner status={status} />
+      <LiveTradingBanner status={status} />
 
       {/* ---------------- hero ---------------- */}
       <section className="panel hero" data-reveal="true">
@@ -293,6 +314,73 @@ export default function Overview({
 
       {/* ---------------- stats ---------------- */}
       <StatsPanel stats={stats} />
+
+      {/* ---------------- MTF trend + execution rules ---------------- */}
+      <div className="grid-2">
+        <MtfPanel mtf={mtf} symbol={status?.symbol} />
+        <Panel
+          title="Execution Rules"
+          sub="what the executor does on every signal"
+          icon={<IconShield />}
+          meta={<span className="chip cyan">{status?.mode ?? 'paper'}</span>}
+        >
+          <div className="mini-grid">
+            <div className="mini">
+              <div className="k">Entry</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                EMA11 × EMA34 confirmed cross
+              </div>
+            </div>
+            <div className="mini">
+              <div className="k">Stop loss</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                ATR(14) × 2 · reduce-only
+              </div>
+            </div>
+            <div className="mini">
+              <div className="k">TP1</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                1.5R → 33% + SL to BE
+              </div>
+            </div>
+            <div className="mini">
+              <div className="k">TP2</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                3R → 50% rest + SL to TP1
+              </div>
+            </div>
+            <div className="mini">
+              <div className="k">TP3</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                4.5R → full exit
+              </div>
+            </div>
+            <div className="mini">
+              <div className="k">Opposite signal</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                close &amp; reverse
+              </div>
+            </div>
+            <div className="mini">
+              <div className="k">Sizing</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                {status?.tradeSizePercent ?? 5}% × {status?.leverage ?? 10}x
+              </div>
+            </div>
+            <div className="mini">
+              <div className="k">Ownership</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                only bot trades · max {maxPos}
+              </div>
+            </div>
+          </div>
+          <div className="hint warn mt" style={{ display: 'flex', gap: 7 }}>
+            <IconAlert style={{ width: 13, height: 13, flex: 'none', marginTop: 2 }} />
+            Protective stops carry an explicit quantity and are reduce-only — a manual position on the same market is
+            never closed, adopted or counted.
+          </div>
+        </Panel>
+      </div>
 
       {/* ---------------- health + activity ---------------- */}
       <div className="grid-2">

@@ -11,11 +11,11 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { AnimatedNumber, Btn } from './motion/primitives';
 import { IconAlert, IconCheck, IconInfo, IconWaves } from './motion/Icons';
 import { apiGet, apiPost, fmt } from './api';
-import { subscribe } from './ws';
+import { reconnect, subscribe } from './ws';
 import { useGlassSheen, useLocalState, useMediaQuery, useReveal, useScrollProgress } from './hooks/motion';
 import { usePnlModel } from './pnl';
 import {
-  AccountView, PositionsPayload, ScanResult, ScreenerData, Settings,
+  AccountView, Mtf, PositionsPayload, ScanResult, Settings,
   SignalRecord, Stats, Status, Trade,
 } from './types';
 
@@ -40,8 +40,8 @@ export default function App() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [signals, setSignals] = useState<SignalRecord[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [screener, setScreener] = useState<ScreenerData | null>(null);
   const [scan, setScan] = useState<ScanResult | null>(null);
+  const [mtf, setMtf] = useState<Mtf | null>(null);
   const [account, setAccount] = useState<AccountView | null>(null);
   const [positions, setPositions] = useState<PositionsPayload | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -150,23 +150,25 @@ export default function App() {
   }, []);
 
   const loadScanner = useCallback(async () => {
-    const [scanResult, screenerResult] = await Promise.allSettled([
-      apiGet<ScanResult>('/scanner'),
-      apiGet<ScreenerData>('/screener'),
-    ]);
-    if (scanResult.status === 'fulfilled') {
+    try {
+      const next = await apiGet<ScanResult>('/scanner');
       setScan((previous) => {
-        const next = scanResult.value;
         if (previous && next.at < previous.at) return previous;
         return previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
       });
+    } catch {
+      /* keep the last good scan */
     }
-    if (screenerResult.status === 'fulfilled') {
-      setScreener((previous) =>
-        previous && JSON.stringify(previous) === JSON.stringify(screenerResult.value)
-          ? previous
-          : screenerResult.value,
+  }, []);
+
+  const loadMtf = useCallback(async () => {
+    try {
+      const next = await apiGet<Mtf>('/mtf');
+      setMtf((previous) =>
+        previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next,
       );
+    } catch {
+      /* keep the last good multi-timeframe snapshot */
     }
   }, []);
 
@@ -208,6 +210,7 @@ export default function App() {
     void refreshAll();
     void loadSignals();
     void loadScanner();
+    void loadMtf();
 
     const un = subscribe((e) => {
       if (e.type === '_open') {
@@ -215,6 +218,7 @@ export default function App() {
         void refreshAll();
         void loadSignals();
         void loadScanner();
+        void loadMtf();
         return;
       }
       if (e.type === '_close') {
@@ -274,6 +278,7 @@ export default function App() {
     const accountPoll = window.setInterval(loadAccount, 10000);
     const posPoll = window.setInterval(loadPositions, 10000);
     const scanPoll = window.setInterval(loadScanner, 30000);
+    const mtfPoll = window.setInterval(loadMtf, 60000);
     const slow = window.setInterval(() => {
       void loadStats();
       void loadTrades();
@@ -285,14 +290,22 @@ export default function App() {
       window.clearInterval(accountPoll);
       window.clearInterval(posPoll);
       window.clearInterval(scanPoll);
+      window.clearInterval(mtfPoll);
       window.clearInterval(slow);
     };
-  }, [refreshAll, loadStatus, loadAccount, loadPositions, loadScanner, loadSignals, loadStats, loadTrades, toast]);
+  }, [refreshAll, loadStatus, loadAccount, loadPositions, loadScanner, loadMtf, loadSignals, loadStats, loadTrades, toast]);
 
   /* ---------------- actions ---------------- */
   const onToggleAuto = async (v: boolean) => {
+    const live = status?.mode === 'live';
+    if (v && live) {
+      const ok = window.confirm(
+        'Enable auto-trading on the LIVE mainnet account?\n\nThe bot will place REAL orders with real funds using the 5%/10x ladder.',
+      );
+      if (!ok) return;
+    }
     try {
-      await apiPost('/autotrade', { enabled: v });
+      await apiPost('/autotrade', { enabled: v, confirmLive: live && v });
       await loadStatus();
       toast(v ? 'Auto-trading ENABLED — the bot will execute signals' : 'Auto-trading disabled', v ? 'win' : 'info');
     } catch (e: any) {
@@ -340,19 +353,16 @@ export default function App() {
   const headModel = usePnlModel(status, trades, account, 'all');
   const headTotal = account?.bot.netPnl ?? headModel.realized;
 
-  // The marquee is the scanner's volatility ranking (falls back to the legacy
-  // screener payload if a very old server is serving the UI).
+  // The marquee is the scanner's volatility ranking.
   const tickerRows = useMemo(
     () =>
-      scan?.rows?.length
-        ? scan.rows.map((r) => ({
-            symbol: r.symbol,
-            state: `${r.marketType} · ${r.trend}`,
-            volatility: r.volatility,
-            tradable: r.tradable,
-          }))
-        : screener?.rows ?? [],
-    [scan, screener],
+      (scan?.rows ?? []).map((r) => ({
+        symbol: r.symbol,
+        state: `${r.marketType} · ${r.trend}`,
+        volatility: r.volatility,
+        tradable: r.tradable,
+      })),
+    [scan],
   );
 
   return (
@@ -388,13 +398,12 @@ export default function App() {
                 <Overview
                   status={status}
                   stats={stats}
-                  screener={screener}
                   scan={scan}
                   account={account}
                   positions={positions}
                   trades={trades}
                   logs={logs}
-                  onKill={onKill}
+                  mtf={mtf}
                   onClose={onClosePosition}
                   onScan={onScanNow}
                   scanning={scanning}
@@ -424,6 +433,8 @@ export default function App() {
                     setSettings(s);
                     void loadStatus();
                     void loadScanner();
+                    void loadMtf();
+                    reconnect();
                     toast('Settings applied to the engine', 'win');
                   }}
                   onError={(m) => m && toast(m, 'error')}

@@ -1,38 +1,9 @@
-import { ScreenerData } from '../types';
-import { LiquidLoader, Panel } from '../motion/primitives';
-import { IconActivity, IconRadar } from '../motion/Icons';
+import { Panel } from '../motion/primitives';
+import { IconActivity } from '../motion/Icons';
 
 /* ============================================================================
-   Screener + activity panels — motion-heavy, zero charts.
+   Live activity panel — the engine's own log ring.
    ========================================================================== */
-
-export function ScreenerGrid({ data, loading }: { data: ScreenerData | null; loading?: boolean }) {
-  if (!data || !data.rows?.length) return <LiquidLoader label={loading ? 'Scanning symbols…' : 'No screener rows'} />;
-  return (
-    <div className="scr-grid">
-      {data.rows.map((r) => {
-        const bull = /bull|long/i.test(r.state);
-        const bear = /bear|short/i.test(r.state);
-        return (
-          <div key={r.symbol} className={`scr-item ${bull ? 'bull' : bear ? 'bear' : ''}`}>
-            <span className="scr-sym">{r.symbol}</span>
-            <span className={`scr-state ${bull ? 'bull' : bear ? 'bear' : 'neutral'}`}>
-              {bull ? 'Bullish' : bear ? 'Bearish' : r.state}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-export function ScreenerPanel({ data }: { data: ScreenerData | null }) {
-  return (
-    <Panel title="Screener" sub="5m EMA Cross" icon={<IconRadar />} meta={`${data?.rows?.length ?? 0} symbols`}>
-      <ScreenerGrid data={data} />
-    </Panel>
-  );
-}
 
 export function ActivityPanel({ logs }: { logs: { t: number; level: string; msg: string }[] }) {
   const rows = logs.slice(-140).reverse();
