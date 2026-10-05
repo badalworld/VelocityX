@@ -1,5 +1,5 @@
 import { PointerEvent as RPointerEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { motionOff, useAnimatedNumber, useElementSize, useFlash } from '../hooks/motion';
+import { motionOff, useAnimatedNumber, useElementSize } from '../hooks/motion';
 import { smoothPath, Pt, r } from './chart';
 import type { CSSProperties } from 'react';
 
@@ -15,7 +15,6 @@ export function AnimatedNumber({
   unit,
   className,
   duration = 950,
-  flash = true,
 }: {
   value: number | null | undefined;
   decimals?: number;
@@ -23,11 +22,9 @@ export function AnimatedNumber({
   unit?: string;
   className?: string;
   duration?: number;
-  flash?: boolean;
 }) {
   const target = Number.isFinite(value as number) ? (value as number) : 0;
   const animated = useAnimatedNumber(target, duration);
-  const state = useFlash(target, flash ? 900 : 0);
   const show = value == null || !Number.isFinite(value) ? null : animated;
 
   const text =
@@ -36,7 +33,7 @@ export function AnimatedNumber({
       : show.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
   return (
-    <span className={`tx-num ${className ?? ''} ${state ? `value-flash-${state}` : ''}`}>
+    <span className={`tx-num ${className ?? ''}`}>
       {signed && show != null && show > 0 ? '+' : ''}
       {text}
       {unit ? <span className="cur">{unit}</span> : null}

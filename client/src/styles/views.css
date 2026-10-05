@@ -1,5 +1,5 @@
 /* ============================================================================
-   Views — KPI pods, gauges, rings, ladder, feeds, chart stage, PNL dock
+   Views — KPI pods, gauges, rings, ladders, feeds and the P&L dock
    ========================================================================== */
 
 /* ---------------------------------------------------------------------------
@@ -858,88 +858,6 @@
 }
 
 /* ---------------------------------------------------------------------------
-   Chart stage (dedicated view)
-   ------------------------------------------------------------------------- */
-.chart-stage {
-  position: relative;
-  border-radius: var(--r-l);
-  overflow: hidden;
-  border: 1px solid var(--stroke-1);
-  background: rgba(6, 10, 20, 0.4);
-  box-shadow: var(--shadow-m), var(--inner-lit);
-}
-
-.chart-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-  background-color: rgba(8, 13, 25, 0.5);
-  backdrop-filter: blur(var(--blur-m));
-  -webkit-backdrop-filter: blur(var(--blur-m));
-}
-
-.chart-canvas {
-  width: 100%;
-  height: clamp(320px, 52vh, 560px);
-}
-
-.chart-canvas .tv-lightweight-charts {
-  border-radius: 0;
-}
-
-.chart-legend {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 9px 14px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-  font-size: 10.5px;
-  letter-spacing: 0.6px;
-  color: var(--muted);
-}
-
-.chart-legend .lg {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-variant-numeric: tabular-nums;
-}
-
-.chart-legend .lg i {
-  width: 9px;
-  height: 9px;
-  border-radius: 3px;
-  display: inline-block;
-  box-shadow: 0 0 8px currentColor;
-  background: currentColor;
-}
-
-.ribbon-strip {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 26px;
-}
-
-.ribbon-strip i {
-  width: 4px;
-  border-radius: var(--r-pill);
-  display: block;
-  animation: candle-breathe 3.4s var(--ease-inout) infinite;
-}
-
-.ribbon-strip i:nth-child(2n) {
-  animation-delay: 0.4s;
-}
-.ribbon-strip i:nth-child(3n) {
-  animation-delay: 0.8s;
-}
-
-/* ---------------------------------------------------------------------------
    History tables wrapper
    ------------------------------------------------------------------------- */
 .table-wrap {
@@ -1288,37 +1206,6 @@
   pointer-events: none;
 }
 
-
-/* ---------------------------------------------------------------------------
-   Chart fallback (chart library unavailable) + misc chart polish
-   ------------------------------------------------------------------------- */
-.chart-fallback {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 30px clamp(16px, 3vw, 40px);
-  color: var(--muted);
-  font-size: 12.5px;
-  min-height: 240px;
-  justify-content: center;
-}
-
-.chart-fallback strong {
-  color: var(--amber);
-  font-size: 14px;
-}
-
-.chart-fallback span {
-  max-width: 62ch;
-  line-height: 1.6;
-}
-
-/* the lightweight-charts canvas should blend into the glass surface */
-.chart-canvas table,
-.chart-canvas div {
-  font-family: inherit;
-}
 
 /* ---------------------------------------------------------------------------
    Binance realtime additions

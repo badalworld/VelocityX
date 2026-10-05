@@ -43,14 +43,6 @@ export const IconChart = (p: P) => (
   </Base>
 );
 
-export const IconCandles = (p: P) => (
-  <Base {...p}>
-    <path d="M7 4v3M7 17v3M17 3v4M17 16v5" />
-    <rect x="4.5" y="7" width="5" height="10" rx="1.4" />
-    <rect x="14.5" y="7" width="5" height="9" rx="1.4" />
-  </Base>
-);
-
 export const IconWallet = (p: P) => (
   <Base {...p}>
     <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H18a1 1 0 0 1 1 1v2" />

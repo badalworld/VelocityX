@@ -65,11 +65,13 @@ export function apiRouter(): express.Router {
       account: view
         ? {
             source: view.source,
+            mode: view.mode,
             equity: view.equity,
             walletBalance: view.walletBalance,
             unrealizedPnl: view.unrealizedPnl,
             availableBalance: view.availableBalance,
             initialMargin: view.initialMargin,
+            maintMargin: view.maintMargin,
             roiPct: view.roiPct,
             roiOnWalletPct: view.roiOnWalletPct,
             canTrade: view.canTrade,
@@ -78,6 +80,7 @@ export function apiRouter(): express.Router {
             external: view.external,
             at: view.at,
             errors: view.errors,
+            latencyMs: view.latencyMs,
           }
         : null,
       // Managed (bot-owned) positions — never external ones

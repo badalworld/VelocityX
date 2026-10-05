@@ -4,7 +4,6 @@ import PnlDock from './components/PnlDock';
 import Overview from './views/Overview';
 import ScannerView from './views/ScannerView';
 import PositionsView from './views/PositionsView';
-import ChartView from './views/ChartView';
 import TradesView from './views/TradesView';
 import SettingsView from './views/SettingsView';
 import LiquidBackground from './motion/LiquidBackground';
@@ -16,7 +15,7 @@ import { subscribe } from './ws';
 import { useGlassSheen, useLocalState, useMediaQuery, useReveal, useScrollProgress } from './hooks/motion';
 import { usePnlModel } from './pnl';
 import {
-  AccountView, ChartData, Mtf, PositionsPayload, ScanResult, ScreenerData, Settings,
+  AccountView, Mtf, PositionsPayload, ScanResult, ScreenerData, Settings,
   SignalRecord, Stats, Status, Trade,
 } from './types';
 
@@ -26,10 +25,17 @@ interface Toast {
   type: 'info' | 'error' | 'win';
 }
 
+const VIEW_LABELS: Record<ViewKey, string> = {
+  dash: 'Dashboard',
+  scanner: 'Scanner',
+  positions: 'Positions',
+  trades: 'Trades',
+  settings: 'Settings',
+};
+
 export default function App() {
   /* ---------------- data ---------------- */
   const [status, setStatus] = useState<Status | null>(null);
-  const [chart, setChart] = useState<ChartData | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [signals, setSignals] = useState<SignalRecord[]>([]);
@@ -43,12 +49,14 @@ export default function App() {
   const [logs, setLogs] = useState<{ t: number; level: string; msg: string }[]>([]);
   const [wsUp, setWsUp] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const lastCandle = useRef(0);
   const toastId = useRef(1);
+  const lastPriceAt = useRef(0);
 
   /* ---------------- ui shell state ---------------- */
   const [view, setView] = useState<ViewKey>('dash');
-  const [motionOn, setMotionOn] = useLocalState('vx.motion', true);
+  // A new preference key intentionally ignores the old motion-on default. The
+  // dashboard now starts calm; motion can still be enabled explicitly.
+  const [motionOn, setMotionOn] = useLocalState('vx.motion.v2', false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const isMobile = useMediaQuery('(max-width: 1080px)');
   const scrollProgress = useScrollProgress();
@@ -67,57 +75,138 @@ export default function App() {
   }, []);
 
   /* ---------------- loaders ---------------- */
+  const applyAccount = useCallback((next: AccountView) => {
+    setAccount((previous) => {
+      // `/status` contains a compact account snapshot while `/account` contains
+      // the complete one. Never let an older/partial poll erase newer fields —
+      // that used to make equity and margin values visibly jump every few seconds.
+      if (previous && (next.at ?? 0) < (previous.at ?? 0)) return previous;
+      const merged: AccountView = previous
+        ? {
+            ...previous,
+            ...next,
+            bot: { ...previous.bot, ...next.bot },
+            external: { ...previous.external, ...next.external },
+            income: next.income ?? previous.income,
+          }
+        : next;
+      return previous && JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
+    });
+  }, []);
+
   const loadStatus = useCallback(async () => {
+    const requestedAt = Date.now();
     try {
       const s = await apiGet<Status>('/status');
-      setStatus(s);
-      if (s.account) setAccount(s.account);
-      if (s.logs) setLogs(s.logs);
-      const lc = s.engine?.lastClosedCandleTime ?? 0;
-      if (lc && lc !== lastCandle.current) {
-        lastCandle.current = lc;
-        void apiGet<ChartData>('/chart').then(setChart).catch(() => {});
+      setStatus((previous) => {
+        if (previous && (s.now ?? 0) < (previous.now ?? 0)) return previous;
+        if (!previous || lastPriceAt.current <= requestedAt) return s;
+
+        // A price tick arrived while this HTTP request was in flight. Keep the
+        // newer tick instead of briefly painting the older REST price.
+        const liveById = new Map((previous.openTrades ?? []).map((trade) => [trade.id, trade]));
+        return {
+          ...s,
+          price: previous.price,
+          openTrades: (s.openTrades ?? []).map((trade) => {
+            const live = liveById.get(trade.id);
+            return live ? { ...trade, markPrice: live.markPrice, unrealized: live.unrealized } : trade;
+          }),
+        };
+      });
+      if (s.account) applyAccount(s.account);
+      if (s.logs) {
+        setLogs((previous) => {
+          const byKey = new Map<string, { t: number; level: string; msg: string }>();
+          for (const line of [...previous, ...s.logs]) {
+            byKey.set(`${line.t}:${line.level}:${line.msg}`, line);
+          }
+          const merged = [...byKey.values()].sort((a, b) => a.t - b.t).slice(-300);
+          return JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
+        });
       }
     } catch {
       /* server briefly unreachable */
     }
+  }, [applyAccount]);
+
+  const loadAccount = useCallback(async () => {
+    try {
+      applyAccount(await apiGet<AccountView>('/account'));
+    } catch {
+      /* keep the last good account snapshot */
+    }
+  }, [applyAccount]);
+
+  const loadPositions = useCallback(async () => {
+    try {
+      const next = await apiGet<PositionsPayload>('/positions');
+      setPositions((previous) => {
+        if (previous && next.at < previous.at) return previous;
+        return previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+      });
+    } catch {
+      /* keep the last good positions snapshot */
+    }
   }, []);
 
-  const loadAccount = useCallback(() => {
-    void apiGet<AccountView>('/account').then(setAccount).catch(() => {});
-  }, []);
-  const loadPositions = useCallback(() => {
-    void apiGet<PositionsPayload>('/positions').then(setPositions).catch(() => {});
-  }, []);
-  const loadScanner = useCallback(() => {
-    void apiGet<ScanResult>('/scanner').then(setScan).catch(() => {});
-    void apiGet<ScreenerData>('/screener').then(setScreener).catch(() => {});
-  }, []);
-  const loadChart = useCallback(() => {
-    void apiGet<ChartData>('/chart').then(setChart).catch(() => {});
-  }, []);
-  const loadTrades = useCallback(() => {
-    void apiGet<Trade[]>('/trades').then(setTrades).catch(() => {});
-  }, []);
-  const loadSignals = useCallback(() => {
-    void apiGet<SignalRecord[]>('/signals').then(setSignals).catch(() => {});
-  }, []);
-  const loadStats = useCallback(() => {
-    void apiGet<Stats>('/stats').then(setStats).catch(() => {});
+  const loadScanner = useCallback(async () => {
+    const [scanResult, screenerResult] = await Promise.allSettled([
+      apiGet<ScanResult>('/scanner'),
+      apiGet<ScreenerData>('/screener'),
+    ]);
+    if (scanResult.status === 'fulfilled') {
+      setScan((previous) => {
+        const next = scanResult.value;
+        if (previous && next.at < previous.at) return previous;
+        return previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+      });
+    }
+    if (screenerResult.status === 'fulfilled') {
+      setScreener((previous) =>
+        previous && JSON.stringify(previous) === JSON.stringify(screenerResult.value)
+          ? previous
+          : screenerResult.value,
+      );
+    }
   }, []);
 
-  const refreshAll = useCallback(() => {
-    void loadStatus();
-    void loadAccount();
-    void loadPositions();
-    void loadTrades();
-    void loadStats();
+  const loadTrades = useCallback(async () => {
+    try {
+      const next = await apiGet<Trade[]>('/trades');
+      setTrades((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+    } catch {
+      /* keep the last good trade log */
+    }
+  }, []);
+
+  const loadSignals = useCallback(async () => {
+    try {
+      const next = await apiGet<SignalRecord[]>('/signals');
+      setSignals((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+    } catch {
+      /* keep the last good signal log */
+    }
+  }, []);
+
+  const loadStats = useCallback(async () => {
+    try {
+      const next = await apiGet<Stats>('/stats');
+      setStats((previous) =>
+        previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next,
+      );
+    } catch {
+      /* keep the last good statistics snapshot */
+    }
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    await Promise.all([loadStatus(), loadAccount(), loadPositions(), loadTrades(), loadStats()]);
   }, [loadStatus, loadAccount, loadPositions, loadTrades, loadStats]);
 
   useEffect(() => {
     void apiGet<Settings>('/settings').then(setSettings).catch(() => {});
-    refreshAll();
-    void loadChart();
+    void refreshAll();
     void loadSignals();
     void loadScanner();
     void apiGet<Mtf>('/mtf').then(setMtf).catch(() => {});
@@ -125,8 +214,7 @@ export default function App() {
     const un = subscribe((e) => {
       if (e.type === '_open') {
         setWsUp(true);
-        refreshAll();
-        void loadChart();
+        void refreshAll();
         void loadSignals();
         void loadScanner();
         return;
@@ -138,6 +226,7 @@ export default function App() {
       const d = e.data;
       switch (e.type) {
         case 'price': {
+          lastPriceAt.current = Date.now();
           setStatus((prev) => {
             if (!prev) return prev;
             const openTrades = (prev.openTrades ?? []).map((t) =>
@@ -164,12 +253,10 @@ export default function App() {
           break;
         case 'signal':
           void loadSignals();
-          void loadChart();
           void loadStatus();
           break;
         case 'trade':
-          refreshAll();
-          void loadChart();
+          void refreshAll();
           void loadScanner();
           break;
         case 'log':
@@ -203,7 +290,7 @@ export default function App() {
       window.clearInterval(scanPoll);
       window.clearInterval(slow);
     };
-  }, [refreshAll, loadStatus, loadAccount, loadPositions, loadScanner, loadChart, loadSignals, loadStats, loadTrades, toast]);
+  }, [refreshAll, loadStatus, loadAccount, loadPositions, loadScanner, loadSignals, loadStats, loadTrades, toast]);
 
   /* ---------------- actions ---------------- */
   const onToggleAuto = async (v: boolean) => {
@@ -221,7 +308,7 @@ export default function App() {
     if (!window.confirm(`Market-close all ${n} bot position(s)? External positions are never touched.`)) return;
     try {
       await apiPost('/kill');
-      await Promise.all([loadStatus(), loadAccount(), loadPositions(), loadTrades(), loadStats(), loadChart()]);
+      await Promise.all([loadStatus(), loadAccount(), loadPositions(), loadTrades(), loadStats()]);
       toast('Bot positions closed at market', 'info');
     } catch (e: any) {
       toast(e.message, 'error');
@@ -253,10 +340,8 @@ export default function App() {
     }
   };
 
-  const openCount = status?.slots?.used ?? 0;
   const headModel = usePnlModel(status, trades, account, 'all');
-  const headTotal = (account?.bot.netPnl ?? headModel.realized) + 0;
-  void openCount;
+  const headTotal = account?.bot.netPnl ?? headModel.realized;
 
   // The marquee is the scanner's volatility ranking (falls back to the legacy
   // screener payload if a very old server is serving the UI).
@@ -282,9 +367,8 @@ export default function App() {
       <div className="topbar-wrap">
         <Topbar
           status={status}
-          wsUp={wsUp}
           onKill={onKill}
-          onOpenSheet={isMobile ? () => setSheetOpen(true) : undefined}
+          onOpenPnl={isMobile ? () => setSheetOpen(true) : undefined}
         />
         <NavRow
           view={view}
@@ -302,7 +386,7 @@ export default function App() {
       <div className="shell">
         <main className="content">
           <div className="view view-enter" key={view}>
-            <ErrorBoundary label={view === 'chart' ? 'Chart module' : view === 'settings' ? 'Settings module' : 'Dashboard module'}>
+            <ErrorBoundary label={`${VIEW_LABELS[view]} module`}>
               {view === 'dash' && (
                 <Overview
                   status={status}
@@ -333,9 +417,6 @@ export default function App() {
                   onKill={onKill}
                 />
               )}
-              {view === 'chart' && (
-                <ChartView status={status} trades={trades} signals={signals} logs={logs} onKill={onKill} />
-              )}
               {view === 'trades' && (
                 <TradesView trades={trades} signals={signals} logs={logs} symbol={status?.symbol ?? 'BTCUSDT'} />
               )}
@@ -358,19 +439,22 @@ export default function App() {
           </div>
         </main>
 
-        {/* ---------------- fixed P&L rail ---------------- */}
+        {/* P&L stays available; only the BTCUSDT candlestick chart was removed. */}
         <aside className="rail" data-open={isMobile ? (sheetOpen ? 'true' : 'false') : 'true'}>
           <div className="rail-inner panel glass-frost">
             <div
               className="rail-head"
-              onClick={isMobile ? () => setSheetOpen((v) => !v) : undefined}
+              onClick={isMobile ? () => setSheetOpen((open) => !open) : undefined}
               role={isMobile ? 'button' : undefined}
               aria-expanded={isMobile ? sheetOpen : undefined}
               tabIndex={isMobile ? 0 : undefined}
               onKeyDown={
                 isMobile
-                  ? (e) => {
-                      if (e.key === 'Enter' || e.key === ' ') setSheetOpen((v) => !v);
+                  ? (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setSheetOpen((open) => !open);
+                      }
                     }
                   : undefined
               }
@@ -398,7 +482,7 @@ export default function App() {
               </span>
             </div>
             <div className="rail-body">
-              <ErrorBoundary label="P&L dock" compact>
+              <ErrorBoundary label="P&L dock">
                 <PnlDock account={account} trades={trades} />
               </ErrorBoundary>
             </div>
@@ -435,9 +519,8 @@ export default function App() {
         ))}
       </div>
 
-      {/* mobile helper: account equity pill */}
       {isMobile && account && (
-        <Btn className="mobile-equity" size="sm" onClick={() => setSheetOpen(true)} title="Binance equity">
+        <Btn className="mobile-equity" size="sm" onClick={() => setSheetOpen(true)} title="Open P&L chart">
           <AnimatedNumber value={account.equity ?? 0} decimals={2} /> USDT
         </Btn>
       )}
