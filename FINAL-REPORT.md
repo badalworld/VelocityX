@@ -84,8 +84,8 @@ All commands executed on this tree:
 
 ## 6. Dead-code audit
 
-- **Server:** `offline.ts` (263 lines) deleted with all its hooks; paper-mode branches removed from `trader.ts` (−387/+… net deletion across the file), `account.ts`, `store.ts`, `settings.ts`, `events`/feed helpers. Every remaining export is referenced (server + scripts cross-checked).
-- **Client:** no unused exports/locals under `--noUnusedLocals --noUnusedParameters`; CSS scan found zero unreferenced selectors after removing the dead `.badge-mode.warn` rule (two false positives were data-URI/comment matches).
+- **Server:** `offline.ts` (263 lines) deleted with all its hooks; paper-mode branches removed from `trader.ts` (net −387 lines across the file), `account.ts`, `store.ts`, `settings.ts` and the feed helpers. A symbol scan over `server/src`, `client/src` and all scripts found **zero orphan definitions**: every export is consumed, the few with no other-module consumer are used inside their own module (type/constant surfaces), and no orphan module remains.
+- **Client:** no unused locals under `--noUnusedLocals --noUnusedParameters`; a selector scan over all six stylesheets found **zero unreferenced class tokens** after removing the dead `.badge-mode.warn` rule.
 - **Scripts:** `e2e-paper.js` deleted; `verify-*.js` updated so none of them rely on a simulated feed.
 - **Repo hygiene:** no `TODO`/`FIXME`/`debugger`/stray `console.debug` in `server/src`, `client/src` or the scripts.
 
