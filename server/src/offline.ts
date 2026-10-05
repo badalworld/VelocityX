@@ -87,7 +87,7 @@ class OfflineFeed {
       const rand = mulberry32(hash(key));
       s = {
         symbol, interval, stepMs, candles: [], rand,
-        drift: (rand() < 0.5 ? -1 : 1) * (0.0008 + rand() * 0.0022),
+        drift: (rand() < 0.5 ? -1 : 1) * (0.0020 + rand() * 0.0045),
         barsLeft: 4 + Math.floor(rand() * 8),
         lastPrice: this.base(symbol),
       };
@@ -109,12 +109,12 @@ class OfflineFeed {
       const open = price;
       if (s.barsLeft <= 0) {
         s.barsLeft = 4 + Math.floor(initRand() * 8);
-        s.drift = (initRand() < 0.5 ? -1 : 1) * (0.0008 + initRand() * 0.0022);
+        s.drift = (initRand() < 0.5 ? -1 : 1) * (0.0020 + initRand() * 0.0045);
       }
       s.barsLeft--;
-      const noise = (initRand() - 0.5) * 0.004;
+      const noise = (initRand() - 0.5) * 0.009;
       const close = open * (1 + s.drift + noise);
-      const wick = open * (0.0008 + initRand() * 0.0025);
+      const wick = open * (0.0018 + initRand() * 0.0055);
       const high = Math.max(open, close) + wick * initRand();
       const low = Math.min(open, close) - wick * initRand();
       s.candles.push({
@@ -141,15 +141,15 @@ class OfflineFeed {
       const rand = s.rand;
       if (s.barsLeft <= 0) {
         s.barsLeft = 4 + Math.floor(rand() * 8);
-        s.drift = (rand() < 0.5 ? -1 : 1) * (0.0008 + rand() * 0.0022);
+        s.drift = (rand() < 0.5 ? -1 : 1) * (0.0020 + rand() * 0.0045);
       }
       s.barsLeft--;
       let price = s.lastPrice;
       for (let i = openIdx + 1; i <= idx; i++) {
         const open = price;
-        const noise = (rand() - 0.5) * 0.003;
+        const noise = (rand() - 0.5) * 0.0075;
         const close = open * (1 + s.drift + noise);
-        const wick = open * 0.0012;
+        const wick = open * 0.0026;
         s.candles.push({
           time: i * s.stepMs,
           closeTime: i * s.stepMs + s.stepMs - 1,
@@ -189,6 +189,55 @@ class OfflineFeed {
     const s = this.getSeries(symbol, '5m');
     this.tick(symbol, '5m');
     return s.lastPrice;
+  }
+
+  /** Synthetic perpetual universe so the scanner still ranks in offline demo mode. */
+  universe(): {
+    symbol: string; baseAsset: string; quoteAsset: string; contractType: string; status: string;
+    pricePrecision: number; quantityPrecision: number; stepSize: number; tickSize: number; minQty: number; minNotional: number;
+  }[] {
+    return Object.keys(BASE_PRICES).map((symbol) => {
+      const info = this.exchangeInfo(symbol);
+      return {
+        symbol,
+        baseAsset: symbol.replace(/USDT$/, ''),
+        quoteAsset: 'USDT',
+        contractType: 'PERPETUAL',
+        status: 'TRADING',
+        pricePrecision: 2,
+        quantityPrecision: 3,
+        stepSize: info.stepSize,
+        tickSize: info.tickSize,
+        minQty: info.minQty,
+        minNotional: info.minNotional,
+      };
+    });
+  }
+
+  /** Synthetic 24h tickers so the scanner still ranks in offline demo mode. */
+  tickers(): {
+    symbol: string; lastPrice: number; priceChangePercent: number;
+    highPrice: number; lowPrice: number; quoteVolume: number; volume: number;
+  }[] {
+    return Object.keys(BASE_PRICES).map((symbol) => {
+      const s = this.getSeries(symbol, '5m');
+      this.tick(symbol, '5m');
+      const candles = s.candles.slice(-288); // 24h of 5m bars
+      const last = s.lastPrice;
+      const high = Math.max(last, ...candles.map((c) => c.high));
+      const low = Math.min(last, ...candles.map((c) => c.low));
+      const open24 = candles[0]?.open ?? last;
+      const volume = candles.reduce((a, c) => a + c.volume, 0);
+      return {
+        symbol,
+        lastPrice: last,
+        priceChangePercent: open24 > 0 ? ((last - open24) / open24) * 100 : 0,
+        highPrice: high,
+        lowPrice: low,
+        quoteVolume: last * volume * 120,
+        volume: volume * 120,
+      };
+    });
   }
 
   exchangeInfo(symbol: string) {

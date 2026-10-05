@@ -42,14 +42,23 @@ export default function SettingsView({
               </div>
             </div>
             <div className="mini">
-              <div className="k">Balance source</div>
-              <div className="v">{status?.balance?.source ?? '—'}</div>
+              <div className="k">Account source</div>
+              <div className="v">{status?.account?.source === 'binance' ? 'Binance' : 'paper sim'}</div>
+            </div>
+            <div className="mini">
+              <div className="k">Max positions</div>
+              <div className="v">{status?.maxPositions ?? 8}</div>
+            </div>
+            <div className="mini">
+              <div className="k">Scanner</div>
+              <div className="v">{status?.autoScan ? 'auto' : 'manual'}</div>
             </div>
           </div>
           <div className="hint warn mt" style={{ display: 'flex', gap: 7 }}>
             <IconAlert style={{ width: 14, height: 14, flex: 'none', marginTop: 2 }} />
-            The bot never touches manual positions — it only manages trades it opened itself. Keep leverage and size
-            conservative until the paper log proves the edge.
+            The bot never touches manual or external positions — it only manages trades it opened itself (max 8), and
+            their profit/loss is never counted in bot statistics. Equity, PNL, ROI, fees and funding always come from
+            Binance REST/WS; there is nothing to type in by hand.
           </div>
         </Panel>
 

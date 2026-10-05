@@ -60,6 +60,61 @@ export function atr(candles: Candle[], length: number): number[] {
   return out;
 }
 
+/**
+ * Wilder ADX(length) — trend-strength gate used by the market scanner so the
+ * bot only trades *trending* markets (chop/range/pegged pairs are rejected).
+ * Returns an array aligned with the candles; values before 2×length are NaN.
+ */
+export function adx(candles: Candle[], length = 14): number[] {
+  const n = candles.length;
+  const out: number[] = new Array(n).fill(NaN);
+  if (length <= 0 || n < length * 2 + 2) return out;
+
+  const tr = trueRange(candles);
+  const plusDM = new Array<number>(n).fill(0);
+  const minusDM = new Array<number>(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    const up = candles[i].high - candles[i - 1].high;
+    const dn = candles[i - 1].low - candles[i].low;
+    plusDM[i] = up > dn && up > 0 ? up : 0;
+    minusDM[i] = dn > up && dn > 0 ? dn : 0;
+  }
+
+  // Wilder smoothing of TR / +DM / -DM
+  let trS = 0, pS = 0, mS = 0;
+  for (let i = 1; i <= length; i++) {
+    trS += tr[i];
+    pS += plusDM[i];
+    mS += minusDM[i];
+  }
+  const dx: number[] = [];
+  for (let i = length + 1; i < n; i++) {
+    trS = trS - trS / length + tr[i];
+    pS = pS - pS / length + plusDM[i];
+    mS = mS - mS / length + minusDM[i];
+    const pdi = trS > 0 ? (pS / trS) * 100 : 0;
+    const mdi = trS > 0 ? (mS / trS) * 100 : 0;
+    const sum = pdi + mdi;
+    dx.push(sum > 0 ? (Math.abs(pdi - mdi) / sum) * 100 : 0);
+  }
+  if (dx.length < length) return out;
+  let val = 0;
+  for (let i = 0; i < length; i++) val += dx[i];
+  val /= length;
+  out[2 * length] = val;
+  for (let k = length; k < dx.length; k++) {
+    val = (val * (length - 1) + dx[k]) / length;
+    out[length + 1 + k] = val;
+  }
+  return out;
+}
+
+/** Last finite value of a series (or NaN). */
+export function lastFinite(series: number[]): number {
+  for (let i = series.length - 1; i >= 0; i--) if (Number.isFinite(series[i])) return series[i];
+  return NaN;
+}
+
 export type SignalSide = 'LONG' | 'SHORT';
 
 /**

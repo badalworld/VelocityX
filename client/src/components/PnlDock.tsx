@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Status, Trade } from '../types';
+import { AccountView, Trade } from '../types';
 import { PNL_RANGES, PnlRangeKey, usePnlModel } from '../pnl';
 import { useLocalState } from '../hooks/motion';
 import { AnimatedNumber, Segmented } from '../motion/primitives';
@@ -13,9 +13,9 @@ import { fmt } from '../api';
    sheet on tablet/phone (collapsing to a live mini-readout).
    ========================================================================== */
 
-export default function PnlDock({ status, trades }: { status: Status | null; trades: Trade[] }) {
+export default function PnlDock({ account, trades }: { account: AccountView | null; trades: Trade[] }) {
   const [range, setRange] = useLocalState<PnlRangeKey>('vx.pnl.range', '7d');
-  const model = usePnlModel(status, trades, range);
+  const model = usePnlModel(null, trades, account, range);
 
   const rangeLabel = useMemo(
     () => PNL_RANGES.find((r) => r.key === range)?.label ?? '7D',
@@ -134,7 +134,7 @@ export default function PnlDock({ status, trades }: { status: Status | null; tra
 
       <div className="hint" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <IconScale style={{ width: 12, height: 12, color: 'var(--cyan)' }} />
-        Equity = realised P&amp;L ladder + live unrealised on the open position · {rangeLabel} window
+        Equity = Binance account equity · realised ladder + live unrealised on bot positions only · {rangeLabel} window
       </div>
     </div>
   );

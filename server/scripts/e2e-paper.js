@@ -6,9 +6,18 @@
  *   4. SHORT → kill switch                                                     [KILL]
  * Also validates paper balance accounting and the stats table output.
  */
+// Paper-mode harness: allow the labelled offline demo feed so exchange
+// metadata is available when this sandbox has no Binance egress.
+process.env.VX_OFFLINE_DEMO = process.env.VX_OFFLINE_DEMO || '1';
+// Hermetic run — never touch the operator's journal.
+const _fs = require('fs');
+const _os = require('os');
+const _path = require('path');
+process.env.VX_DATA_DIR = _fs.mkdtempSync(_path.join(_os.tmpdir(), 'vx-e2e-'));
+
 const { loadSettings, updateSettings, getSettings } = require('../dist/settings');
 const { trader } = require('../dist/trader');
-const { saveSignal, allTrades, activeTrade, getPaperBalance, setPaperBalance } = require('../dist/store');
+const { saveSignal, allTrades, activeTrade, openTrades, getPaperBalance, setPaperBalance } = require('../dist/store');
 const { computeStats } = require('../dist/stats');
 
 let failures = 0;
@@ -111,9 +120,36 @@ async function main() {
   assert(!activeTrade(), 'auto-trade OFF → signal logged but no entry');
   assert(require('../dist/store').allSignals().length === sigCountBefore + 1, 'signal still recorded once');
 
+  // ---------- Multi-position cap (max 8, one per symbol) ----------
+  updateSettings({ autoTrade: true, autoScan: false });
+  const syms = ['ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'LINKUSDT', 'AVAXUSDT'];
+  for (const sym of syms) {
+    const base = 100;
+    const sig = mkSignal('LONG', base, 0.5);
+    sig.record = { ...sig.record, symbol: sym };
+    sig.symbol = sym;
+    trader.onPrice(base, sym); // live price for that symbol (multi-symbol book)
+    await trader.onSignal(sig);
+    await settle();
+  }
+  assert(openTrades().length === 8, `8 concurrent positions open (${openTrades().length})`);
+  assert(openTrades().every((t) => t.botOwned === true), 'every open trade is bot-owned (never adopted)');
+  const extraSig = mkSignal('LONG', 100, 0.5);
+  extraSig.record = { ...extraSig.record, symbol: 'TRXUSDT' };
+  extraSig.symbol = 'TRXUSDT';
+  await trader.onSignal(extraSig); await settle();
+  assert(openTrades().length === 8, 'a 9th signal is rejected — hard cap of 8 positions');
+  assert(!openTrades().some((t) => t.symbol === 'TRXUSDT'), 'no position opened beyond the cap');
+
+  // ---------- Kill switch closes every bot position, nothing else ----------
+  for (const sym of syms) trader.onPrice(100, sym);
+  const killed = await trader.kill(); await settle();
+  assert(killed === 8 && openTrades().length === 0, `kill closed all 8 bot positions (${killed})`);
+
   // ---------- Stats ----------
   const st = computeStats();
-  assert(st.totalSignals === 5, `5 signals recorded (${st.totalSignals})`);  assert(st.totalClosedTrades === 4, `4 closed trades (${st.totalClosedTrades})`);
+  assert(st.totalSignals === 14, `14 signals recorded (${st.totalSignals})`);
+  assert(st.totalClosedTrades === 12, `12 closed trades (${st.totalClosedTrades})`);
   assert(st.winCount === 1 && st.lossCount === 1, `1 win / 1 loss (ignores REVERSE/KILL) → WR ${st.overallWinRate.toFixed(1)}%`);
   assert(Math.abs(st.expectancy - (0.5 * 1.5 - 0.5)) < 1e-9, `expectancy = ${st.expectancy}R at 50% WR`);
   assert(st.netPnl > -5 && st.netPnl < 10, `net PnL sanity: ${st.netPnl.toFixed(4)} USDT`);

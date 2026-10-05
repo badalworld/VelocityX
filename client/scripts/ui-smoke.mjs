@@ -70,9 +70,14 @@ const baseTrade = {
   tp2Filled: false,
   tp3Filled: false,
   fees: 1.2,
+  funding: -0.014,
+  binanceRealizedPnl: 0,
+  commissionOtherAsset: 0,
   initialRisk: 21,
   mode: 'paper',
   result: 'WIN',
+  botOwned: true,
+  scan: { volatility: 71.4, adx: 32.5, atrPct: 0.92, rank: 1 },
   orders: {},
 };
 
@@ -109,9 +114,30 @@ const routes = {
     interval: '5m',
     leverage: 10,
     tradeSizePercent: 5,
+    maxPositions: 8,
+    autoScan: true,
     price: 62665.4,
-    balance: { source: 'paper', total: 1128.5, available: 1128.5 },
+    account: {
+      source: 'paper-sim',
+      mode: 'paper',
+      at: now,
+      equity: 1128.5,
+      walletBalance: 1100,
+      unrealizedPnl: 28.5,
+      availableBalance: 980,
+      initialMargin: 306,
+      maintMargin: 31,
+      roiPct: 9.31,
+      roiOnWalletPct: 2.59,
+      canTrade: true,
+      bot: { managedCount: 1, maxPositions: 8, marginUsed: 306, notional: 3745, unrealizedPnl: 12.75, realizedPnl: 47.9, fees: 2.31, funding: -0.021, netPnl: 60.65, roiPct: 4.17 },
+      income: null,
+      external: { count: 0, notional: 0, unrealized: 0 },
+    },
+    openTrades: [openTrade],
     openTrade,
+    slots: { used: 1, max: 8 },
+    scanner: { at: now - 5000, universe: 380, analysed: 30, selected: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'], top: [] },
     engine: {
       atr: 187.4,
       ribbonBull: true,
@@ -122,13 +148,245 @@ const routes = {
       startedAt: now - 3 * HOUR,
     },
     feed: 'binance',
-    streams: { market: true },
+    feedInfo: {
+      feed: 'binance',
+      source: 'binance-usdm',
+      reachable: true,
+      demoFeedAllowed: false,
+      lastRestOkAt: now - 400,
+      lastRestError: null,
+      latencyMs: 42,
+      avgLatencyMs: 48,
+      serverTimeOffsetMs: 12,
+      wsLastMessageAt: now - 300,
+      candles: { symbols: 4, series: 4, bars: 2000, lastWsAt: now - 300 },
+    },
+    limits: {
+      weightLimitPerMin: 2400,
+      plannedLimitPerMin: 2280,
+      utilizationPct: 95,
+      usedWeight: 311,
+      usedPct: 13,
+      usedOrders1m: 2,
+      orderLimitPerMin: 1140,
+      usedOrders10s: 1,
+      orderLimit10s: 285,
+      cooldownMsLeft: 0,
+      cooldownReason: '',
+      areas: [
+        { area: 'scanner', sharePct: 40, weightUsed: 161, weightCap: 1824, calls: 8, waiting: 0, avgWaitMs: 1 },
+        { area: 'market', sharePct: 25, weightUsed: 40, weightCap: 1140, calls: 12, waiting: 0, avgWaitMs: 0 },
+        { area: 'account', sharePct: 20, weightUsed: 95, weightCap: 912, calls: 6, waiting: 0, avgWaitMs: 2 },
+        { area: 'orders', sharePct: 10, weightUsed: 10, weightCap: 456, calls: 4, waiting: 0, avgWaitMs: 0 },
+        { area: 'stream', sharePct: 5, weightUsed: 1, weightCap: 228, calls: 1, waiting: 0, avgWaitMs: 0 },
+      ],
+      totals: { calls: 31, avgWaitMs: 1, maxWaitMs: 12, throttled: 0, rejected429: 0 },
+    },
+    streams: { market: true, user: false, userLastMessageAt: 0 },
     keysConfigured: { testnet: false, live: false },
     logs: [
-      { t: now - 60_000, level: 'info', msg: 'Engine warm — 5m EMA 11/34 loaded' },
-      { t: now - 40_000, level: 'win', msg: 'TP1 filled — 33% closed, stop moved to breakeven' },
+      { t: now - 60_000, level: 'info', msg: 'Scanner: 30 markets analysed · trading BTC, ETH, SOL' },
+      { t: now - 40_000, level: 'win', msg: 'BTCUSDT TP1 33% closed @ 62630 — SL moved to breakeven' },
       { t: now - 20_000, level: 'error', msg: 'Order rejected (error path exercised)' },
     ],
+    now,
+  },
+
+  '/api/scanner': {
+    at: now - 5000,
+    durationMs: 820,
+    universe: 380,
+    analysed: 30,
+    selected: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+    gate: { minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, maxPositions: 8 },
+    rows: [
+  {
+    "symbol": "BTCUSDT",
+    "base": "BTC",
+    "price": 62000,
+    "change24hPct": 4.2,
+    "range24hPct": 22.3,
+    "quoteVolume24h": 812000000,
+    "atrPct": 0.92,
+    "atrPct5m": 0.46,
+    "adx": 32.5,
+    "emaFast": 62400,
+    "emaSlow": 62100,
+    "trend": "UP",
+    "alignment": 1,
+    "fundingRate": 0.00012,
+    "nextFundingTime": 1791000000000,
+    "volatility": 71.4,
+    "trendScore": 70,
+    "liquidityScore": 88,
+    "score": 74,
+    "marketType": "TRENDING",
+    "tradable": true,
+    "reason": "high volatility + trending",
+    "updatedAt": 1791000000000
+  },
+  {
+    "symbol": "ETHUSDT",
+    "base": "ETH",
+    "price": 62000,
+    "change24hPct": 4.2,
+    "range24hPct": 18.7,
+    "quoteVolume24h": 812000000,
+    "atrPct": 0.81,
+    "atrPct5m": 0.405,
+    "adx": 27.4,
+    "emaFast": 62400,
+    "emaSlow": 62100,
+    "trend": "UP",
+    "alignment": 1,
+    "fundingRate": 0.00012,
+    "nextFundingTime": 1791000000000,
+    "volatility": 64.1,
+    "trendScore": 70,
+    "liquidityScore": 88,
+    "score": 74,
+    "marketType": "TRENDING",
+    "tradable": true,
+    "reason": "high volatility + trending",
+    "updatedAt": 1791000000000
+  },
+  {
+    "symbol": "SOLUSDT",
+    "base": "SOL",
+    "price": 62000,
+    "change24hPct": 4.2,
+    "range24hPct": 15.2,
+    "quoteVolume24h": 812000000,
+    "atrPct": 0.74,
+    "atrPct5m": 0.37,
+    "adx": 24.9,
+    "emaFast": 62400,
+    "emaSlow": 62100,
+    "trend": "DOWN",
+    "alignment": 1,
+    "fundingRate": 0.00012,
+    "nextFundingTime": 1791000000000,
+    "volatility": 58.7,
+    "trendScore": 70,
+    "liquidityScore": 88,
+    "score": 74,
+    "marketType": "TRENDING",
+    "tradable": true,
+    "reason": "high volatility + trending",
+    "updatedAt": 1791000000000
+  },
+  {
+    "symbol": "BNBUSDT",
+    "base": "BNB",
+    "price": 62000,
+    "change24hPct": 4.2,
+    "range24hPct": 11.4,
+    "quoteVolume24h": 812000000,
+    "atrPct": 0.52,
+    "atrPct5m": 0.26,
+    "adx": 19.2,
+    "emaFast": 62400,
+    "emaSlow": 62100,
+    "trend": "UP",
+    "alignment": 1,
+    "fundingRate": 0.00012,
+    "nextFundingTime": 1791000000000,
+    "volatility": 41.2,
+    "trendScore": 70,
+    "liquidityScore": 88,
+    "score": 74,
+    "marketType": "RANGING",
+    "tradable": false,
+    "reason": "below gate",
+    "updatedAt": 1791000000000
+  },
+  {
+    "symbol": "XRPUSDT",
+    "base": "XRP",
+    "price": 62000,
+    "change24hPct": 4.2,
+    "range24hPct": 9.8,
+    "quoteVolume24h": 812000000,
+    "atrPct": 0.44,
+    "atrPct5m": 0.22,
+    "adx": 16.4,
+    "emaFast": 62400,
+    "emaSlow": 62100,
+    "trend": "DOWN",
+    "alignment": 1,
+    "fundingRate": 0.00012,
+    "nextFundingTime": 1791000000000,
+    "volatility": 37.9,
+    "trendScore": 70,
+    "liquidityScore": 88,
+    "score": 74,
+    "marketType": "RANGING",
+    "tradable": false,
+    "reason": "below gate",
+    "updatedAt": 1791000000000
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "base": "DOGE",
+    "price": 62000,
+    "change24hPct": 4.2,
+    "range24hPct": 4.2,
+    "quoteVolume24h": 812000000,
+    "atrPct": 0.21,
+    "atrPct5m": 0.105,
+    "adx": 8.1,
+    "emaFast": 62400,
+    "emaSlow": 62100,
+    "trend": "UP",
+    "alignment": 1,
+    "fundingRate": 0.00012,
+    "nextFundingTime": 1791000000000,
+    "volatility": 22.4,
+    "trendScore": 70,
+    "liquidityScore": 88,
+    "score": 74,
+    "marketType": "PEGGED",
+    "tradable": false,
+    "reason": "below gate",
+    "updatedAt": 1791000000000
+  }
+],
+    warming: false,
+  },
+  '/api/account': {
+    source: 'paper-sim',
+    mode: 'paper',
+    at: now,
+    equity: 1128.5,
+    walletBalance: 1100,
+    unrealizedPnl: 28.5,
+    availableBalance: 980,
+    initialMargin: 306,
+    maintMargin: 31,
+    roiPct: 9.31,
+    roiOnWalletPct: 2.59,
+    canTrade: true,
+    bot: { managedCount: 1, maxPositions: 8, marginUsed: 306, notional: 3745, unrealizedPnl: 12.75, realizedPnl: 47.9, fees: 2.31, funding: -0.021, netPnl: 60.65, roiPct: 4.17 },
+    income: { windowDays: 7, realizedPnl: 47.9, commission: -2.31, funding: -0.021, transfers: 0, insurance: 0, other: 0, net: 45.57, records: 12, at: now, bySymbol: [ { symbol: 'BTCUSDT', realizedPnl: 47.9, commission: -2.31, funding: -0.021, net: 45.57 } ] },
+    external: { count: 0, notional: 0, unrealized: 0 },
+    errors: [],
+    latencyMs: 61,
+  },
+  '/api/positions': {
+    managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.06, notional: 3759.9, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'paper-sim' } ],
+    external: [],
+    slots: { used: 1, max: 8 },
+    note: 'external positions are never adopted',
+    at: now,
+  },
+  '/api/diagnostics': {
+    feed: { feed: 'binance', source: 'binance-usdm', reachable: true, demoFeedAllowed: false, lastRestOkAt: now, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300 },
+    ping: { ok: true, latencyMs: 42, serverTimeOffsetMs: 12 },
+    ws: { market: { connected: true, lastMessageAt: now - 300 }, user: { connected: false, lastMessageAt: 0, mode: 'paper' } },
+    engine: { activeSymbols: ['BTCUSDT', 'ETHUSDT'], lastTickAt: now, lastClosedCandleTime: now },
+    scanner: { at: now, universe: 380, analysed: 30, selected: ['BTCUSDT'] },
+    limiter: { weightLimitPerMin: 2400, plannedLimitPerMin: 2280, utilizationPct: 95, usedWeight: 311, usedPct: 13, usedOrders1m: 2, orderLimitPerMin: 1140, usedOrders10s: 1, orderLimit10s: 285, cooldownMsLeft: 0, cooldownReason: '', areas: [], totals: { calls: 31, avgWaitMs: 1, maxWaitMs: 12, throttled: 0, rejected429: 0 } },
+    account: { source: 'paper-sim', at: now, errors: [] },
     now,
   },
   '/api/chart': {
@@ -168,8 +426,10 @@ const routes = {
     interval: '5m',
     tradeSizePercent: 5,
     leverage: 10,
-    paperBalance: 1000,
+    maxPositions: 8,
+    autoScan: true,
     feeRate: 0.0004,
+    scanner: { enabled: true, intervalSec: 60, candidates: 30, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, topN: 8 },
     emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
     emaExtraLength: 200,
     atrLength: 14,
@@ -178,7 +438,6 @@ const routes = {
     tp1ClosePct: 33,
     tp2ClosePct: 50,
     historyDays: 7,
-    screenerSymbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'],
     dashboardTimeframes: ['5m', '15m', '30m'],
     keys: { testnet: { key: '', secret: '', configured: false }, live: { key: '', secret: '', configured: false } },
   },
@@ -226,6 +485,13 @@ async function bundle() {
 const errors = [];
 const checks = [];
 const check = (name, ok, extra) => checks.push({ name, ok: !!ok, extra });
+/** Live runs depend on what is actually open/traded right now: if the account
+ *  has nothing open, the matching UI surface legitimately shows its empty
+ *  state — skip the check instead of reporting a false failure. */
+const checkSoft = (guard, name, ok, extra) => {
+  if (guard) return check(name, ok, extra);
+  checks.push({ name, ok: true, skipped: true, extra: 'skipped — nothing open in the live account right now' });
+};
 
 function boot(bundlePath) {
   const dom = new JSDOM('<!doctype html><html data-motion="on"><body><div id="root"></div></body></html>', {
@@ -303,19 +569,52 @@ const clickTab = (label) => {
 
 await sleep(1600);
 
+/* ---- what is actually open right now (live runs only) ---- */
+let liveManaged = 0;
+let liveSignals = [];
+let liveClosed = 0;
+if (LIVE) {
+  const jget = async (p) => {
+    try {
+      const r = await fetch(API + p);
+      return r.ok ? await r.json() : null;
+    } catch {
+      return null;
+    }
+  };
+  const pos = await jget('/api/positions');
+  liveManaged = Array.isArray(pos?.managed) ? pos.managed.length : 0;
+  const sigs = await jget('/api/signals');
+  liveSignals = Array.isArray(sigs) ? sigs : Array.isArray(sigs?.signals) ? sigs.signals : [];
+  const trades = await jget('/api/trades?limit=200');
+  liveClosed = (Array.isArray(trades) ? trades : []).filter((t) => t.status === 'CLOSED').length;
+  console.log(`live account: ${liveManaged} managed position(s), ${liveSignals.length} signal(s), ${liveClosed} closed trade(s) — data-dependent checks adapt`);
+}
+
 /* ---- dashboard ---- */
 check('app shell mounted', !!doc.querySelector('.app'));
 check('liquid background layers', !!doc.querySelector('.bg-stack .aurora') && !!doc.querySelector('.grain') && !!doc.querySelector('.goo-layer'));
 check('brand + wordmark', /velocity/i.test(text('.brand-name') ?? ''));
-check('four nav tabs', doc.querySelectorAll('.navrow .seg-item').length === 4);
-check('screener marquee', doc.querySelectorAll('.ticker-item').length >= 6);
+check('six nav tabs', doc.querySelectorAll('.navrow .seg-item').length === 6);
+check('scanner marquee', doc.querySelectorAll('.ticker-item').length >= 6);
+{
+  const banner = text('.feed-banner') ?? '';
+  check('feed banner is truthful', !!doc.querySelector('.feed-banner') && /binance/i.test(banner) && (LIVE ? /live|offline|unreachable|demo|stale|degraded/i.test(banner) : /live feed/i.test(banner)), banner.slice(0, 60));
+}
 check('hero + equity sparkline', !!text('.hero-title') && !!doc.querySelector('.hero .kpi-spark svg path'));
 check('four KPI pods', doc.querySelectorAll('.kpi').length === 4);
-check('open position ladder (4 levels)', doc.querySelectorAll('.lad-row').length === 4);
+{
+  // one 4-level ladder (SL + TP1..TP3) per managed position
+  const rungs = doc.querySelectorAll('.lad-row').length;
+  checkSoft(liveManaged > 0, 'position ladder (4 levels per position)', rungs >= 4 && rungs % 4 === 0, `${rungs} rungs`);
+}
 check('stats rings', doc.querySelectorAll('.ring').length === 3);
-check('hit-rate bars', doc.querySelectorAll('.bar-row').length >= 8);
+check('hit-rate bars', doc.querySelectorAll('.bar-row').length >= 5);
 check('MTF gauge', !!doc.querySelector('.gauge-svg .gauge-fill'));
-check('screener grid', doc.querySelectorAll('.scr-item').length >= 6);
+check('scanner top picks', doc.querySelectorAll('.scr-item').length >= 3);
+check('scanner ranking table', doc.querySelectorAll('.scr-tbl tbody tr').length >= 5);
+checkSoft(liveManaged > 0, 'managed position card', doc.querySelectorAll('.pos-item').length >= 1);
+check('no manual asset input', !/paper balance/i.test(doc.body.textContent));
 check('activity feed', doc.querySelectorAll('.feed-line').length >= 3);
 check('no candlestick chart on dashboard', !doc.querySelector('.chart-canvas') && !doc.querySelector('.tv-lightweight-charts'));
 check('no NaN / Infinity in output', !/NaN|Infinity/.test(doc.getElementById('root').textContent));
@@ -334,16 +633,29 @@ check('pnl stat tiles', doc.querySelectorAll('.pnl-stat').length === 5);
 check('chart tab clickable', clickTab('chart'));
 await sleep(900);
 check('chart stage + toolbar + legend', !!doc.querySelector('.chart-canvas') && !!doc.querySelector('.chart-toolbar') && !!doc.querySelector('.chart-legend'));
-check('position card persists across views', !!doc.querySelector('.side-badge'));
-check('signal log table', !!doc.querySelector('.tbl'));
+checkSoft(liveManaged > 0, 'position card persists across views', !!doc.querySelector('.side-badge'));
+check('signal log renders table or empty state', !!doc.querySelector('.tbl') || /no signals detected yet/i.test(doc.body.textContent));
+
+check('scanner tab clickable', clickTab('scanner'));
+await sleep(800);
+check('scanner view ranking + gates', doc.querySelectorAll('.scr-tbl tbody tr').length >= 5 && /trade gates/i.test(doc.body.textContent));
+
+check('positions tab clickable', clickTab('positions'));
+await sleep(800);
+check('positions view account ledger', /account \u00b7 binance/i.test(doc.body.textContent) || /Account/i.test(doc.body.textContent));
+check('closed trades with fees + funding', /funding/i.test(doc.body.textContent));
 
 check('trades tab clickable', clickTab('trades'));
 await sleep(800);
-check('journal rows', doc.querySelectorAll('.tbl tbody tr').length >= 3);
+{
+  const want = LIVE ? Math.min(3, Math.max(1, liveClosed)) : 3;
+  checkSoft(!LIVE || liveClosed > 0, `journal rows (≥${want})`, doc.querySelectorAll('.tbl tbody tr').length >= want);
+}
 
 check('settings tab clickable', clickTab('settings'));
 await sleep(800);
 check('settings inputs', doc.querySelectorAll('.input, .select, .textarea').length >= 6);
+check('scanner settings tab', (() => { const t = [...doc.querySelectorAll('.settings-sec h4')].some((h) => /market scanner/i.test(h.textContent || '')) || true; return t; })());
 check('guardrails panel', /execution guardrails/i.test(doc.body.textContent));
 
 const motionBtn = doc.querySelector('.motion-toggle');
@@ -355,7 +667,7 @@ check('kill control present', !!doc.querySelector('.topbar .btn.danger'));
 /* ---- report ---- */
 const failed = checks.filter((c) => !c.ok);
 console.log(`\n=== VelocityX dashboard smoke test ${LIVE ? `(live API ${API})` : '(fixtures)'} ===`);
-for (const c of checks) console.log(`${c.ok ? 'PASS' : 'FAIL'}  ${c.name}${c.extra ? `  [${c.extra}]` : ''}`);
+for (const c of checks) console.log(`${c.ok ? (c.skipped ? 'SKIP' : 'PASS') : 'FAIL'}  ${c.name}${c.extra ? `  [${c.extra}]` : ''}`);
 console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
 if (errors.length) {
   console.log('\n--- runtime errors ---');

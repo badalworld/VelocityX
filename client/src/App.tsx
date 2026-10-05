@@ -2,18 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavRow, Ticker, Topbar, ViewKey } from './components/Header';
 import PnlDock from './components/PnlDock';
 import Overview from './views/Overview';
+import ScannerView from './views/ScannerView';
+import PositionsView from './views/PositionsView';
 import ChartView from './views/ChartView';
 import TradesView from './views/TradesView';
 import SettingsView from './views/SettingsView';
 import LiquidBackground from './motion/LiquidBackground';
 import ErrorBoundary from './components/ErrorBoundary';
 import { AnimatedNumber, Btn } from './motion/primitives';
-import { IconAlert, IconCheck, IconChevron, IconInfo, IconWaves } from './motion/Icons';
+import { IconAlert, IconCheck, IconInfo, IconWaves } from './motion/Icons';
 import { apiGet, apiPost, fmt } from './api';
 import { subscribe } from './ws';
 import { useGlassSheen, useLocalState, useMediaQuery, useReveal, useScrollProgress } from './hooks/motion';
 import { usePnlModel } from './pnl';
-import { ChartData, Mtf, ScreenerData, Settings, SignalRecord, Stats, Status, Trade } from './types';
+import {
+  AccountView, ChartData, Mtf, PositionsPayload, ScanResult, ScreenerData, Settings,
+  SignalRecord, Stats, Status, Trade,
+} from './types';
 
 interface Toast {
   id: number;
@@ -22,7 +27,7 @@ interface Toast {
 }
 
 export default function App() {
-  /* ---------------- data (unchanged server contract) ---------------- */
+  /* ---------------- data ---------------- */
   const [status, setStatus] = useState<Status | null>(null);
   const [chart, setChart] = useState<ChartData | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -31,6 +36,10 @@ export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [mtf, setMtf] = useState<Mtf | null>(null);
   const [screener, setScreener] = useState<ScreenerData | null>(null);
+  const [scan, setScan] = useState<ScanResult | null>(null);
+  const [account, setAccount] = useState<AccountView | null>(null);
+  const [positions, setPositions] = useState<PositionsPayload | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [logs, setLogs] = useState<{ t: number; level: string; msg: string }[]>([]);
   const [wsUp, setWsUp] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -62,6 +71,7 @@ export default function App() {
     try {
       const s = await apiGet<Status>('/status');
       setStatus(s);
+      if (s.account) setAccount(s.account);
       if (s.logs) setLogs(s.logs);
       const lc = s.engine?.lastClosedCandleTime ?? 0;
       if (lc && lc !== lastCandle.current) {
@@ -73,6 +83,16 @@ export default function App() {
     }
   }, []);
 
+  const loadAccount = useCallback(() => {
+    void apiGet<AccountView>('/account').then(setAccount).catch(() => {});
+  }, []);
+  const loadPositions = useCallback(() => {
+    void apiGet<PositionsPayload>('/positions').then(setPositions).catch(() => {});
+  }, []);
+  const loadScanner = useCallback(() => {
+    void apiGet<ScanResult>('/scanner').then(setScan).catch(() => {});
+    void apiGet<ScreenerData>('/screener').then(setScreener).catch(() => {});
+  }, []);
   const loadChart = useCallback(() => {
     void apiGet<ChartData>('/chart').then(setChart).catch(() => {});
   }, []);
@@ -86,24 +106,29 @@ export default function App() {
     void apiGet<Stats>('/stats').then(setStats).catch(() => {});
   }, []);
 
+  const refreshAll = useCallback(() => {
+    void loadStatus();
+    void loadAccount();
+    void loadPositions();
+    void loadTrades();
+    void loadStats();
+  }, [loadStatus, loadAccount, loadPositions, loadTrades, loadStats]);
+
   useEffect(() => {
     void apiGet<Settings>('/settings').then(setSettings).catch(() => {});
-    void loadStatus();
+    refreshAll();
     void loadChart();
-    void loadTrades();
     void loadSignals();
-    void loadStats();
+    void loadScanner();
     void apiGet<Mtf>('/mtf').then(setMtf).catch(() => {});
-    void apiGet<ScreenerData>('/screener').then(setScreener).catch(() => {});
 
     const un = subscribe((e) => {
       if (e.type === '_open') {
         setWsUp(true);
-        void loadStatus();
+        refreshAll();
         void loadChart();
-        void loadTrades();
         void loadSignals();
-        void loadStats();
+        void loadScanner();
         return;
       }
       if (e.type === '_close') {
@@ -115,27 +140,37 @@ export default function App() {
         case 'price': {
           setStatus((prev) => {
             if (!prev) return prev;
-            const nt = prev.openTrade
-              ? {
-                  ...prev.openTrade,
-                  unrealized:
-                    (d.price - prev.openTrade.entryPrice) * (prev.openTrade.side === 'LONG' ? 1 : -1) * prev.openTrade.qty,
-                }
-              : null;
-            return { ...prev, price: d.price, openTrade: nt };
+            const openTrades = (prev.openTrades ?? []).map((t) =>
+              t.symbol === d.symbol
+                ? {
+                    ...t,
+                    markPrice: d.price,
+                    unrealized:
+                      (d.price - t.entryPrice) * (t.side === 'LONG' ? 1 : -1) * (t.remainingQty ?? t.qty),
+                  }
+                : t,
+            );
+            return { ...prev, price: d.symbol === prev.symbol ? d.price : prev.price, openTrades };
           });
           break;
         }
+        case 'prices':
+          break;
+        case 'account':
+          void loadAccount();
+          break;
+        case 'scanner':
+          void loadScanner();
+          break;
         case 'signal':
           void loadSignals();
           void loadChart();
           void loadStatus();
           break;
         case 'trade':
-          void loadStatus();
+          refreshAll();
           void loadChart();
-          void loadTrades();
-          void loadStats();
+          void loadScanner();
           break;
         case 'log':
           setLogs((l) => [...l, { t: d.t || Date.now(), level: d.level || 'info', msg: d.msg || '' }].slice(-300));
@@ -150,20 +185,25 @@ export default function App() {
       }
     });
 
-    const poll = window.setInterval(loadStatus, 5000);
+    const fast = window.setInterval(loadStatus, 5000);
+    const accountPoll = window.setInterval(loadAccount, 10000);
+    const posPoll = window.setInterval(loadPositions, 10000);
+    const scanPoll = window.setInterval(loadScanner, 30000);
     const slow = window.setInterval(() => {
       void loadStats();
       void loadTrades();
       void apiGet<Mtf>('/mtf').then(setMtf).catch(() => {});
-      void apiGet<ScreenerData>('/screener').then(setScreener).catch(() => {});
     }, 60000);
 
     return () => {
       un();
-      window.clearInterval(poll);
+      window.clearInterval(fast);
+      window.clearInterval(accountPoll);
+      window.clearInterval(posPoll);
+      window.clearInterval(scanPoll);
       window.clearInterval(slow);
     };
-  }, [loadStatus, loadChart, loadTrades, loadSignals, loadStats, toast]);
+  }, [refreshAll, loadStatus, loadAccount, loadPositions, loadScanner, loadChart, loadSignals, loadStats, loadTrades, toast]);
 
   /* ---------------- actions ---------------- */
   const onToggleAuto = async (v: boolean) => {
@@ -177,19 +217,46 @@ export default function App() {
   };
 
   const onKill = async () => {
-    if (!window.confirm('Close the open position at market and cancel all orders?')) return;
+    const n = status?.slots?.used ?? 0;
+    if (!window.confirm(`Market-close all ${n} bot position(s)? External positions are never touched.`)) return;
     try {
       await apiPost('/kill');
-      await Promise.all([loadStatus(), loadTrades(), loadStats(), loadChart()]);
+      await Promise.all([loadStatus(), loadAccount(), loadPositions(), loadTrades(), loadStats(), loadChart()]);
+      toast('Bot positions closed at market', 'info');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  };
+
+  const onClosePosition = async (id: string) => {
+    if (!window.confirm('Close this bot position at market?')) return;
+    try {
+      await apiPost('/positions/close', { id });
+      await Promise.all([loadStatus(), loadAccount(), loadPositions(), loadTrades(), loadStats()]);
       toast('Position closed at market', 'info');
     } catch (e: any) {
       toast(e.message, 'error');
     }
   };
 
-  const openTrade = status?.openTrade ?? null;
-  const headModel = usePnlModel(status, trades, 'all');
-  const headTotal = headModel.realized + (openTrade?.unrealized ?? 0);
+  const onScanNow = async () => {
+    setScanning(true);
+    try {
+      const res = await apiPost<ScanResult>('/scanner/scan');
+      if (res && 'rows' in res) setScan(res);
+      void loadStatus();
+      toast(`Scanner analysed ${res?.analysed ?? 0} markets · ${res?.selected?.length ?? 0} selected`, 'info');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const openCount = status?.slots?.used ?? 0;
+  const headModel = usePnlModel(status, trades, account, 'all');
+  const headTotal = (account?.bot.netPnl ?? headModel.realized) + 0;
+  void openCount;
 
   const tickerRows = useMemo(() => screener?.rows ?? [], [screener]);
 
@@ -223,43 +290,57 @@ export default function App() {
         <main className="content">
           <div className="view view-enter" key={view}>
             <ErrorBoundary label={view === 'chart' ? 'Chart module' : view === 'settings' ? 'Settings module' : 'Dashboard module'}>
-            {view === 'dash' && (
-              <Overview
-                status={status}
-                stats={stats}
-                mtf={mtf}
-                screener={screener}
-                trades={trades}
-                logs={logs}
-                onKill={onKill}
-              />
-            )}
-            {view === 'chart' && (
-              <ChartView
-                status={status}
-                trades={trades}
-                signals={signals}
-                logs={logs}
-                onKill={onKill}
-              />
-            )}
-            {view === 'trades' && (
-              <TradesView trades={trades} signals={signals} logs={logs} symbol={status?.symbol ?? 'BTCUSDT'} />
-            )}
-            {view === 'settings' && (
-              <SettingsView
-                settings={settings}
-                status={status}
-                onSaved={(s) => {
-                  setSettings(s);
-                  void loadStatus();
-                  toast('Settings applied to the engine', 'win');
-                }}
-                onError={(m) => m && toast(m, 'error')}
-                motionOn={motionOn}
-                onToggleMotion={() => setMotionOn(!motionOn)}
-              />
-            )}
+              {view === 'dash' && (
+                <Overview
+                  status={status}
+                  stats={stats}
+                  mtf={mtf}
+                  screener={screener}
+                  scan={scan}
+                  account={account}
+                  positions={positions}
+                  trades={trades}
+                  logs={logs}
+                  onKill={onKill}
+                  onClose={onClosePosition}
+                  onScan={onScanNow}
+                  scanning={scanning}
+                />
+              )}
+              {view === 'scanner' && (
+                <ScannerView scan={scan} status={status} scanning={scanning} onScan={onScanNow} />
+              )}
+              {view === 'positions' && (
+                <PositionsView
+                  status={status}
+                  account={account}
+                  positions={positions}
+                  trades={trades}
+                  onClose={onClosePosition}
+                  onKill={onKill}
+                />
+              )}
+              {view === 'chart' && (
+                <ChartView status={status} trades={trades} signals={signals} logs={logs} onKill={onKill} />
+              )}
+              {view === 'trades' && (
+                <TradesView trades={trades} signals={signals} logs={logs} symbol={status?.symbol ?? 'BTCUSDT'} />
+              )}
+              {view === 'settings' && (
+                <SettingsView
+                  settings={settings}
+                  status={status}
+                  onSaved={(s) => {
+                    setSettings(s);
+                    void loadStatus();
+                    void loadScanner();
+                    toast('Settings applied to the engine', 'win');
+                  }}
+                  onError={(m) => m && toast(m, 'error')}
+                  motionOn={motionOn}
+                  onToggleMotion={() => setMotionOn(!motionOn)}
+                />
+              )}
             </ErrorBoundary>
           </div>
         </main>
@@ -298,14 +379,14 @@ export default function App() {
                 <span className="chip">{headModel.trades} trades</span>
               </span>
 
-              <span className="chip cyan hide-sm">pinned · responsive</span>
+              <span className="chip cyan hide-sm">binance equity</span>
               <span className="sheet-chev" aria-hidden="true">
-                <IconChevron />
+                <IconWaves style={{ width: 12, height: 12 }} />
               </span>
             </div>
             <div className="rail-body">
               <ErrorBoundary label="P&L dock" compact>
-                <PnlDock status={status} trades={trades} />
+                <PnlDock account={account} trades={trades} />
               </ErrorBoundary>
             </div>
           </div>
@@ -317,12 +398,17 @@ export default function App() {
           <span className="brand-mark" style={{ width: 22, height: 22, borderRadius: 8 }}>
             <IconWaves style={{ width: 12, height: 12 }} />
           </span>
-          VelocityX · liquid glass edition
+          VelocityX · binance realtime edition
         </span>
-        <span>{status?.symbol ?? 'BTCUSDT'} · {status?.interval ?? '5m'} · super indibot</span>
+        <span>
+          {status?.autoScan ? 'scanner' : status?.symbol ?? 'BTCUSDT'} · {status?.interval ?? '5m'} · super indibot ·
+          max {status?.maxPositions ?? 8} positions
+        </span>
         <span>{wsUp ? 'stream connected' : 'reconnecting…'}</span>
         <span className="spacer" />
-        <span>paper / testnet / live — always test first</span>
+        <span className="foot-note">
+          <IconAlert style={{ width: 11, height: 11 }} /> external positions are never touched
+        </span>
       </footer>
 
       <div className="toasts">
@@ -335,6 +421,13 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      {/* mobile helper: account equity pill */}
+      {isMobile && account && (
+        <Btn className="mobile-equity" size="sm" onClick={() => setSheetOpen(true)} title="Binance equity">
+          <AnimatedNumber value={account.equity ?? 0} decimals={2} /> USDT
+        </Btn>
+      )}
     </div>
   );
 }

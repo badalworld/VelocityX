@@ -23,11 +23,14 @@ export function TradeHistory({ trades, embedded }: { trades: Trade[]; embedded?:
         <thead>
           <tr>
             <th>Opened</th>
+            <th>Market</th>
             <th>Side</th>
             <th className="r">Entry</th>
             <th className="r">Qty</th>
             <th>Result</th>
             <th>Exit reason</th>
+            <th className="r">Fees</th>
+            <th className="r">Funding</th>
             <th className="r">PnL</th>
             <th className="r">R</th>
           </tr>
@@ -46,6 +49,7 @@ export function TradeHistory({ trades, embedded }: { trades: Trade[]; embedded?:
                     minute: '2-digit',
                   })}
                 </td>
+                <td style={{ fontWeight: 800 }}>{t.symbol.replace('USDT', '')}</td>
                 <td style={{ color: t.side === 'LONG' ? 'var(--green)' : 'var(--red)', fontWeight: 800 }}>{t.side}</td>
                 <td className="r">{fmtPrice(t.entryPrice)}</td>
                 <td className="r">{fmtQtyN(t.qty)}</td>
@@ -55,6 +59,8 @@ export function TradeHistory({ trades, embedded }: { trades: Trade[]; embedded?:
                   </span>
                 </td>
                 <td style={{ color: 'var(--muted)' }}>{open ? 'live' : t.closeReason ?? '—'}</td>
+                <td className="r neg">{fmt(t.fees ?? 0, 3)}</td>
+                <td className={`r ${(t.funding ?? 0) >= 0 ? 'pos' : 'neg'}`}>{fmt(t.funding ?? 0, 4)}</td>
                 <td className={`r ${t.realizedPnl >= 0 ? 'pos' : 'neg'}`}>
                   {open ? fmt(t.realizedPnl) : `${t.realizedPnl >= 0 ? '+' : ''}${fmt(t.realizedPnl)}`}
                 </td>

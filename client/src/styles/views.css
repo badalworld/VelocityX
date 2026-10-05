@@ -1319,3 +1319,150 @@
 .chart-canvas div {
   font-family: inherit;
 }
+
+/* ---------------------------------------------------------------------------
+   Binance realtime additions
+   · data-source banner (live / demo / unreachable)
+   · scanner table + engine watchlist
+   · managed position cards + external-position notice
+   · account ledger details
+   ------------------------------------------------------------------------- */
+
+.badge-mode.error {
+  color: #ffd2dc;
+  border-color: rgba(255, 79, 116, 0.55);
+  background-color: var(--red-dim);
+}
+
+.feed-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  border-radius: var(--r-m);
+  border: 1px solid var(--stroke-1);
+  background-color: rgba(10, 15, 28, 0.42);
+  backdrop-filter: blur(var(--blur-m));
+  -webkit-backdrop-filter: blur(var(--blur-m));
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.feed-banner b {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.feed-banner.ok {
+  border-color: rgba(35, 221, 138, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(35, 221, 138, 0.08);
+}
+
+.feed-banner.warn {
+  border-color: rgba(255, 200, 87, 0.42);
+  color: var(--amber);
+  background-color: rgba(60, 44, 10, 0.32);
+}
+
+.feed-banner.error {
+  border-color: rgba(255, 79, 116, 0.45);
+  color: #ffd2dc;
+  background-color: rgba(60, 12, 26, 0.32);
+}
+
+.led-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green);
+  animation: led-pulse 2s var(--ease-inout) infinite;
+  flex: none;
+}
+
+.led-dot.on {
+  background: var(--green);
+}
+
+/* ---------- scanner table ------------------------------------------------- */
+
+.scr-tbl td,
+.scr-tbl th {
+  white-space: nowrap;
+}
+
+.scr-tbl tr.row-selected {
+  background: linear-gradient(90deg, rgba(62, 240, 255, 0.12), transparent 70%);
+}
+
+.scr-tbl tr {
+  transition: background var(--t-fast) var(--ease-snap);
+}
+
+.scr-tbl tbody tr:hover {
+  background-color: rgba(255, 255, 255, 0.035);
+}
+
+.panel-sub-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+/* ---------- managed positions -------------------------------------------- */
+
+.pos-grid-wrap {
+  display: grid;
+  gap: 12px;
+}
+
+.pos-item {
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: var(--r-m);
+}
+
+.pos-item.tone-green {
+  box-shadow: inset 0 0 0 1px rgba(35, 221, 138, 0.22);
+}
+
+.pos-item.tone-red {
+  box-shadow: inset 0 0 0 1px rgba(255, 79, 116, 0.22);
+}
+
+.pos-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pos-item .ladder {
+  margin-top: 2px;
+}
+
+.foot-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+}
+
+.mobile-equity {
+  position: fixed;
+  right: 12px;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  z-index: var(--z-rail, 40);
+}
+
+@media (min-width: 1081px) {
+  .mobile-equity {
+    display: none;
+  }
+}
