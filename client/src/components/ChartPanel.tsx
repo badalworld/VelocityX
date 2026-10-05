@@ -1,15 +1,31 @@
-import { useEffect, useRef } from 'react';
-import { createChart, IChartApi, ISeriesApi, IPriceLine, UTCTimestamp, ColorType } from 'lightweight-charts';
+import { useEffect, useRef, useState } from 'react';
+import { createChart, IChartApi, IPriceLine, ISeriesApi, UTCTimestamp, ColorType } from 'lightweight-charts';
 import { ChartData } from '../types';
+import { Btn, Segmented } from '../motion/primitives';
+import { IconBolt, IconCandles, IconChart, IconPlay } from '../motion/Icons';
+import { useReveal } from '../hooks/motion';
 
-const RIBBON = ['#1573d4', '#3096ff', '#57abff', '#85c2ff', '#9bcdff', '#b3d9ff', '#c9e5ff', '#dfecfb'];
+const RIBBON = [
+  { color: '#3ef0ff', label: 'EMA 5' },
+  { color: '#5b9dff', label: 'EMA 11' },
+  { color: '#7fb7ff', label: 'EMA 15' },
+  { color: '#9cc9ff', label: 'EMA 18' },
+  { color: '#b3d9ff', label: 'EMA 21' },
+  { color: '#c9e5ff', label: 'EMA 24' },
+  { color: '#dbefff', label: 'EMA 28' },
+  { color: '#b0c4e8', label: 'EMA 34' },
+];
 
 interface Props {
   data: ChartData | null;
   symbol: string;
+  interval: string;
+  limit: number;
+  onLimit: (n: number) => void;
+  live?: boolean;
 }
 
-export default function ChartPanel({ data, symbol }: Props) {
+export default function ChartPanel({ data, symbol, interval, limit, onLimit, live }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -19,153 +35,340 @@ export default function ChartPanel({ data, symbol }: Props) {
   const inited = useRef(false);
   const fitted = useRef(false);
 
-  // create chart once
+  const [showRibbon, setShowRibbon] = useState(true);
+  const [showExtra, setShowExtra] = useState(true);
+  const [showMarkers, setShowMarkers] = useState(true);
+  const [showLevels, setShowLevels] = useState(true);
+  const [chartError, setChartError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useReveal('chart-view');
+
+  /* ---------- chart lifecycle ------------------------------------------- */
   useEffect(() => {
-    if (!wrapRef.current || inited.current) return;
+    const host = wrapRef.current;
+    if (!host || inited.current) return;
     inited.current = true;
-    const chart = createChart(wrapRef.current, {
-      layout: {
-        background: { type: ColorType.Solid, color: '#141926' },
-        textColor: '#7c86a0',
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: 'rgba(35,42,59,0.5)' },
-        horzLines: { color: 'rgba(35,42,59,0.5)' },
-      },
-      crosshair: { mode: 0 },
-      rightPriceScale: { borderColor: '#232a3b' },
-      timeScale: { borderColor: '#232a3b', timeVisible: true, secondsVisible: false },
-      width: wrapRef.current.clientWidth,
-      height: wrapRef.current.clientHeight,
-    });
+
+    let chart: IChartApi;
+    try {
+      chart = createChart(host, {
+        layout: {
+          background: { type: ColorType.Solid, color: 'transparent' },
+          textColor: 'rgba(200,214,240,.55)',
+          fontSize: 11,
+          fontFamily: "'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif",
+        },
+        grid: {
+          vertLines: { color: 'rgba(255,255,255,.035)' },
+          horzLines: { color: 'rgba(255,255,255,.045)' },
+        },
+        crosshair: {
+          mode: 0,
+          vertLine: { color: 'rgba(62,240,255,.5)', width: 1, style: 2, labelBackgroundColor: '#123040' },
+          horzLine: { color: 'rgba(62,240,255,.5)', width: 1, style: 2, labelBackgroundColor: '#123040' },
+        },
+        rightPriceScale: { borderColor: 'rgba(255,255,255,.09)', scaleMargins: { top: 0.12, bottom: 0.1 } },
+        timeScale: { borderColor: 'rgba(255,255,255,.09)', timeVisible: true, secondsVisible: false, rightOffset: 4 },
+        width: Math.max(240, host.clientWidth),
+        height: Math.max(200, host.clientHeight),
+      });
+    } catch (err) {
+      console.error('[VelocityX] chart library failed to initialise', err);
+      inited.current = false;
+      setChartError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+
     chartRef.current = chart;
+    setChartError(null);
 
-    const candles = chart.addCandlestickSeries({
-      upColor: '#089981',
-      downColor: '#f23645',
-      borderVisible: false,
-      wickUpColor: '#089981',
-      wickDownColor: '#f23645',
-      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
-    });
-    candleRef.current = candles;
+    try {
+      candleRef.current = chart.addCandlestickSeries({
+        upColor: 'rgba(35,221,138,.95)',
+        downColor: 'rgba(255,79,116,.95)',
+        borderVisible: false,
+        wickUpColor: 'rgba(35,221,138,.75)',
+        wickDownColor: 'rgba(255,79,116,.75)',
+        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+      });
 
-    chart.priceScale('ribbon').applyOptions({
-      scaleMargins: { top: 0.08, bottom: 0.08 },
-      visible: false,
-    });
-    emaRefs.current = RIBBON.map((c) =>
-      chart.addLineSeries({
-        color: c,
+      chart.priceScale('ribbon').applyOptions({ scaleMargins: { top: 0.06, bottom: 0.06 }, visible: false });
+      emaRefs.current = RIBBON.map((r) =>
+        chart.addLineSeries({
+          color: r.color,
+          lineWidth: 2,
+          priceScaleId: 'ribbon',
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+          priceLineVisible: false,
+        }),
+      );
+      extraRef.current = chart.addLineSeries({
+        color: '#a874ff',
         lineWidth: 2,
+        lineStyle: 2,
         priceScaleId: 'ribbon',
         lastValueVisible: false,
         crosshairMarkerVisible: false,
         priceLineVisible: false,
-      }),
-    );
-    extraRef.current = chart.addLineSeries({
-      color: '#b44bdd',
-      lineWidth: 2,
-      priceScaleId: 'ribbon',
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-      priceLineVisible: false,
-    });
+      });
+    } catch (err) {
+      console.error('[VelocityX] series setup failed', err);
+      setChartError(err instanceof Error ? err.message : String(err));
+    }
 
     const onResize = () => {
-      if (wrapRef.current) chart.applyOptions({ width: wrapRef.current.clientWidth, height: wrapRef.current.clientHeight });
+      const el = wrapRef.current;
+      const c = chartRef.current;
+      if (!el || !c) return;
+      try {
+        c.applyOptions({ width: Math.max(240, el.clientWidth), height: Math.max(200, el.clientHeight) });
+      } catch {
+        /* chart already disposed */
+      }
     };
     window.addEventListener('resize', onResize);
-
-    const ro = new ResizeObserver(onResize);
-    ro.observe(wrapRef.current);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onResize) : null;
+    ro?.observe(host);
 
     return () => {
       window.removeEventListener('resize', onResize);
-      ro.disconnect();
-      chart.remove();
+      ro?.disconnect();
+      try {
+        chart.remove();
+      } catch {
+        /* already gone */
+      }
       inited.current = false;
       chartRef.current = null;
       candleRef.current = null;
       emaRefs.current = [];
       extraRef.current = null;
+      priceLines.current = [];
     };
-  }, []);
+  }, [attempt]);
 
-  // apply data
+  /* ---------- data ------------------------------------------------------- */
   useEffect(() => {
-    if (!data || !candleRef.current || !chartRef.current) return;
     const chart = chartRef.current;
-    if (data.candles.length === 0) return;
+    const candles = candleRef.current;
+    if (!data || !chart || !candles || data.candles.length === 0) return;
 
-    candleRef.current.setData(data.candles as any);
+    try {
+      candles.setData(data.candles as never);
 
-    data.emas.forEach((series, i) => {
-      const target = emaRefs.current[i];
-      if (target) target.setData(series.map((p) => ({ time: p.time as UTCTimestamp, value: p.value as number })).filter((p) => p.value != null) as any);
-    });
-    extraRef.current?.setData(data.emaExtra.map((p) => ({ time: p.time as UTCTimestamp, value: p.value as number })).filter((p) => p.value != null) as any);
+      data.emas.forEach((series, i) => {
+        const target = emaRefs.current[i];
+        if (!target) return;
+        target.setData(
+          series
+            .filter((p) => p.value != null)
+            .map((p) => ({ time: p.time as UTCTimestamp, value: p.value as number })) as never,
+        );
+      });
+      extraRef.current?.setData(
+        data.emaExtra
+          .filter((p) => p.value != null)
+          .map((p) => ({ time: p.time as UTCTimestamp, value: p.value as number })) as never,
+      );
 
-    // signal markers
-    const markers = data.signals
-      .filter((s) => s.time >= (data.candles[0]?.time ?? 0))
-      .map((s) => ({
-        time: s.time as UTCTimestamp,
-        position: (s.side === 'LONG' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
-        color: s.side === 'LONG' ? '#00c853' : '#f23645',
-        shape: (s.side === 'LONG' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
-        text: s.side === 'LONG' ? 'B' : 'S',
-      }))
-      .sort((a, b) => (a.time as number) - (b.time as number));
-    candleRef.current.setMarkers(markers as any);
+      const markers = data.signals
+        .filter((s) => s.time >= (data.candles[0]?.time ?? 0))
+        .map((s) => ({
+          time: s.time as UTCTimestamp,
+          position: (s.side === 'LONG' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+          color: s.side === 'LONG' ? '#23dd8a' : '#ff4f74',
+          shape: (s.side === 'LONG' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+          text: `${s.side === 'LONG' ? 'LONG' : 'SHORT'}${s.acted ? ' · traded' : ''}`,
+          size: 1,
+        }))
+        .sort((a, b) => (a.time as number) - (b.time as number));
+      candles.setMarkers(showMarkers ? (markers as never) : ([] as never));
 
-    if (!fitted.current) {
-      chart.timeScale().fitContent();
-      fitted.current = true;
+      if (!fitted.current) {
+        chart.timeScale().fitContent();
+        fitted.current = true;
+      }
+    } catch (err) {
+      console.error('[VelocityX] chart data rejected', err);
     }
-  }, [data]);
+  }, [data, showMarkers, chartError]);
 
-  // trade levels as price lines
+  /* ---------- visibility toggles ---------------------------------------- */
+  useEffect(() => {
+    emaRefs.current.forEach((s) => {
+      try {
+        s.applyOptions({ visible: showRibbon });
+      } catch {
+        /* ignore */
+      }
+    });
+  }, [showRibbon, data]);
+
+  useEffect(() => {
+    try {
+      extraRef.current?.applyOptions({ visible: showExtra });
+    } catch {
+      /* ignore */
+    }
+  }, [showExtra, data]);
+
+  /* ---------- trade levels --------------------------------------------- */
   useEffect(() => {
     const series = candleRef.current;
     if (!series) return;
     for (const pl of priceLines.current) {
-      try { series.removePriceLine(pl); } catch { /* gone */ }
+      try {
+        series.removePriceLine(pl);
+      } catch {
+        /* already gone */
+      }
     }
     priceLines.current = [];
     const t = data?.trade;
-    if (!t) return;
+    if (!t || !showLevels) return;
+
     const mk = (price: number, color: string, title: string, style = 0) => {
-      const pl = series.createPriceLine({
-        price,
-        color,
-        lineWidth: 2,
-        lineStyle: style,
-        axisLabelVisible: true,
-        title,
-      });
-      priceLines.current.push(pl);
+      if (!Number.isFinite(price)) return;
+      try {
+        priceLines.current.push(
+          series.createPriceLine({ price, color, lineWidth: 2, lineStyle: style, axisLabelVisible: true, title }),
+        );
+      } catch {
+        /* ignore */
+      }
     };
-    mk(t.entry, '#fff100', 'ENTRY');
-    mk(t.sl, t.slStage === 0 ? '#f23645' : t.slStage === 1 ? '#fff100' : '#3096ff', t.slStage === 0 ? 'SL' : t.slStage === 1 ? 'SL·BE' : 'SL·TP1');
-    if (!t.tp1Filled) mk(t.tp1, '#00c853', 'TP1 1.5R');
-    if (!t.tp2Filled) mk(t.tp2, '#00c853', 'TP2 3R');
-    if (!t.tp3Filled) mk(t.tp3, '#00c853', 'TP3 4.5R');
-  }, [data?.trade, data?.trade?.slStage, data?.trade?.tp1Filled, data?.trade?.tp2Filled, data?.trade?.tp3Filled]);
+    mk(t.entry, 'rgba(255,255,255,.9)', 'ENTRY');
+    mk(
+      t.sl,
+      t.slStage === 0 ? '#ff4f74' : t.slStage === 1 ? '#ffc857' : '#5b9dff',
+      t.slStage === 0 ? 'SL' : t.slStage === 1 ? 'SL·BE' : 'SL·TP1',
+    );
+    if (!t.tp1Filled) mk(t.tp1, '#23dd8a', 'TP1 1.5R', 1);
+    if (!t.tp2Filled) mk(t.tp2, '#23dd8a', 'TP2 3R', 1);
+    if (!t.tp3Filled) mk(t.tp3, '#34f0b2', 'TP3 4.5R', 1);
+  }, [data, data?.trade, data?.trade?.slStage, data?.trade?.tp1Filled, data?.trade?.tp2Filled, data?.trade?.tp3Filled, showLevels]);
+
+  const lastCandle = data?.candles?.[data.candles.length - 1];
+  const firstCandle = data?.candles?.[0];
+  const change = lastCandle && firstCandle && firstCandle.open ? ((lastCandle.close - firstCandle.open) / firstCandle.open) * 100 : 0;
 
   return (
-    <div className="card">
-      <div className="card-head">
-        <span>
-          <span className="accent">{symbol}</span> · 5m · SUPER INDIBOT (EMA 5-34 Ribbon + EMA 200)
+    <section className="panel chart-stage" data-reveal="true">
+      <div className="chart-toolbar">
+        <span className="panel-title" style={{ letterSpacing: 1 }}>
+          <span className="ico">
+            <IconCandles />
+          </span>
+          {symbol}
+          <span className="tx-sub">{interval} · SUPER INDIBOT</span>
         </span>
-        <span style={{ fontSize: 10 }}>
-          non-repaint cross EMA11/EMA34 · ATR×2 SL · RR 1:1.5
+
+        {lastCandle && (
+          <span className={`chip ${change >= 0 ? 'green' : 'red'}`}>
+            {change >= 0 ? '▲' : '▼'} {change.toFixed(2)}%
+          </span>
+        )}
+        {live && <span className="chip live cyan">live feed</span>}
+
+        <div className="spacer" />
+
+        <Segmented
+          value={String(limit)}
+          onChange={(v) => {
+            fitted.current = false;
+            onLimit(Number(v));
+          }}
+          items={[
+            { value: '150', label: '150' },
+            { value: '300', label: '300' },
+            { value: '600', label: '600' },
+            { value: '1000', label: '1000' },
+          ]}
+          ariaLabel="Candle count"
+        />
+
+        <Btn size="sm" active={showRibbon} onClick={() => setShowRibbon((v) => !v)} title="Toggle EMA ribbon">
+          <IconChart style={{ width: 13, height: 13 }} />
+          Ribbon
+        </Btn>
+        <Btn size="sm" active={showExtra} onClick={() => setShowExtra((v) => !v)} title="Toggle EMA 200">
+          EMA200
+        </Btn>
+        <Btn size="sm" active={showMarkers} onClick={() => setShowMarkers((v) => !v)} title="Toggle signal markers">
+          Signals
+        </Btn>
+        <Btn size="sm" active={showLevels} onClick={() => setShowLevels((v) => !v)} title="Toggle entry/SL/TP lines">
+          Levels
+        </Btn>
+        <Btn
+          size="sm"
+          onClick={() => {
+            try {
+              chartRef.current?.timeScale().fitContent();
+            } catch {
+              /* ignore */
+            }
+          }}
+          title="Fit all candles"
+        >
+          <IconPlay style={{ width: 12, height: 12 }} />
+          Fit
+        </Btn>
+      </div>
+
+      {chartError ? (
+        <div className="chart-fallback">
+          <strong>Candlestick engine unavailable in this browser</strong>
+          <span>
+            The chart library could not start ({chartError}). Signals, execution and every other panel keep working —
+            try another browser, or relax tracking protection for this origin.
+          </span>
+          <Btn
+            size="sm"
+            variant="primary"
+            onClick={() => {
+              setChartError(null);
+              setAttempt((a) => a + 1);
+            }}
+          >
+            Retry chart engine
+          </Btn>
+        </div>
+      ) : (
+        <div className="chart-canvas" ref={wrapRef} />
+      )}
+
+      <div className="chart-legend">
+        {RIBBON.map((r) => (
+          <span className="lg" key={r.label} style={{ color: r.color, opacity: showRibbon ? 1 : 0.35 }}>
+            <i />
+            {r.label.replace('EMA ', '')}
+          </span>
+        ))}
+        <span className="lg" style={{ color: '#a874ff', opacity: showExtra ? 1 : 0.35 }}>
+          <i />
+          200
+        </span>
+        <span className="lg" style={{ color: 'var(--cyan)' }}>
+          <i />
+          entry / SL / TP levels
+        </span>
+        <span className="lg" style={{ color: 'var(--green)' }}>
+          <i />
+          LONG signal
+        </span>
+        <span className="lg" style={{ color: 'var(--red)' }}>
+          <i />
+          SHORT signal
+        </span>
+        <div className="spacer" />
+        <span className="lg" style={{ color: 'var(--dim)' }}>
+          <IconBolt style={{ width: 12, height: 12 }} />
+          {data?.candles?.length ?? 0} candles · entry on signal candle close · ATR×2 stop
         </span>
       </div>
-      <div className="chart-wrap" ref={wrapRef} />
-    </div>
+    </section>
   );
 }

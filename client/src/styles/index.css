@@ -1,0 +1,9 @@
+/* Entry point for the Liquid Glass design system. Order matters:
+   tokens → base → glass surfaces → motion → layout → views */
+@import './tokens.css';
+@import './base.css';
+@import './glass.css';
+@import './motion.css';
+@import './layout.css';
+@import './views.css';
+@import './components.css';
