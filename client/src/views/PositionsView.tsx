@@ -37,7 +37,7 @@ export default function PositionsView({
               <IconTarget style={{ width: 12, height: 12 }} /> live positions
             </span>
             <span className={`chip ${account?.source === 'binance' ? 'green' : 'amber'}`}>
-              {account?.source === 'binance' ? 'Binance data' : 'paper simulation'}
+              {account?.source === 'binance' ? 'Binance data' : 'exchange data unavailable'}
             </span>
           </span>
           <h1 className="hero-title">
@@ -162,7 +162,7 @@ export default function PositionsView({
             <div className="mini">
               <div className="k">Feed</div>
               <div className={`v ${status?.feed === 'binance' ? 'up' : 'down'}`}>
-                {status?.feed === 'binance' ? 'live Binance' : status?.feed === 'offline-demo' ? 'demo feed' : 'unreachable'}
+                {status?.feed === 'binance' ? 'live Binance' : 'unreachable'}
               </div>
             </div>
           </div>

@@ -1,8 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 
-/** Trading mode. Paper uses live Binance market data with simulated fills. */
-export type Mode = 'paper' | 'testnet' | 'live';
+/**
+ * Execution environment. There is NO simulated mode: every mode sends real
+ * orders to Binance (testnet = Binance's test exchange, live = mainnet money).
+ */
+export type Mode = 'testnet' | 'live';
 
 export interface ApiKeys {
   key: string;
@@ -43,8 +46,6 @@ export interface Settings {
   maxPositions: number;
   /** Follow the scanner's top high-volatility trending markets. */
   autoScan: boolean;
-  /** Taker fee rate used *only* for paper-mode simulation (live fees come from Binance). */
-  feeRate: number;
 
   scanner: ScannerSettings;
 
@@ -68,13 +69,11 @@ export interface Settings {
   keys: { testnet: ApiKeys; live: ApiKeys };
 }
 
-/** Paper mode starts from this fixed, non-editable virtual balance (no manual input). */
-export const PAPER_START_BALANCE = 1000;
 /** Hard cap on simultaneous positions — the bot never manages more. */
 export const MAX_POSITIONS_CAP = 8;
 
 export const DEFAULT_SETTINGS: Settings = {
-  mode: 'paper',
+  mode: 'live',
   autoTrade: false,
   symbol: 'BTCUSDT',
   interval: '5m',
@@ -82,7 +81,6 @@ export const DEFAULT_SETTINGS: Settings = {
   leverage: 10,
   maxPositions: MAX_POSITIONS_CAP,
   autoScan: true,
-  feeRate: 0.0005,
 
   scanner: {
     enabled: true,
@@ -139,7 +137,10 @@ function envKeys(): Partial<Settings> {
   };
   if (process.env.BINANCE_MODE) {
     const m = process.env.BINANCE_MODE;
-    if (m === 'paper' || m === 'testnet' || m === 'live') patch.mode = m;
+    if (m === 'testnet' || m === 'live') patch.mode = m;
+    else if (m === 'paper') {
+      console.warn('[settings] BINANCE_MODE=paper was removed — VelocityX only trades for real (use testnet or live)');
+    }
   }
   if (process.env.BINANCE_SYMBOL) patch.symbol = process.env.BINANCE_SYMBOL;
   return patch;
@@ -178,7 +179,6 @@ function sanitize(s: Settings): Settings {
   s.atrSlMultiplier = clamp(num(s.atrSlMultiplier, 2), 0.1, 100);
   s.tpRrFactor = clamp(num(s.tpRrFactor, 1.5), 0.1, 100);
   s.historyDays = Math.round(clamp(num(s.historyDays, 7), 1, 365));
-  s.feeRate = clamp(num(s.feeRate, 0.0005), 0, 0.01);
   if (!Array.isArray(s.emaLengths) || s.emaLengths.length < 2) s.emaLengths = [...DEFAULT_SETTINGS.emaLengths];
 
   const sc = (s.scanner = { ...DEFAULT_SETTINGS.scanner, ...(s.scanner || {}) });
@@ -191,7 +191,15 @@ function sanitize(s: Settings): Settings {
   sc.topN = Math.round(clamp(num(sc.topN, MAX_POSITIONS_CAP), 1, MAX_POSITIONS_CAP));
   sc.enabled = sc.enabled !== false;
 
-  if (!['paper', 'testnet', 'live'].includes(s.mode)) s.mode = 'paper';
+  // Simulation was removed: paper configs (from env, file or API) migrate to
+  // LIVE. Order placement still requires an explicit arming step, so a legacy
+  // paper setting can never start trading by itself.
+  if (!['testnet', 'live'].includes(s.mode)) {
+    if (s.mode !== undefined && s.mode !== null && s.mode !== 'live') {
+      console.warn(`[settings] mode "${s.mode}" is not supported — falling back to LIVE (auto-trading stays off until armed)`);
+    }
+    s.mode = 'live';
+  }
 
   // ---- connection / identity ------------------------------------------------
   s.symbol = String(s.symbol || DEFAULT_SETTINGS.symbol).toUpperCase().trim();
@@ -245,8 +253,9 @@ export function updateSettings(patch: any): Settings {
       }
     }
   }
-  // Manual asset input was removed — any legacy patch trying to set it is ignored.
+  // Legacy keys from removed features are ignored if a stale client sends them.
   delete patch.paperBalance;
+  delete patch.feeRate;
   delete patch.screenerSymbols;
   current = sanitize(deepMerge(current, patch));
   persistSettings();

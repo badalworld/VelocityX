@@ -2,7 +2,7 @@
  * WebSocket streams — the realtime backbone of the dashboard.
  *
  *  market : one combined Binance USD-M stream carrying
- *             <symbol>@bookTicker   → live prices (position PnL, paper fills)
+ *             <symbol>@bookTicker   → live prices (position PnL, dashboard)
  *             <symbol>@kline_5m     → candles straight into the candle store
  *           for every symbol the engine watches (scanner picks + open trades).
  *           Re-subscribed automatically when the watched set changes.
@@ -75,13 +75,6 @@ export class MarketStream {
 
   private connect(symbols: string[], interval: string): void {
     if (this.stopped || !symbols.length) return;
-    if (api.isOffline()) {
-      emit('stream', { market: false, offline: true });
-      setTimeout(() => {
-        if (!this.stopped) this.connect(symbols, interval);
-      }, 30_000);
-      return;
-    }
     this.close();
     const url = api.marketStreamUrl(symbols, interval);
     try {
@@ -151,7 +144,7 @@ export class UserDataStream {
 
   start(): void {
     const s = getSettings();
-    if (s.mode === 'paper') { this.stop(); return; }
+    if (!s.keys[s.mode].key || !s.keys[s.mode].secret) { this.stop(); return; }
     if (this.mode === s.mode && this.ws && this.ws.readyState === WebSocket.OPEN) return;
     this.stop();
     this.stopped = false;

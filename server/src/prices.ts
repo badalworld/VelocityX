@@ -4,8 +4,7 @@
  * A tiny leaf module (no imports) so every part of the server can read the
  * freshest price the feed produced without importing the trader (which would
  * create a dependency cycle with the account/PnL layer). Written by the market
- * stream and the offline demo feed, read by the executor, the account service
- * and the dashboard.
+ * stream, read by the executor, the account service and the dashboard.
  */
 
 const prices = new Map<string, number>();

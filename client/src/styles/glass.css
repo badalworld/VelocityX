@@ -520,28 +520,16 @@
   animation: led-pulse 2s var(--ease-inout) infinite;
 }
 
-.badge-mode.paper {
+.badge-mode.testnet {
   color: var(--cyan);
   border-color: rgba(62, 240, 255, 0.42);
   background-color: var(--cyan-dim);
-}
-
-.badge-mode.testnet {
-  color: var(--amber);
-  border-color: rgba(255, 200, 87, 0.42);
-  background-color: var(--amber-dim);
 }
 
 .badge-mode.live {
   color: #ffd2dc;
   border-color: rgba(255, 79, 116, 0.55);
   background-color: var(--red-dim);
-}
-
-.badge-mode.warn {
-  color: var(--amber);
-  border-color: rgba(255, 200, 87, 0.42);
-  background-color: var(--amber-dim);
 }
 
 /* ---------- form fields --------------------------------------------------- */

@@ -26,7 +26,7 @@ export function Topbar({
   onKill: () => void;
   onOpenPnl?: () => void;
 }) {
-  const mode = status?.mode ?? 'paper';
+  const mode = status?.mode ?? 'live';
   const price = status?.price ?? 0;
   const account = status?.account ?? null;
   const positions = status?.openTrades ?? [];
@@ -34,8 +34,8 @@ export function Topbar({
   const maxPos = status?.slots?.max ?? status?.maxPositions ?? 8;
   const unPnl = account?.bot.unrealizedPnl ?? positions.reduce((a, t) => a + (t.unrealized ?? 0), 0);
   const feed = status?.feedInfo?.feed ?? status?.feed ?? 'binance';
-  const feedLabel = feed === 'binance' ? 'Binance' : feed === 'offline-demo' ? 'Demo feed' : 'Offline';
-  const feedTone = feed === 'binance' ? 'live' : feed === 'offline-demo' ? 'warn' : 'error';
+  const feedLabel = feed === 'binance' ? 'Binance' : 'Offline';
+  const feedTone = feed === 'binance' ? 'live' : 'error';
 
   const priceNode = price
     ? price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -55,7 +55,7 @@ export function Topbar({
 
       <span className={`badge-mode ${mode}`}>
         <i className="led" />
-        {mode === 'paper' ? 'Paper' : mode === 'testnet' ? 'Testnet' : 'Live Money'}
+        {mode === 'testnet' ? 'Testnet' : 'Live Money'}
       </span>
 
       <span
@@ -63,9 +63,7 @@ export function Topbar({
         title={
           feed === 'binance'
             ? `Realtime Binance data · REST ${status?.feedInfo?.avgLatencyMs ?? 0}ms · ${status?.feedInfo?.candles?.bars ?? 0} candles cached`
-            : feed === 'offline-demo'
-              ? 'Binance unreachable from this host — labelled synthetic demo feed active (VX_OFFLINE_DEMO=1)'
-              : 'Binance unreachable — no market data is being invented'
+            : 'Binance unreachable — no market data is being invented'
         }
       >
         <i className="led" />
@@ -84,12 +82,12 @@ export function Topbar({
         </span>
       </div>
 
-      <div className="stat-pod hide-md" title={account?.source === 'binance' ? 'Binance margin balance (equity)' : 'Paper equity'}>
+      <div className="stat-pod hide-md" title="Binance margin balance (equity)">
         <span className="pod-ico">
           <IconBolt />
         </span>
         <span className="pod-body">
-          <span className="pod-k">Equity · {account?.source === 'binance' ? 'binance' : 'paper'}</span>
+          <span className="pod-k">Equity · binance</span>
           <span className="pod-v">
             {account?.equity != null ? <AnimatedNumber value={account.equity} decimals={2} /> : '—'}
             <span style={{ fontSize: 9.5, color: 'var(--dim)', marginLeft: 4 }}>USDT</span>
@@ -154,7 +152,7 @@ export function NavRow({
   motionOn: boolean;
   onToggleMotion: () => void;
 }) {
-  const marketUp = !!status?.streams?.market || status?.feed === 'offline-demo';
+  const marketUp = !!status?.streams?.market;
   const userUp = !!status?.streams?.user;
   return (
     <nav className="navrow" aria-label="Views">

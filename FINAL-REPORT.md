@@ -1,172 +1,117 @@
-# VelocityX — Full-Code Audit & Production-Readiness Report
+# VelocityX — Real-Trade Readiness & Dead-Code Audit
 
-**Date:** 2026-10-05 · **Branch:** `arena/5a6ef675-velocityx` · **Base:** `bb3d6dd`
-**Scope:** complete audit of the server (execution, risk, exchange I/O) and the client (dashboard UI/UX), dead-code removal, bug fixes, real-money hardening, verification.
+**Date:** 2026-10-05 · **Branch:** `arena/ae918cd1-velocityx` · **Base:** `4dd27ec`
+**Scope:** remove every simulated data path, make the execution stack production-ready for real orders, audit the whole tree for dead code and bugs, and verify the result end-to-end.
 
 ---
 
 ## 1. Executive summary
 
-VelocityX was already a working paper/testnet bot; it is now a **production-ready, live-trading-capable** Binance USD-M Futures execution system, with the real-money path defended at every layer:
+VelocityX is now a **real-trade-only** Binance USD-M Futures execution system:
 
-- **LIVE can never be entered by accident.** It takes an explicit UI confirmation → `confirmLive: true` on the API → and the server *forces auto-trading OFF* while entering LIVE. Arming execution is a second, deliberate action (`POST /api/autotrade` with `confirmLive: true`), and disarming never needs confirmation.
-- **A restart never resumes real trading silently.** A persisted `live` config boots as PAPER with auto-trade OFF unless `VX_ALLOW_LIVE=1` is set, and says so in the log + activity feed.
-- **The API that can place orders is locked.** `VX_API_TOKEN` gates every REST route (incl. the WebSocket upgrade) with a timing-safe compare; only `/api/health` stays public for process supervisors. Mutating routes are rate-limited per IP, secrets are write-only/`0600`/masked, and rate-limit weights are split into five independent areas within a 95 % budget.
-- **Orders can only touch bot-owned positions.** Entries refuse symbols that already carry a position, every protective stop is explicit-size + `reduceOnly`, closes are tagged with the bot's own client order IDs, and the Kill switch flattens bot positions only.
-- **The full test suite is green** — 6 verification programs (indicator vectors, paper E2E, realtime invariants, API hardening, UI smoke, Binance path) plus type-checks and builds.
-
-In the same pass the codebase was **de-screened** (the abandoned screener UI/API was removed), dead code was deleted on both sides (246 deleted CSS lines and 4 orphan keyframes, 0 unreferenced selectors left), the paper fill model was made gap-honest, and the position ladder gained live progress bars.
+- **No simulation lives in the product.** There is no synthetic/demo price feed, no paper fill engine, no virtual balance, no seeded journal and no fallback that invents numbers. Every price, fill, fee, funding payment, equity value and PnL figure comes from Binance (mainnet market data; testnet or live mainnet for orders and account state).
+- **When Binance is unreachable nothing is fabricated.** The feed is reported as `binance-unreachable`, the engine holds no candles, no signal fires, no order is sent, and the dashboard says so. The server reconnects on its own and resumes on real data.
+- **Modes are `testnet | live`.** Testnet is Binance's own exchange environment (real API, real order shapes, test funds) — the rehearsal ground before mainnet. Live is real money. A stale `BINANCE_MODE=paper` or `mode: 'paper'` request is rejected (`400`), and legacy persisted configs are migrated.
+- **Live can never be entered or resumed by accident.** LIVE needs an explicit UI confirmation → `confirmLive: true` → the server forces auto-trading **OFF** on entry; arming is a second deliberate action; and a restart of a persisted LIVE + armed config boots **disarmed** unless `VX_ALLOW_LIVE=1` is set.
+- **The full verification suite is green** — indicator vectors, execution E2E on the real order-shaping path, realtime invariants, API hardening, UI smoke (54/54) and the Binance reachability probe — plus strict type-checks and production builds on both sides.
 
 ---
 
-## 2. What was audited
+## 2. What was removed (simulation, data by data)
 
-| Area | Files |
-| --- | --- |
-| Server | `index.ts`, `api.ts`, `auth.ts`, `settings.ts`, `store.ts`, `engine.ts`, `trader.ts`, `scanner.ts`, `indicators.ts`, `binance.ts`, `account.ts`, `stats.ts`, `streams.ts`, `broadcast.ts`, `candles.ts`, `prices.ts`, `ratelimit.ts`, `offline.ts` |
-| Server scripts | `smoke.js`, `e2e-paper.js`, `verify-realtime.js`, `verify-api.js`, `verify-binance.js`, `gen-reference.py` |
-| Client | `App.tsx`, `api.ts`, `ws.ts`, `types.ts`, `pnl.ts`, `hooks/motion.ts`, all `components/`, `views/`, `motion/`, `styles/` |
-| Tooling | Vite/TS config, `ui-smoke.mjs` (53 DOM assertions), package scripts, README/DESIGN |
-
-Every source file was read end-to-end; every exported symbol was cross-checked against its consumers (including the test scripts); all six stylesheets were scanned for selectors that no longer render.
-
----
-
-## 3. Real-money safety (the core of "production ready")
-
-### 3.1 Arming ladder (defence in depth)
-
-| Step | Where | What it guarantees |
+| Simulated path | Where it lived | What replaced it |
 | --- | --- | --- |
-| 1 | Client confirm | Switching to LIVE asks for confirmation in Settings and in the header auto-trade switch. |
-| 2 | `POST /api/settings` | `mode: 'live'` without `confirmLive: true` → `400`, mode unchanged. |
-| 3 | Server | **Entering LIVE always lands `autoTrade: false`**, whatever the body asked for. The UI shows “LIVE armed — auto-trading is OFF”. |
-| 4 | `POST /api/autotrade` | Enabling auto-trade while LIVE needs its own `confirmLive: true`. |
-| 5 | Boot | `mode: live` persisted without `VX_ALLOW_LIVE=1` → boots PAPER, auto-trade OFF, `VX_ALLOW_LIVE` warning logged. |
-| 6 | Symbols | Live/testnet entries are refused when the market already carries a non-bot position. |
-| 7 | Exchange | `canTrade=false` blocks entries; requested leverage is clamped to the symbol's bracket. |
+| Synthetic regime-switching candle feed (10× clock) | `server/src/offline.ts` (263 lines) + hooks in `binance.ts`, `engine.ts`, `streams.ts`, `index.ts`, `account.ts`, `api.ts` | File deleted. No feed → no candles, no signals, no orders; `feed: 'binance-unreachable'` is surfaced in `/api/health`, `/api/diagnostics` and the UI |
+| Paper mode (simulated fills on live prices) | `settings.ts` (`Mode`), `trader.ts` (`checkPaperFills`, paper branches everywhere), `store.ts` (`paper.json`, balances), `account.ts` (`paper-sim` equity), client mode selector | Removed. `Mode = 'testnet' \| 'live'`; `PAPER_START_BALANCE`, `feeRate`, `get/set/adjustPaperBalance`, `resetPaper`, `usedPaperBalance` are gone; legacy keys are stripped by the settings sanitizer |
+| Virtual starting balance in the P&L model | `client/src/pnl.ts` `fallbackBase: 1000` | Removed. The curve is anchored to Binance account equity when reported, otherwise to **cumulative realised PnL only**; the dock states which of the two is on screen |
+| `demoFeedAllowed` / `offline-demo` feed states | `api.ts`, `types.ts`, `Header`, `Overview`, `PositionsView`, `SettingsView` | Removed; feed is `binance` or `binance-unreachable` |
+| Demo fixtures presented as real in tests | `server/scripts/e2e-paper.js`, `verify-realtime.js`, `verify-api.js`, `verify-binance.js`, `client/scripts/ui-smoke.mjs` | `e2e-paper.js` deleted → new `e2e-execution.js` drives the **real order-shaping code** against a stubbed exchange; the other harnesses were rewritten to assert the no-simulation contract (e.g. verify-binance now proves the board stays empty and honest without egress) |
+| "Enter your balance" style copy / manual asset input | client views | Removed; `ui-smoke.mjs` asserts no `paper`/`demo feed`/`offline demo`/`simulated mode` text and no manual-equity input |
 
-### 3.2 Order safety
-
-- Protective stops are **explicit size + `reduceOnly`** (never `closePosition:true`), so a stop can only shrink the bot's own position and stays armed on the exchange across restarts/shutdowns.
-- Entry/close/TP/SL orders carry deterministic `VX<tradeId>…` client order IDs; ownership is re-derived from the journal, not assumed.
-- Duplicate/retried signals can't double-open: one entry round-trip per symbol at a time.
-- Kill switch closes **bot-owned positions only**, at market, and is journaled.
-
-### 3.3 API surface
-
-- Token auth (`X-VX-Token` for REST, `?token=` for WS) with timing-safe comparison; loud boot warning if unset.
-- `/api/health` is public and deliberately tiny (supervisors); everything else is 404-JSON for unknown paths (never the SPA shell, never a stub).
-- Per-IP rate limits on state-changing routes (60/min, burst 20).
-- Binance weight scheduler: 2280/min (95 % of 2400) split across scanner / market / account / orders / stream areas with per-area caps and telemetry at `/api/limits`.
-
-### 3.4 Data integrity
-
-- Corrupt journals/settings are **quarantined** (`*.corrupt-<ts>`), never silently dropped.
-- `settings.json` is written atomically with mode `0600`; API keys never leave the server in clear text (masked in every response).
-- Graceful SIGTERM: feeds stop, pending work drains, **exchange-side SL/TP stay armed**, and the shutdown path logs how many positions remain protected.
+`VX_OFFLINE_DEMO` no longer exists in the codebase or in `.env.example`.
 
 ---
 
-## 4. Bugs fixed
+## 3. Bugs found & fixed
 
 | # | Bug | Fix |
 | --- | --- | --- |
-| 1 | Paper TP/SL fills booked at the *level price* — unrealistically precise PnL | Fills now book the observed market tick (gap-through realism); stop fills clamp to `min/max(stop, market)` |
-| 2 | Paper entries never charged commission | Entry taker fee is booked like Binance's fee model (`fees` + realised PnL + balance) |
-| 3 | A duplicated signal could open two positions on one symbol | `entering` guard: one entry round-trip per symbol at a time |
-| 4 | Live entries could be attempted on a symbol with an existing manual position | Ownership guard refuses the market (ambiguous reduceOnly ladder) |
-| 5 | `canTrade=false` keys were used anyway | Entry aborts with a clear executor error |
-| 6 | Leverage above the exchange bracket failed the whole entry | Auto-clamp to `api.maxLeverage(symbol)` with a log line |
-| 7 | WebSocket reconnect after a token change kept the old socket/token | `reconnect()` re-opens with the current token; Settings → Connection triggers it |
-| 8 | 401 responses surfaced as raw “HTTP 401” | Client maps them to “Unauthorised — enter the API token in Settings → Connection” |
-| 9 | The header auto-trade switch could arm LIVE without confirmation | Confirmation dialog + `confirmLive` echo; server-side arming rules above |
-| 10 | `/api/chart` (dead) returned the SPA shell | All removed endpoints now answer JSON 404 |
-| 11 | Scanner payload could be unbounded | `?limit` capped at 80 rows |
-| 12 | `verify-binance.js` indentation/consistency | Fixed; script still never pretends the feed is live when egress is absent |
+| 1 | Hedge-mode TP legs sent `reduceOnly` (Binance rejects it in hedge mode) | `takeProfitMarket()` detects dual-side mode and switches between `reduceOnly` (one-way) and `positionSide` (hedge); the ladder passes the trade's own side. Covered by a new hedge-mode E2E section |
+| 2 | `createListenKey` / keep-alive could hang forever on a stalled connection | `AbortSignal.timeout(10_000)` on both requests; the user-data stream can always retry |
+| 3 | `verify-realtime.js` hung: the first `trader.kill()` of section 7 ran **before** the exchange stubs were installed, hitting the unstubbed order path whose promise never settled | Stub installation (and the testnet settings switch) moved above the first live-path call; the KILL close is classified as `kind:'market-close'` so the entry invariant stays strict |
+| 4 | The client P&L model invented a 1000 USDT base when Binance equity was missing | Virtual base removed; null equity is handled explicitly with truthful copy (`realised + live unrealised · account equity pending`) |
+| 5 | `e2e-execution.js` hedge assertions could match stale orders from earlier sections | Assertions scope to the trade's own `VX<tradeId>` client-order-id prefix |
+| 6 | `verify-binance.js` reported false failures when the host cannot egress to Binance (status/scanner/WS checks) | Without egress the script now skips exchange-data checks and instead asserts the empty-but-truthful behaviour (feed `binance-unreachable`, 0 scanner rows, WS hub alive but no fabricated ticks) |
+| 7 | `verify-api.js` still expected a paper fallback on boot | Now asserts a persisted LIVE config boots **LIVE but disarmed** without `VX_ALLOW_LIVE`, and that `mode:'paper'` is rejected with `testnet \| live` |
+| 8 | The UI smoke asserted the real-money banner was absent even against a server legitimately running on mainnet | The check is now environment-aware: the `LIVE MONEY` banner is **required** whenever `/api/status` reports `mode: live` (armed or disarmed) and forbidden on testnet |
+| 9 | Engine logged `candles … fetch failed` on every 2 s tick during an exchange outage | Throttled to once/60 s per symbol; the reachability flip itself is still logged immediately by `binance.ts` |
+
+Earlier hardening retained and re-verified: duplicate-entry guard, external-position ownership guard, `canTrade=false` abort, leverage clamp to the symbol bracket, WS reconnect on token change, 401 → "enter the API token" copy, JSON 404s for removed endpoints, capped scanner payloads, atomic `0600` settings writes, corrupt-journal quarantine, and graceful SIGTERM with exchange-side stops left armed.
 
 ---
 
-## 5. Dead code removed
+## 4. Real-money safety chain (verified)
 
-**Client**
-
-- `components/PositionCard.tsx` — deleted (superseded by the managed/external book split).
-- Screener surface: `ScreenerGrid`/`ScreenerPanel`, the `/api/screener` fetch + `ScreenerData` state, `ScreenerData`/`Diagnostics` types.
-- 7 never-rendered icons (`IconArrowUp`, `IconArrowDown`, `IconChevron`, `IconClose`, `IconGrid`, `IconPause`, `IconPlay`), the unused `Mini` primitive, unused `PnlChart` locals, `wsConnected`, `Panels.tsx` leftovers.
-- **CSS:** 36 unused selectors across all six stylesheets (`.sr-only`, `.hint.err`, `.scroll-x`, `.num`/`.mono`, `.glass-sm` + pseudo-elements, `.panel-body.tight`, `.skel` + shimmer, `.liquid-div`, `.glow-ring` + pseudo-element, `.anim-*`, `.d1`–`.d6`, `.shimmer-line`, `.grid-3`, `.grid-auto`, `.span-2`, `.trend`, `.t-cyan`/`.t-green`/`.t-red`/`.t-amber`/`.t-violet`, `.kpi-delta`, `.pnl-mini .mini-spark`, tone-amber KPI variants) **plus 4 orphan `@keyframes`** (`slide-in-right`, `ring-sweep`, `bar-grow`, `candle-breathe`). CSS bundle: 61.87 kB → **58.25 kB**; 246 deletion lines vs 16 insertions across the six sheets (the insertions are the new ladder-progress styling).
-
-**Server**
-
-- `indicators.screenerState()` (only consumer was the removed screener).
-- Dead `intentionalCancel` reconciliation suppression and `closePosition:true` stop path replaced by the explicit-size `protectiveStop`; `remainingQtyOf`/ownership helpers consolidated.
-
-**Verification of the sweep:** 0 exported symbols unused (client + server, incl. scripts), 0 orphan modules, 0 unreferenced CSS selectors, no `TODO/FIXME`, no stray debug logging.
+1. Switching to LIVE requires the UI confirmation, echoed as `confirmLive: true` — otherwise `400`.
+2. Entering LIVE always lands `autoTrade: false`, whatever the request body said.
+3. Enabling auto-trading while LIVE is a separate `POST /api/autotrade` that again requires `confirmLive: true`.
+4. A restart never resumes arming silently: persisted LIVE + auto-trade boots disarmed unless `VX_ALLOW_LIVE=1`.
+5. Entries are refused on a symbol that already carries an external/manual position (ambiguous `reduceOnly`).
+6. `canTrade=false` blocks entries; leverage is clamped to `api.maxLeverage(symbol)`.
+7. Every order carries a `VX<tradeId>…` client order id; protective stops are explicit-size `reduceOnly` (one-way) or `positionSide`-scoped (hedge), never `closePosition:true`.
+8. The Kill switch flattens **bot-owned** positions only; external positions are listed read-only and can never enter the journal, PnL or stats.
+9. `VX_API_TOKEN` gates every REST route (except `/api/health`) and the WebSocket upgrade; keys are masked, stored `0600` and never returned in clear text.
+10. When the exchange is unreachable there is no trading and no invented data.
 
 ---
 
-## 6. UI/UX improvements
+## 5. Verification evidence
 
-- **Position ladder progress bars.** Each SL/TP rung now shows how far price has travelled from entry toward that level, computed from the live mark price (`progressTo`), with a wet-glass sheen; hit rungs fill 100 %. The breakeven stop turns amber (`lvl-be`) once the SL is moved to BE, matching the existing design system.
-- **LIVE banner** (`role="alert"`): red and explicit while LIVE auto-trading is armed, amber when LIVE but disarmed (with the exact Kill-switch consequences spelled out).
-- **MTF gauge panel** (new `MtfPanel.tsx`): gradient arc + needle rotated by the bullish share of the 5m/15m/30m ribbon, `tf-chip` rows, ATR hint.
-- **Execution Rules panel** on Overview: entry, SL, TP1–3, opposite-signal handling, sizing, ownership — visible in one glance.
-- **API token field** in Settings → Connection (localStorage only, never sent anywhere else) with “Token saved — reconnecting”.
-- Truthful feed banners (live / unreachable / offline-demo), scanner-only marquee, and copy that states the bot never adopts or closes external positions.
-
----
-
-## 7. Verification evidence
-
-All commands executed on the final tree:
+All commands executed on this tree:
 
 | Command | Result |
 | --- | --- |
-| `npx tsc --noEmit --noUnusedLocals --noUnusedParameters` (client + server) | clean |
-| `npm run build` | client built (html 2.69 kB, css 58.25 kB, js 269.59 kB) |
-| `npm test --prefix server` | **ALL TESTS PASSED** (indicator vectors vs. independent Python reference, signal logic, TP ladder splits) |
-| `npm run test:e2e --prefix server` | **E2E: ALL TESTS PASSED** — 8-position cap, TP1/TP2/TP3, breakeven, reverse, kill; final paper balance 997.54 USDT |
-| `npm run test:realtime --prefix server` | **REALTIME INVARIANTS: ALL CHECKS PASSED** — weight budget/areas, order rate, scanner gates/pegged rejection, ownership guards |
-| `npm run test:api --prefix server` | **API HARDENING: ALL CHECKS PASSED** — token on REST+WS, 401s, JSON 404s, live-arming rules incl. force-disarm, masked secrets, SIGTERM exit, persisted-live downgrade |
-| `npm run smoke:ui --prefix client` | **53/53 checks passed** (fixtures) and **53/53** live against the running server |
-| `npm run verify:binance --prefix server` | **ALL CHECKS PASSED** (skips exchange probes without egress — by design, never fakes a live feed) |
-
-The UI smoke suite asserts the visual contract, including: 4 KPI pods, 3 stat rings, ≥5 hit-rate bars, 4 PnL-dock segments, 5 PnL stats, 5 nav segments, MTF gauge fill, ≥3 timeframe chips, Execution Rules text, no LIVE banner in paper, API-token field, ladder fills with valid widths, no `NaN/Infinity`, no `/api/chart` request.
+| `tsc --noEmit --noUnusedLocals --noUnusedParameters` (server + client) | clean, both sides |
+| `npm run build` (root: server `tsc` + client `vite build`) | OK — `dist/index.html` 2.69 kB, CSS 58.06 kB (gzip 12.35), JS 268.58 kB (gzip 78.54), 52 modules |
+| `npm test --prefix server` | **ALL TESTS PASSED** — EMA/ATR/ADX vectors vs. an independent Python reference, signal logic, ladder splits |
+| `npm run test:e2e --prefix server` | **E2E: ALL TESTS PASSED** — real order shaping against a stub exchange: ladder placement, TP1/TP2/TP3, breakeven, reverse, kill, 8-position cap, hedge mode, ownership guards |
+| `npm run test:realtime --prefix server` | **REALTIME INVARIANTS: ALL CHECKS PASSED** — 95 % (2280/min) weight budget split over 5 areas, order budget 1140/min + 285/10 s, pegged-symbol rejection, ADX gates, volatility ranking, external positions never touched, live-entry production guards |
+| `npm run test:api --prefix server` | **API HARDENING: ALL CHECKS PASSED** — token on REST + WS, JSON 404s, live-arming rules, masked secrets, SIGTERM exit, persisted LIVE is not resumed by a restart |
+| `npm run smoke:ui --prefix client` | **54/54 checks passed** (deterministic fixtures) and against the running server (data-dependent checks skip when the account has nothing open) |
+| `npm run verify:binance --prefix server` (and `-- --server` against a live boot) | **ALL CHECKS PASSED** — without egress it reports `binance-unreachable`, 0 invented rows and exits 0; with the server running it also proves the WS hub is alive without fabricating ticks |
 
 ---
 
-## 8. Going live — operator checklist
+## 6. Dead-code audit
+
+- **Server:** `offline.ts` (263 lines) deleted with all its hooks; paper-mode branches removed from `trader.ts` (−387/+… net deletion across the file), `account.ts`, `store.ts`, `settings.ts`, `events`/feed helpers. Every remaining export is referenced (server + scripts cross-checked).
+- **Client:** no unused exports/locals under `--noUnusedLocals --noUnusedParameters`; CSS scan found zero unreferenced selectors after removing the dead `.badge-mode.warn` rule (two false positives were data-URI/comment matches).
+- **Scripts:** `e2e-paper.js` deleted; `verify-*.js` updated so none of them rely on a simulated feed.
+- **Repo hygiene:** no `TODO`/`FIXME`/`debugger`/stray `console.debug` in `server/src`, `client/src` or the scripts.
+
+---
+
+## 7. Going live — operator checklist
 
 ```bash
-cp .env.example .env                 # then edit
-VX_API_TOKEN=<long random string>    # required: locks REST + WS
-VX_ALLOW_LIVE=1                      # only when you intend to resume LIVE after restarts
-BINANCE_MODE=testnet                 # prove the loop on testnet first, then switch to live in the UI
-npm run build && npm start
+cp .env.example .env
+VX_API_TOKEN=<long random string>      # locks REST + WS
+# VX_ALLOW_LIVE=1                      # only if a restart should resume armed LIVE
+BINANCE_MODE=testnet                   # prove the loop on testnet first
+npm install && npm run build && npm start
 ```
 
-1. Add IP-restricted Binance Futures keys (futures enabled) in **Settings → Connection** or via env.
-2. Run **TESTNET** with auto-trading for a full session; confirm entries, TP/SL ladder, breakeven move, Kill switch.
-3. Enter the API token in the dashboard if you set `VX_API_TOKEN` (otherwise the API is open — the boot log warns loudly).
-4. Switch to **LIVE** (confirmation + `confirmLive`) — the bot lands **disarmed**.
-5. Enable auto-trading as a separate, deliberate action.
-6. Keep `VX_ALLOW_LIVE` unset if you want a restart to fall back to PAPER.
+1. Add IP-restricted Binance Futures keys (Futures enabled) in **Settings → Connection** or via env.
+2. Run **TESTNET** with auto-trading for a full session; verify entries, the TP/SL ladder, the breakeven move, Kill switch and the P&L figures against the Binance testnet app.
+3. Switch to **LIVE** (confirmation + `confirmLive`) — the bot lands **disarmed**.
+4. Arm auto-trading as a separate, deliberate action. Start with a small `tradeSizePercent`.
+5. Consider `VX_ALLOW_LIVE` **unset** so restarts always come back disarmed.
 
 ---
 
-## 9. Known limitations & operational notes
+## 8. Known limitations & notes
 
-- `verify:binance` needs egress to `fapi.binance.com`; in sandboxed/offline hosts it reports that and exits 0. The labelled `VX_OFFLINE_DEMO=1` feed is for demos only.
-- The dashboard is single-operator: token auth is a shared secret, not per-user accounts. Put it behind a VPN/Tailscale or an authenticating reverse proxy if exposed publicly.
-- Binance endpoint weight budget assumes the default 2400/min IP limit (VIP tiers can raise it; `ratelimit.ts` is the single place to change).
-- No automated exchange-side reconciliation beyond the ownership/stop guards described; a manual position on a symbol permanently disqualifies that symbol until it is flat.
-
----
-
-## 10. Change inventory
-
-40 files modified, 1 deleted, 6 added (before this report):
-
-- **Server:** `api.ts` (public health, `confirmLive`, force-disarm on LIVE, JSON 404s, rate limits), `auth.ts` (new), `index.ts` (`VX_ALLOW_LIVE` downgrade, shutdown), `trader.ts` (ownership gates, canTrade/leverage guards, duplicate-entry guard, gap-honest fills, entry fees, explicit-qty stops), `store.ts` (quarantine, `remainingQtyOf`), `settings.ts` (atomic `0600` write, mode validation), `binance.ts`, `ratelimit.ts` (areas), `broadcast.ts` (token-gated WS), `account.ts`, `engine.ts`, `scanner.ts`, `candles.ts`, `prices.ts`, `indicators.ts`, plus `scripts/verify-api.js` (new), `scripts/fixtures/` + `gen-reference.py` (new).
-- **Client:** `App.tsx`, `api.ts`, `ws.ts`, `types.ts`, `views/Overview.tsx`, `components/{MtfPanel(new),SettingsPanel,Positions,Panels,PnlChart}`, `motion/{Icons,primitives}`, six stylesheets, `index.html`, `scripts/ui-smoke.mjs`.
-- **Docs:** `README.md` (production safety, env vars, ownership guarantees), `DESIGN.md` (hardening UI contract), `.env.example` (new), this report.
+- `verify:binance` needs egress to `fapi.binance.com` for the exchange-data checks; sandboxed hosts get the honest offline report and exit 0.
+- The dashboard is single-operator: the API token is one shared secret. Put it behind a VPN/Tailscale or an authenticating reverse proxy if exposed publicly.
+- The 2400/min Binance weight assumption matches the default VIP-0 IP limit (`server/src/ratelimit.ts` is the single place to change it).
+- A manual position on a symbol disqualifies that symbol for the bot until it is flat; external positions are never adopted or closed.

@@ -3,13 +3,16 @@
  * and checks the hardening that protects live trading:
  *
  *   1. token auth (VX_API_TOKEN) on REST + WebSocket
- *   2. live-mode arming: switching to LIVE needs confirmLive, and LIVE without
- *      keys is rejected
+ *   2. live-mode arming: switching to LIVE needs confirmLive, LIVE without keys
+ *      is rejected, entering LIVE always lands disarmed, and arming execution
+ *      in LIVE needs its own confirmation
  *   3. removed/dead endpoints are gone (JSON 404, never the SPA shell)
  *   4. API keys are never returned in clear text
  *   5. graceful shutdown on SIGTERM
+ *   6. restart safety: a persisted LIVE + auto-trade boots DISARMED without
+ *      VX_ALLOW_LIVE (there is no simulated fallback)
  *
- * The run is hermetic: its own data dir, paper mode, auto-trade off at boot.
+ * The run is hermetic: its own data dir, testnet mode, auto-trade off at boot.
  *   npm run test:api
  */
 const { spawn } = require('child_process');
@@ -93,9 +96,8 @@ function wsProbe(query) {
       ...process.env,
       PORT: String(PORT),
       VX_DATA_DIR: DATA_DIR,
-      VX_OFFLINE_DEMO: '1',
       VX_API_TOKEN: TOKEN,
-      BINANCE_MODE: 'paper',
+      BINANCE_MODE: 'testnet',
       BINANCE_TESTNET_KEY: 'TESTKEY1234567890',
       BINANCE_TESTNET_SECRET: 'TESTSECRET1234567890',
       // deliberately NOT set: VX_ALLOW_LIVE
@@ -122,7 +124,7 @@ function wsProbe(query) {
       assert(r.status === 401, `GET ${p} without a token → 401`);
     }
     const authed = await req('GET', '/api/status', { token: TOKEN });
-    assert(authed.status === 200 && authed.json?.mode === 'paper', 'GET /api/status with the token → 200 (paper)');
+    assert(authed.status === 200 && authed.json?.mode === 'testnet', 'GET /api/status with the token → 200 (testnet)');
     const queryToken = await req('GET', `/api/status?token=${TOKEN}`);
     assert(queryToken.status === 200, 'token is also accepted as ?token= (WS/preview friendly)');
 
@@ -141,8 +143,11 @@ function wsProbe(query) {
     console.log('\n— Live-trading arming —');
     const noConfirm = await req('POST', '/api/settings', { token: TOKEN, body: { mode: 'live' } });
     assert(noConfirm.status === 400 && /confirmLive/i.test(noConfirm.json?.error || ''), 'mode→live without confirmLive is rejected');
-    const stillPaper = await req('GET', '/api/status', { token: TOKEN });
-    assert(stillPaper.json?.mode === 'paper', 'mode stayed paper after the rejected switch');
+    const stillTestnet = await req('GET', '/api/status', { token: TOKEN });
+    assert(stillTestnet.json?.mode === 'testnet', 'mode stayed testnet after the rejected switch');
+
+    const paperRejected = await req('POST', '/api/settings', { token: TOKEN, body: { mode: 'paper' } });
+    assert(paperRejected.status === 400 && /testnet \| live/i.test(paperRejected.json?.error || ''), 'removed paper mode is rejected by the API (simulation is gone)');
 
     const liveNoKeys = await req('POST', '/api/settings', { token: TOKEN, body: { mode: 'live', confirmLive: true } });
     assert(liveNoKeys.status === 400, 'LIVE is refused when no live keys are configured');
@@ -150,8 +155,8 @@ function wsProbe(query) {
     const badSymbol = await req('POST', '/api/settings', { token: TOKEN, body: { symbol: '<script>' } });
     assert(badSymbol.status === 400, 'invalid symbols are rejected');
 
-    const autoPaper = await req('POST', '/api/autotrade', { token: TOKEN, body: { enabled: true } });
-    assert(autoPaper.status === 200 && autoPaper.json?.autoTrade === true, 'auto-trade toggles in paper without confirmation');
+    const autoTestnet = await req('POST', '/api/autotrade', { token: TOKEN, body: { enabled: true } });
+    assert(autoTestnet.status === 200 && autoTestnet.json?.autoTrade === true, 'auto-trade toggles on testnet without confirmation');
     await req('POST', '/api/autotrade', { token: TOKEN, body: { enabled: false } });
 
     // Entering LIVE must always land disarmed: even if the caller arms
@@ -160,7 +165,7 @@ function wsProbe(query) {
       token: TOKEN,
       body: { keys: { live: { key: 'TESTLIVEKEY0001', secret: 'TESTLIVESECRET0001' } } },
     });
-    assert(keysPatch.status === 200, 'live keys can be saved (masked back) while still in paper');
+    assert(keysPatch.status === 200, 'live keys can be saved (masked back) while still on testnet');
     const liveArm = await req('POST', '/api/settings', {
       token: TOKEN,
       body: { mode: 'live', confirmLive: true, autoTrade: true },
@@ -174,9 +179,10 @@ function wsProbe(query) {
     assert(liveAuto.status === 200 && liveAuto.json?.autoTrade === true, 'auto-trade in LIVE needs its own explicit arming');
     const liveAutoNoConfirm = await req('POST', '/api/autotrade', { token: TOKEN, body: { enabled: false } });
     assert(liveAutoNoConfirm.status === 200 && liveAutoNoConfirm.json?.autoTrade === false, 'disarming LIVE needs no confirmation');
-    await req('POST', '/api/settings', { token: TOKEN, body: { mode: 'paper', autoTrade: false } });
-    const backToPaper = await req('GET', '/api/status', { token: TOKEN });
-    assert(backToPaper.json?.mode === 'paper', 'returned to paper for the remaining checks');
+    const backToTestnet = await req('POST', '/api/settings', { token: TOKEN, body: { mode: 'testnet', autoTrade: false } });
+    assert(backToTestnet.status === 200, 'switching back to testnet works');
+    const statusNow = await req('GET', '/api/status', { token: TOKEN });
+    assert(statusNow.json?.mode === 'testnet', 'returned to testnet for the remaining checks');
 
     /* ---------------- 4. secrets ---------------- */
     console.log('\n— Secrets never leave in clear text —');
@@ -203,7 +209,7 @@ function wsProbe(query) {
       );
       const child2 = spawn(process.execPath, [path.join(__dirname, '..', 'dist', 'index.js')], {
         cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PORT: String(livePort), VX_DATA_DIR: liveDir, VX_OFFLINE_DEMO: '1', VX_API_TOKEN: TOKEN },
+        env: { ...process.env, PORT: String(livePort), VX_DATA_DIR: liveDir, VX_API_TOKEN: TOKEN },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let logs2 = '';
@@ -224,9 +230,9 @@ function wsProbe(query) {
           await sleep(250);
         }
         assert(!!st, 'second instance booted with a persisted live config');
-        assert(st?.mode === 'paper', `persisted LIVE was downgraded to paper without VX_ALLOW_LIVE (${st?.mode})`);
-        assert(st?.autoTrade === false, 'auto-trade was forced OFF on the downgrade');
-        assert(/VX_ALLOW_LIVE/.test(logs2), 'boot log explains the live downgrade');
+        assert(st?.mode === 'live', `persisted LIVE stays LIVE (no simulation fallback) (${st?.mode})`);
+        assert(st?.autoTrade === false, 'auto-trade was forced OFF without VX_ALLOW_LIVE');
+        assert(/VX_ALLOW_LIVE/.test(logs2), 'boot log explains why real execution was not resumed');
       } finally {
         try {
           child2.kill('SIGTERM');

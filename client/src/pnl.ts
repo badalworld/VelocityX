@@ -33,7 +33,10 @@ export interface PnlModel {
   net: number;
   realized: number;
   unrealized: number;
-  equity: number;
+  /** Binance account equity; null until the exchange reports it (never invented). */
+  equity: number | null;
+  /** true when Binance has reported an account equity — the curve is then anchored to it. */
+  equityKnown: boolean;
   changePct: number;
   trades: number;
   wins: number;
@@ -51,7 +54,7 @@ export interface PnlModel {
 
 export function buildPnl(
   trades: Trade[],
-  opts: { equity: number; unrealized: number; rangeKey: PnlRangeKey; now?: number; fallbackBase?: number },
+  opts: { equity: number | null; unrealized: number; rangeKey: PnlRangeKey; now?: number },
 ): PnlModel {
   const now = opts.now ?? Date.now();
   const range = PNL_RANGES.find((r) => r.key === opts.rangeKey) ?? PNL_RANGES[1];
@@ -61,11 +64,14 @@ export function buildPnl(
     .sort((a, b) => (a.closedAt as number) - (b.closedAt as number));
 
   const realizedAll = closed.reduce((s, t) => s + (Number.isFinite(t.realizedPnl) ? t.realizedPnl : 0), 0);
-  const equity = Number.isFinite(opts.equity) && opts.equity > 0 ? opts.equity : (opts.fallbackBase ?? 1000) + realizedAll;
+  // Without a Binance account equity there is NO starting balance to invent:
+  // the curve then plots cumulative realised PnL (real trade numbers only).
+  const equityKnown = Number.isFinite(opts.equity as number) && (opts.equity as number) > 0;
+  const equity = equityKnown ? (opts.equity as number) : null;
   const unrealized = Number.isFinite(opts.unrealized) ? opts.unrealized : 0;
 
-  // equity before the very first recorded trade
-  const base0 = equity - unrealized - realizedAll;
+  // equity before the very first recorded trade (0 when anchored to PnL only)
+  const base0 = equity != null ? equity - unrealized - realizedAll : 0;
 
   const earliest = closed[0]?.closedAt ?? now - 3_600_000;
   const start = Number.isFinite(range.ms) ? Math.max(earliest - 3_600_000, now - range.ms) : earliest - 3_600_000;
@@ -83,7 +89,7 @@ export function buildPnl(
     series.push({ t: t.closedAt as number, v: cum });
   }
   const isLive = Math.abs(unrealized) > 1e-9 || trades.some((t) => t.status === 'OPEN');
-  series.push({ t: end, v: equity });
+  series.push({ t: end, v: equity != null ? equity : cum + unrealized });
 
   const curve = equityCurve(series, { start, end, base, n: 124 });
 
@@ -122,7 +128,8 @@ export function buildPnl(
     realized: cum - base,
     unrealized,
     equity,
-    changePct: base !== 0 ? (net / Math.abs(base)) * 100 : 0,
+    equityKnown,
+    changePct: equityKnown && base !== 0 ? (net / Math.abs(base)) * 100 : 0,
     trades: inWindow.length,
     wins,
     losses,
@@ -149,11 +156,11 @@ export function usePnlModel(
   account: AccountView | null,
   rangeKey: PnlRangeKey,
 ): PnlModel {
-  const equity = account?.equity ?? 0;
+  const equity = account?.equity ?? null;
   const unrealized = account?.bot.unrealizedPnl ?? 0;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   return useMemo(
-    () => buildPnl(trades, { equity, unrealized, rangeKey, fallbackBase: 1000 }),
+    () => buildPnl(trades, { equity, unrealized, rangeKey }),
     // trades identity changes on every refresh; length+last close is enough
     [trades, equity, unrealized, rangeKey],
   );

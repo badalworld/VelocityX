@@ -11,8 +11,8 @@
  * or loss is never mixed into bot statistics.
  */
 import { api, AccountSnapshot, IncomeRecord, RawPosition } from './binance';
-import { getSettings, Mode, PAPER_START_BALANCE } from './settings';
-import { allTrades, getPaperBalance, openTrades, remainingQtyOf, Trade } from './store';
+import { getSettings, Mode } from './settings';
+import { allTrades, openTrades, remainingQtyOf, Trade } from './store';
 import { emit } from './broadcast';
 import { priceOf } from './prices';
 
@@ -32,7 +32,8 @@ export interface ManagedPosition {
   margin: number;
   leverage: number;
   liquidationPrice: number;
-  source: 'binance' | 'paper-sim';
+  /** Every managed position is a real exchange position. */
+  source: 'binance';
 }
 
 export interface ExternalPosition {
@@ -64,10 +65,11 @@ export interface IncomeSummary {
 }
 
 export interface AccountView {
-  source: 'binance' | 'paper-sim';
+  /** Always Binance — the account is never simulated. */
+  source: 'binance';
   mode: Mode;
   at: number;
-  /** Binance account fields (null in paper mode) */
+  /** Binance account fields (null until the first successful poll) */
   equity: number | null;
   walletBalance: number | null;
   unrealizedPnl: number | null;
@@ -184,19 +186,15 @@ class AccountService {
       let rawPositions: RawPosition[] = [];
       let income: IncomeSummary | null = null;
 
-      if (mode !== 'paper') {
-        try {
-          snapshot = await api.accountSnapshot();
-        } catch (e: any) {
-          errors.push(`account: ${e?.message || e}`);
-        }
-        try {
-          rawPositions = await api.positionRisk();
-        } catch (e: any) {
-          errors.push(`positions: ${e?.message || e}`);
-        }
-      } else {
-        rawPositions = [];
+      try {
+        snapshot = await api.accountSnapshot();
+      } catch (e: any) {
+        errors.push(`account: ${e?.message || e}`);
+      }
+      try {
+        rawPositions = await api.positionRisk();
+      } catch (e: any) {
+        errors.push(`positions: ${e?.message || e}`);
       }
 
       // ---- match Binance positions to bot trades -------------------------
@@ -251,48 +249,33 @@ class AccountService {
       const closedCount = closedTrades.length;
 
       // Income (real fees / funding / realised PnL straight from Binance).
-      if (mode !== 'paper') {
-        try {
-          income = await this.incomeSummary(s.historyDays);
-        } catch (e: any) {
-          errors.push(`income: ${e?.message || e}`);
-        }
-        // Attribute symbol-level funding to the open trade on that symbol.
-        if (income) {
-          const bySym = new Map(income.bySymbol.map((b) => [b.symbol, b]));
-          for (const m of managed) {
-            const b = bySym.get(m.trade.symbol);
-            if (b) m.funding = b.funding;
-          }
+      try {
+        income = await this.incomeSummary(s.historyDays);
+      } catch (e: any) {
+        errors.push(`income: ${e?.message || e}`);
+      }
+      // Attribute symbol-level funding to the open trade on that symbol.
+      if (income) {
+        const bySym = new Map(income.bySymbol.map((b) => [b.symbol, b]));
+        for (const m of managed) {
+          const b = bySym.get(m.trade.symbol);
+          if (b) m.funding = b.funding;
         }
       }
 
-      // The paper balance already includes every booked fill (entry fees, TP
-      // slices, closes), so equity = balance + unrealised — never add realised
-      // on top or it would be counted twice.
-      const paperBalance = getPaperBalance(PAPER_START_BALANCE);
-      const isPaper = mode === 'paper';
-      const equity = isPaper ? paperBalance + unrealizedPnl : snapshot?.equity ?? null;
-      const walletBalance = isPaper ? paperBalance : snapshot?.walletBalance ?? null;
-      const initialMargin = isPaper ? marginUsed : snapshot?.initialMargin ?? null;
-
       const view: AccountView = {
-        source: isPaper ? 'paper-sim' : 'binance',
+        source: 'binance',
         mode,
         at: Date.now(),
-        equity,
-        walletBalance,
-        unrealizedPnl: isPaper ? unrealizedPnl : snapshot?.unrealizedPnl ?? null,
-        availableBalance: isPaper ? Math.max(0, (walletBalance ?? 0) - marginUsed) : snapshot?.availableBalance ?? null,
-        initialMargin,
-        maintMargin: isPaper ? 0 : snapshot?.maintMargin ?? null,
-        roiPct: isPaper
-          ? marginUsed > 0 ? (unrealizedPnl / marginUsed) * 100 : 0
-          : snapshot?.roiPct ?? null,
-        roiOnWalletPct: isPaper
-          ? walletBalance ? (unrealizedPnl / walletBalance) * 100 : 0
-          : snapshot?.roiOnWalletPct ?? null,
-        canTrade: isPaper ? true : snapshot?.canTrade ?? null,
+        equity: snapshot?.equity ?? null,
+        walletBalance: snapshot?.walletBalance ?? null,
+        unrealizedPnl: snapshot?.unrealizedPnl ?? null,
+        availableBalance: snapshot?.availableBalance ?? null,
+        initialMargin: snapshot?.initialMargin ?? null,
+        maintMargin: snapshot?.maintMargin ?? null,
+        roiPct: snapshot?.roiPct ?? null,
+        roiOnWalletPct: snapshot?.roiOnWalletPct ?? null,
+        canTrade: snapshot?.canTrade ?? null,
         bot: {
           managedCount: managed.length,
           closedCount,
@@ -397,7 +380,6 @@ class AccountService {
   }
 
   private managedPositions(): ManagedPosition[] {
-    const s = getSettings();
     const out: ManagedPosition[] = [];
     for (const t of openTrades()) {
       // Start from the freshest local price; live modes refine it with the mark
@@ -417,7 +399,7 @@ class AccountService {
         margin: t.margin,
         leverage: t.leverage,
         liquidationPrice: 0,
-        source: s.mode === 'paper' ? 'paper-sim' : 'binance',
+        source: 'binance',
       });
     }
     return out;

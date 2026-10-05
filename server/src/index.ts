@@ -21,8 +21,6 @@ import { trader } from './trader';
 import { scanner } from './scanner';
 import { accountService } from './account';
 import { marketStream, userStream } from './streams';
-import { offlineFeed } from './offline';
-import { candleStore } from './candles';
 import { limiter } from './ratelimit';
 
 const PORT = Number(process.env.PORT) || 4000;
@@ -37,17 +35,24 @@ async function main(): Promise<void> {
   pruneOld(settings.historyDays);
 
   // ---- boot safety -------------------------------------------------------
-  // A persisted `mode: live` + auto-trade would otherwise start placing real
-  // orders the second the process comes back up (crash loop, deploy, restart).
-  if (settings.mode === 'live' && !ALLOW_LIVE) {
-    updateSettings({ mode: 'paper', autoTrade: false });
-    console.warn('[boot] SAFETY: live mode was persisted but VX_ALLOW_LIVE is not set — starting in PAPER with auto-trade OFF');
+  // There is no simulation to fall back to: a persisted LIVE + auto-trade
+  // config must not start placing real orders the second the process comes
+  // back up (crash loop, deploy, restart). Without VX_ALLOW_LIVE the bot boots
+  // on the same environment but DISARMED.
+  if (settings.mode === 'live' && settings.autoTrade && !ALLOW_LIVE) {
+    updateSettings({ autoTrade: false });
+    console.warn('[boot] SAFETY: LIVE + auto-trade was persisted but VX_ALLOW_LIVE is not set — starting DISARMED');
     emit('log', {
       level: 'error',
-      msg: 'Live mode was persisted but VX_ALLOW_LIVE is not set — started in PAPER with auto-trade OFF (re-arm explicitly)',
+      msg: 'LIVE mode was persisted with auto-trade ON but VX_ALLOW_LIVE is not set — started DISARMED (re-arm explicitly when ready)',
     });
-  } else if (settings.mode !== 'paper' && settings.autoTrade) {
+  } else if (settings.autoTrade) {
     console.warn(`[boot] SAFETY: starting with auto-trade ON in ${settings.mode.toUpperCase()} mode`);
+  }
+  const bootKeys = settings.keys[settings.mode];
+  if (!bootKeys.key || !bootKeys.secret) {
+    console.warn(`[boot] no ${settings.mode.toUpperCase()} API keys configured — add them in Settings → Connection (nothing can trade until then)`);
+    emit('log', { level: 'error', msg: `No ${settings.mode.toUpperCase()} API keys configured — the dashboard shows account data as soon as keys are saved` });
   }
   if (!authRequired()) {
     console.warn('[boot] SAFETY: VX_API_TOKEN is not set — the API (orders, kill switch, keys) is open to anyone who can reach this port');
@@ -111,12 +116,8 @@ async function main(): Promise<void> {
   engine.start();
   scanner.start();
   marketStream.subscribe(engine.activeSymbols());
-  if (getSettings().mode !== 'paper') {
-    userStream.start();
-    accountService.start(12_000);
-  } else {
-    accountService.start(5_000);
-  }
+  if (bootKeys.key && bootKeys.secret) userStream.start();
+  accountService.start(12_000);
 
   // Keep the market stream subscribed to whatever the engine watches
   // (scanner picks change, positions open/close) and refresh the account view
@@ -139,30 +140,6 @@ async function main(): Promise<void> {
     }
   }, 5000));
 
-  // offline-demo price ticker (only when Binance is unreachable from this host)
-  let offlineTicker: NodeJS.Timeout | null = null;
-  engineTimers.push(setInterval(() => {
-    const off = offlineFeed.active;
-    if (off && !offlineTicker) {
-      offlineTicker = setInterval(() => {
-        try {
-          const s = getSettings();
-          for (const sym of engine.activeSymbols()) {
-            const p = offlineFeed.tick(sym, s.interval);
-            trader.onPrice(p, sym);
-            emit('price', { symbol: sym, price: p });
-            emit('prices', { symbol: sym, price: p, t: Date.now() });
-          }
-        } catch { /* ignore */ }
-      }, 1000);
-    } else if (!off && offlineTicker) {
-      clearInterval(offlineTicker);
-      offlineTicker = null;
-      marketStream.subscribe(engine.activeSymbols());
-      candleStore.stats();
-    }
-  }, 2000));
-
   // periodic housekeeping
   engineTimers.push(setInterval(() => {
     const s = getSettings();
@@ -170,14 +147,13 @@ async function main(): Promise<void> {
     emit('status', { t: Date.now() });
   }, 60_000));
 
-  // live-mode safety reconcile (catch missed fills, re-arm missing SL) — 10s
+  // safety reconcile (catch missed fills, re-arm missing SL) — 10s
   engineTimers.push(setInterval(() => {
-    if (getSettings().mode !== 'paper') void trader.reconcile();
+    if (getSettings().keys[getSettings().mode].key) void trader.reconcile();
   }, 10_000));
 
   // funding accrual for every open bot position — 5 min (Binance income ledger)
   engineTimers.push(setInterval(() => {
-    if (getSettings().mode === 'paper') return;
     for (const t of openTrades()) void trader.refreshFunding(t);
   }, 300_000));
 
@@ -211,7 +187,6 @@ async function main(): Promise<void> {
       userStream.stop();
       closeBroadcast();
       for (const t of engineTimers) clearInterval(t);
-      if (offlineTicker) clearInterval(offlineTicker);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     } catch (e: any) {
       console.error('[shutdown]', e?.message || e);

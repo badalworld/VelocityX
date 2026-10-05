@@ -43,7 +43,7 @@ export default function SettingsView({
             </div>
             <div className="mini">
               <div className="k">Account source</div>
-              <div className="v">{status?.account?.source === 'binance' ? 'Binance' : 'paper sim'}</div>
+              <div className="v">{status?.account?.source === 'binance' ? 'Binance' : 'unavailable'}</div>
             </div>
             <div className="mini">
               <div className="k">Max positions</div>

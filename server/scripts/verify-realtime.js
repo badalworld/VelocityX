@@ -1,5 +1,6 @@
 /**
- * VelocityX realtime invariants — offline unit checks (no network required).
+ * VelocityX realtime invariants — hermetic unit checks (no network required;
+ * the exchange is stubbed where the executor is exercised).
  *
  *   npm run test:realtime
  *
@@ -11,7 +12,6 @@
  *   5. Volatility ranking is strictly descending (market scanned top → down).
  *   6. Bot positions: max 8, all bot-owned, external positions never adopted.
  */
-process.env.VX_OFFLINE_DEMO = process.env.VX_OFFLINE_DEMO || '1';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -167,7 +167,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     entryPrice: 100, atrAtEntry: 1, slInitial: 98, slCurrent: 98, slStage: 0, tp1: 103, tp2: 106, tp3: 109,
     notional: 100, margin: 10, leverage: 10, openedAt: Date.now(), closedAt: null, closeReason: null,
     tp1Filled: false, tp2Filled: false, tp3Filled: false, realizedPnl: 0, fees: 0, funding: 0,
-    binanceRealizedPnl: 0, commissionOtherAsset: 0, initialRisk: 2, orders: {}, mode: 'paper', result: null, botOwned: true,
+    binanceRealizedPnl: 0, commissionOtherAsset: 0, initialRisk: 2, orders: {}, mode: 'testnet', result: null, botOwned: true,
   };
   store.saveTrade(trade);
   assert(store.openTrades().length === 1 && store.openTrades()[0].botOwned === true, 'only bot-owned trades enter the journal');
@@ -177,18 +177,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /* ------------------------------------------------------------------ 7 */
   console.log('\n— External positions are never adopted or traded —');
-  // start from a clean journal: flatten whatever the earlier sections opened
-  await trader.kill();
-  await sleep(60);
-  assert(store.openTrades().length === 0, 'journal starts clean for the ownership test');
-
   const binance = require('../dist/binance');
   const orders = [];
   const record = (kind) => (...args) => {
     const opts = args.find((a) => a && typeof a === 'object') || {};
     const strings = args.filter((a) => typeof a === 'string');
+    // Market orders that close a position are tagged separately so the checks
+    // can distinguish entries from reduceOnly exits.
+    const isClose = !!opts.reduceOnly || opts.closePosition === true || opts.closePosition === 'true';
     orders.push({
-      kind,
+      kind: kind === 'market' && isClose ? 'market-close' : kind,
       symbol: strings.find((x) => /USDT$/.test(x)) || '',
       // every numeric argument (prices, quantities, leverage) — callers differ
       nums: args.filter((a) => typeof a === 'number'),
@@ -196,7 +194,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       // quantity passed through the order options (protective stops use it)
       optsQty: typeof opts.qty === 'number' ? opts.qty : null,
       leverage: typeof opts.leverage === 'number' ? opts.leverage : null,
-      reduceOnly: !!opts.reduceOnly || opts.closePosition === true || opts.closePosition === 'true',
+      reduceOnly: isClose,
       cid: opts.newClientOrderId ?? strings.find((x) => /^VX/.test(x)) ?? null,
     });
     return { avgPrice: 100, orderId: orders.length };
@@ -224,6 +222,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   binance.api.incomeHistory = async () => [];
 
   settings.updateSettings({ mode: 'testnet', autoTrade: true, symbol: 'BTCUSDT', autoScan: false, maxPositions: 8, tradeSizePercent: 5, leverage: 10 });
+  // stubs are in place before the first live-path call: stage the mode and
+  // start from a clean journal (flatten whatever the earlier sections opened)
+  await trader.kill();
+  await sleep(60);
+  assert(store.openTrades().length === 0, 'journal starts clean for the ownership test');
+
   trader.onPrice(100, 'BTCUSDT');
   const extSignal = { record: { id: 'ext1', symbol: 'BTCUSDT', time: Date.now(), detectedAt: Date.now(), side: 'LONG', price: 100, atr: 1, acted: false, tradeId: null }, side: 'LONG', price: 100, atr: 1 };
   await trader.onSignal(extSignal);
@@ -295,7 +299,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(60);
   assert(store.openTrades().length === 0, 'guard tests cleaned up the journal');
 
-  settings.updateSettings({ mode: 'paper', autoTrade: false });
+  settings.updateSettings({ mode: 'testnet', autoTrade: false });
   void acctJson;
 
   console.log(failures === 0 ? '\nREALTIME INVARIANTS: ALL CHECKS PASSED' : `\nREALTIME INVARIANTS: ${failures} FAILURES`);

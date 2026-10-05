@@ -9,7 +9,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "test": "npm run build && node scripts/smoke.js",
     "smoke": "node scripts/smoke.js",
-    "test:e2e": "node scripts/e2e-paper.js",
+    "test:e2e": "node scripts/e2e-execution.js",
     "test:realtime": "node scripts/verify-realtime.js",
     "verify:binance": "node scripts/verify-binance.js",
     "test:api": "npm run build && node scripts/verify-api.js"

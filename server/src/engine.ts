@@ -9,7 +9,7 @@
  * Only candles that CLOSE AFTER a symbol was first watched are acted on — no
  * backfill, no repainting, no acting on historical crossovers.
  */
-import { api, feedNow } from './binance';
+import { api } from './binance';
 import { computeSnapshot, signalAt, SignalSide, ema } from './indicators';
 import { getSettings } from './settings';
 import { saveSignal, SignalRecord } from './store';
@@ -42,9 +42,12 @@ class Engine {
   private startedAt = Date.now();
   private lastProcessed = new Map<string, number>();
   private baselined = new Set<string>();
-  private lastOffline: boolean | null = null;
   private lastSignalRec: SignalRecord | null = null;
   private lastTickAt = 0;
+  /** Throttle "candles fetch failed" per symbol so an exchange outage does not
+   *  flood the log every 2 s tick (the state change itself is logged by
+   *  binance.ts when reachability flips). */
+  private lastCandleErrorAt = new Map<string, number>();
 
   start(): void {
     if (this.timer) return;
@@ -79,20 +82,16 @@ class Engine {
       const symbols = this.activeSymbols();
       this.lastTickAt = Date.now();
 
-      // Feed mode flip (live <-> offline demo): re-baseline, never act on a splice.
-      const off = api.isOffline();
-      if (this.lastOffline !== null && this.lastOffline !== off) {
-        this.baselined.clear();
-        this.lastProcessed.clear();
-        emit('log', { level: 'info', msg: 'Feed mode changed — engine re-baselined (no action on transition candles)' });
-      }
-      this.lastOffline = off;
-
       for (const symbol of symbols) {
         try {
           await candleStore.ensure(symbol, s.interval, 500);
+          this.lastCandleErrorAt.delete(symbol);
         } catch (e: any) {
-          console.error('[engine] candles', symbol, e?.message || e);
+          const now = Date.now();
+          if (now - (this.lastCandleErrorAt.get(symbol) ?? 0) > 60_000) {
+            this.lastCandleErrorAt.set(symbol, now);
+            console.warn(`[engine] candles ${symbol} unavailable (${e?.message || e}) — retrying every tick`);
+          }
           continue;
         }
         const candles = candleStore.get(symbol, s.interval);
@@ -100,7 +99,7 @@ class Engine {
 
         const snap = computeSnapshot(candles, s.emaLengths, s.emaExtraLength, s.atrLength);
 
-        const now = feedNow();
+        const now = Date.now();
         let idx = candles.length - 1;
         if (candles[idx].closeTime > now) idx -= 1;
         if (idx < 5) continue;

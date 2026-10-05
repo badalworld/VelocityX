@@ -61,7 +61,7 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
       const armingLive = draft.mode === 'live' && settings?.mode !== 'live';
       if (armingLive && !liveConfirmed) {
         const ok = window.confirm(
-          'Switch to LIVE mainnet?\n\nReal orders will be placed on your Binance account when auto-trading is on. Test on paper and testnet first.',
+          'Switch to LIVE mainnet?\n\nReal orders will be placed on your Binance account when auto-trading is on. Prove the strategy on testnet first.',
         );
         if (!ok) {
           setSaving(false);
@@ -120,8 +120,7 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                     set({ mode: next });
                   }}
                 >
-                  <option value="paper">Paper — simulate fills on live prices (safe)</option>
-                  <option value="testnet">Binance Futures Testnet — real test orders</option>
+                  <option value="testnet">Binance Futures Testnet — real exchange, test funds</option>
                   <option value="live">🔴 LIVE Mainnet — real money</option>
                 </select>
               </label>
@@ -213,8 +212,8 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
               </label>
             </div>
             <div className="hint warn" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <IconAlert style={{ width: 13, height: 13 }} /> Live mode places real orders with real funds — test on
-              paper &amp; testnet first.
+              <IconAlert style={{ width: 13, height: 13 }} /> Live mode places real orders with real funds — prove the
+              strategy on testnet first.
             </div>
           </div>
         </>

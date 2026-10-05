@@ -9,18 +9,21 @@
  *   • Up to **8** simultaneous positions (hard cap), one per symbol, each
  *     selected by the market scanner from high-volatility trending markets.
  *   • The bot ONLY manages trades it opened itself. Orders it places are
- *     tagged `VX<tradeId>…` and every exit order is reduceOnly/closePosition,
+ *     tagged `VX<tradeId>…`, every exit order is `reduceOnly` with an explicit
+ *     quantity, and entries refuse a symbol that already carries a position —
  *     so a manual/external position can never be closed, reversed or adopted.
- *   • Live/testnet fees, funding and realised PnL are taken from Binance
- *     (ORDER_TRADE_UPDATE commission/`rp`, /fapi/v1/income) — never invented.
+ *
+ * Every fill, commission, funding payment and realised PnL number is taken from
+ * Binance (ORDER_TRADE_UPDATE, /fapi/v1/userTrades, /fapi/v1/income). Nothing is
+ * simulated and nothing is estimated: if the exchange has not reported a
+ * number, the trade simply does not have it yet.
  */
 import { api, floorToStep, roundToTick, fmtQty } from './binance';
 import { SignalSide } from './indicators';
 import {
-  adjustPaperBalance, getPaperBalance, markSignalActed, openTradeOn, openTrades,
-  remainingQtyOf, saveTrade, setPaperBalance, SignalRecord, Trade, allTrades,
+  markSignalActed, openTradeOn, openTrades, remainingQtyOf, saveTrade, SignalRecord, Trade,
 } from './store';
-import { getSettings, MAX_POSITIONS_CAP, PAPER_START_BALANCE } from './settings';
+import { getSettings, MAX_POSITIONS_CAP } from './settings';
 import { priceOf, setPrice } from './prices';
 import { scanner } from './scanner';
 import { emit } from './broadcast';
@@ -61,11 +64,9 @@ export function splitQty(qty: number, step: number, p1: number, p2: number): { q
 }
 
 class Trader {
-  private priceQueue: { symbol: string; price: number } | null = null;
-  private processing = false;
-  private slBusy = new Set<string>();
   /** Symbols with an entry round-trip in flight — blocks duplicate entries. */
   private entering = new Set<string>();
+  private slBusy = new Set<string>();
 
   /** Symbols with an OPEN bot trade. */
   managedSymbols(): string[] {
@@ -77,7 +78,7 @@ class Trader {
     return Math.max(0, cap - openTrades().length);
   }
 
-  // ---------------- price tick (paper fills + UI) ----------------
+  // ---------------- price tick ----------------
 
   /** Latest price for a symbol (0 when unknown). */
   priceOf(symbol: string): number {
@@ -89,45 +90,10 @@ class Trader {
     return priceOf(getSettings().symbol);
   }
 
+  /** Called by the market stream on every bookTicker tick — feeds the UI/account layer. */
   onPrice(price: number, symbol?: string): void {
     if (!Number.isFinite(price) || price <= 0) return;
-    const sym = symbol || getSettings().symbol;
-    setPrice(sym, price);
-    // trailing tick per symbol
-    if (this.priceQueue === null || this.priceQueue.symbol === sym) this.priceQueue = { symbol: sym, price };
-    if (!this.processing) {
-      this.processing = true;
-      setImmediate(() => {
-        this.processing = false;
-        const q = this.priceQueue;
-        this.priceQueue = null;
-        if (q) this.checkPaperFills(q.symbol, q.price);
-      });
-    }
-  }
-
-  private checkPaperFills(symbol: string, price: number): void {
-    for (const t of openTrades()) {
-      if (t.mode !== 'paper' || t.symbol !== symbol) continue;
-      const d = dir(t.side);
-      const levels: Array<{ n: 1 | 2 | 3; px: number; filled: boolean; qty: number }> = [
-        { n: 1, px: t.tp1, filled: t.tp1Filled, qty: t.q1 },
-        { n: 2, px: t.tp2, filled: t.tp2Filled, qty: t.q2 },
-        { n: 3, px: t.tp3, filled: t.tp3Filled, qty: t.q3 },
-      ];
-      for (const lv of levels) {
-        if (lv.filled || lv.qty <= 0) continue;
-        const reached = d > 0 ? price >= lv.px : price <= lv.px;
-        // A resting stop/take-profit market order fills at the market that
-        // crossed it, not at the level itself — so book the observed tick.
-        if (reached) this.fillTP(t, lv.n, price);
-        if ((t.status as string) === 'CLOSED') break;
-      }
-      if (t.status === 'OPEN' && !t.tp3Filled) {
-        const slHit = d > 0 ? price <= t.slCurrent : price >= t.slCurrent;
-        if (slHit) this.fillSL(t, t.slCurrent, price);
-      }
-    }
+    setPrice(symbol || getSettings().symbol, price);
   }
 
   // ---------------- signal entry ----------------
@@ -191,49 +157,34 @@ class Trader {
     try {
       const info = await api.exchangeInfo(symbol);
       let entry = sig.price;
-      let equity: number;
-      let available: number;
-      let marginUsed = openTrades().reduce((a, t) => a + t.margin, 0);
-      let margin: number;
-      let canTrade = true;
+      const marginUsed = openTrades().reduce((a, t) => a + t.margin, 0);
 
       // ---- production guard 1: the market must be empty -------------------
       // If a position already exists on this symbol (manual or from another
       // tool) the bot refuses to trade it. Two owners on one symbol would make
       // the reduceOnly ladder ambiguous — refusing is the only safe option.
-      if (s.mode !== 'paper') {
-        const existing = await api.positionAmount(symbol);
-        if (Math.abs(existing) > info.stepSize / 2) {
-          throw new Error(
-            `${symbol} already carries a position (${fmtQty(existing)}) that the bot did not open — refusing to trade this market`,
-          );
-        }
+      const existing = await api.positionAmount(symbol);
+      if (Math.abs(existing) > info.stepSize / 2) {
+        throw new Error(
+          `${symbol} already carries a position (${fmtQty(existing)}) that the bot did not open — refusing to trade this market`,
+        );
       }
 
-      if (s.mode === 'paper') {
-        const bal = getPaperBalance(PAPER_START_BALANCE);
-        const realized = allTrades().reduce((a, t) => a + (t.status === 'CLOSED' ? t.realizedPnl : 0), 0);
-        equity = bal + realized;
-        available = Math.max(0, equity - marginUsed);
-      } else {
-        const bal = await api.accountSnapshot();
-        equity = bal.equity;
-        available = bal.availableBalance;
-        canTrade = bal.canTrade;
-      }
+      const bal = await api.accountSnapshot();
+      const equity = bal.equity;
+      const available = bal.availableBalance;
+
       // ---- production guard 2: the key must be allowed to trade -----------
-      if (!canTrade) throw new Error('Binance API key reports canTrade=false — order placement is disabled');
+      if (!bal.canTrade) throw new Error('Binance API key reports canTrade=false — order placement is disabled');
 
       // ---- production guard 3: leverage must fit the exchange bracket -----
       // Binance publishes a max leverage per symbol; requesting more fails the
       // whole entry. Clamp down instead of losing the trade.
       let leverage = s.leverage;
-      if (s.mode !== 'paper') {
-        const maxLev = await api.maxLeverage(symbol);
-        if (maxLev > 0 && leverage > maxLev) {
-          this.log('info', `${symbol}: leverage clamped ${leverage}x → ${maxLev}x (exchange bracket)`);
-          leverage = maxLev;
-        }
+      const maxLev = await api.maxLeverage(symbol);
+      if (maxLev > 0 && leverage > maxLev) {
+        this.log('info', `${symbol}: leverage clamped ${leverage}x → ${maxLev}x (exchange bracket)`);
+        leverage = maxLev;
       }
 
       // Per-trade margin = tradeSizePercent of equity, but never consume more
@@ -245,7 +196,7 @@ class Trader {
       // let the reservation starve a single trade: fall back to free margin.
       const reserved = Math.max(0, freeSlots - 1) * perTrade * 0.5;
       const usable = Math.max(0, freeUsable - reserved);
-      margin = Math.max(0, Math.min(perTrade, usable > 0 ? usable : freeUsable));
+      let margin = Math.max(0, Math.min(perTrade, usable > 0 ? usable : freeUsable));
 
       let qty = floorToStep((margin * leverage) / entry, info.stepSize);
       const needQty = Math.max(
@@ -262,18 +213,30 @@ class Trader {
         qty = needQty;
       }
       if (qty <= 0) throw new Error('Computed quantity is zero — increase trade size or balance');
-      const notional = qty * entry;
-      margin = notional / leverage;
+
+      await api.setLeverage(symbol, leverage);
+      await api.setIsolated(symbol);
+
+      const id = rndId();
+      const prefix = `VX${id}`;
+      const openSide: 'BUY' | 'SELL' = sig.side === 'LONG' ? 'BUY' : 'SELL';
+      const entryRes = await api.marketOrder(symbol, openSide, qty, { newClientOrderId: `${prefix}E` });
+
+      // The ack of a MARKET order frequently carries avgPrice 0.00; the fill
+      // price comes from the trade ledger. Using the real average is what makes
+      // the protective ladder sit where it should.
+      const filledAvg = await this.entryFillPrice(symbol, prefix, Number(entryRes?.avgPrice || 0), Date.now());
+      if (filledAvg > 0) entry = filledAvg;
 
       const slDist = sig.atr * s.atrSlMultiplier;
       const sl = entry - dir(sig.side) * slDist;
       const tp1 = entry + dir(sig.side) * slDist * s.tpRrFactor;
       const tp2 = entry + dir(sig.side) * slDist * s.tpRrFactor * 2;
       const tp3 = entry + dir(sig.side) * slDist * s.tpRrFactor * 3;
+      const notional = qty * entry;
+      margin = notional / leverage;
       const { q1, q2, q3 } = splitQty(qty, info.stepSize, s.tp1ClosePct, s.tp2ClosePct);
 
-      const id = rndId();
-      const prefix = `VX${id}`;
       const scanRow = scanner.result()?.rows.find((r) => r.symbol === symbol) ?? null;
       const trade: Trade = {
         id,
@@ -305,7 +268,7 @@ class Trader {
         binanceRealizedPnl: 0,
         commissionOtherAsset: 0,
         initialRisk: slDist * qty,
-        orders: {},
+        orders: { entry: `${prefix}E` },
         mode: s.mode,
         result: null,
         botOwned: true,
@@ -314,67 +277,35 @@ class Trader {
           : null,
       };
 
-      if (s.mode === 'paper') {
-        const bal = getPaperBalance(PAPER_START_BALANCE);
-        if (margin > bal) throw new Error(`Insufficient paper balance (${bal.toFixed(2)} USDT)`);
-        // Book the entry commission exactly like Binance does (taker fee on
-        // notional at entry) so paper fees match the real fee model.
-        const entryFee = notional * s.feeRate;
-        trade.fees = entryFee;
-        trade.realizedPnl -= entryFee;
-        adjustPaperBalance(-entryFee);
-        trade.orders = {
-          entry: `${prefix}E`, sl: `${prefix}S`,
-          tp1: q1 > 0 ? `${prefix}1` : undefined,
-          tp2: q2 > 0 ? `${prefix}2` : undefined,
-          tp3: `${prefix}3`,
-        } as any;
-        this.log('info', `PAPER ${trade.side} ${fmtQty(qty)} ${symbol} @ ${entry} | SL ${trade.slInitial} | TP ${trade.tp1}/${trade.tp2}/${trade.tp3}`);
-      } else {
-        await api.setLeverage(symbol, leverage);
-        await api.setIsolated(symbol);
-        const openSide: 'BUY' | 'SELL' = trade.side === 'LONG' ? 'BUY' : 'SELL';
-        const entryRes = await api.marketOrder(symbol, openSide, qty, { newClientOrderId: `${prefix}E` });
-        const avg = Number(entryRes?.avgPrice || 0);
-        if (avg > 0 && Math.abs(avg - entry) / entry > 0.0001) {
-          entry = avg;
-          trade.entryPrice = avg;
-          trade.notional = qty * avg;
-          trade.margin = trade.notional / leverage;
-          const sl2 = entry - dir(trade.side) * slDist;
-          trade.slInitial = roundToTick(sl2, info.tickSize);
-          trade.slCurrent = trade.slInitial;
-          trade.tp1 = roundToTick(entry + dir(trade.side) * slDist * s.tpRrFactor, info.tickSize);
-          trade.tp2 = roundToTick(entry + dir(trade.side) * slDist * s.tpRrFactor * 2, info.tickSize);
-          trade.tp3 = roundToTick(entry + dir(trade.side) * slDist * s.tpRrFactor * 3, info.tickSize);
-          trade.initialRisk = slDist * qty;
+      try {
+        // One-way: explicit size + reduceOnly. Hedge: positionSide — both
+        // scope every exit order to the bot's own quantity.
+        const dual = await api.isDualSide();
+        const hedgeSide = trade.side;
+        await api.protectiveStop(symbol, closeSide(trade.side), trade.slInitial, qty, `${prefix}S0`);
+        trade.orders.sl = `${prefix}S0`;
+        if (q1 > 0) {
+          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp1, q1, { newClientOrderId: `${prefix}1`, positionSide: dual ? hedgeSide : undefined });
+          trade.orders.tp1 = `${prefix}1`;
         }
-        trade.orders.entry = `${prefix}E`;
+        if (q2 > 0) {
+          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp2, q2, { newClientOrderId: `${prefix}2`, positionSide: dual ? hedgeSide : undefined });
+          trade.orders.tp2 = `${prefix}2`;
+        }
+        await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp3, q3, { newClientOrderId: `${prefix}3`, positionSide: dual ? hedgeSide : undefined });
+        trade.orders.tp3 = `${prefix}3`;
+      } catch (err: any) {
+        this.log('error', `Order placement failed (${err?.message}) — flattening position`);
         try {
-          // Explicit size + reduceOnly (one-way) / positionSide (hedge): the
-          // protective stop can never close more than the bot's own quantity.
-          await api.protectiveStop(symbol, closeSide(trade.side), trade.slInitial, qty, `${prefix}S0`);
-          trade.orders.sl = `${prefix}S0`;
-          if (q1 > 0) {
-            await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp1, q1, { newClientOrderId: `${prefix}1` });
-            trade.orders.tp1 = `${prefix}1`;
-          }
-          if (q2 > 0) {
-            await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp2, q2, { newClientOrderId: `${prefix}2` });
-            trade.orders.tp2 = `${prefix}2`;
-          }
-          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp3, q3, { newClientOrderId: `${prefix}3` });
-          trade.orders.tp3 = `${prefix}3`;
-        } catch (err: any) {
-          this.log('error', `Order placement failed (${err?.message}) — flattening position`);
-          try {
-            await api.marketOrder(symbol, closeSide(trade.side), qty, { reduceOnly: true, newClientOrderId: `${prefix}X` });
-          } catch { /* best effort */ }
-          throw err;
-        }
-        this.log('info', `LIVE ${trade.side} ${fmtQty(qty)} ${symbol} @ ${trade.entryPrice} | SL ${trade.slInitial} | TP ${trade.tp1}/${trade.tp2}/${trade.tp3}`);
+          await api.marketOrder(symbol, closeSide(trade.side), qty, { reduceOnly: true, newClientOrderId: `${prefix}X` });
+        } catch { /* best effort */ }
+        throw err;
       }
 
+      this.log(
+        'info',
+        `${trade.mode.toUpperCase()} ${trade.side} ${fmtQty(qty)} ${symbol} @ ${trade.entryPrice} | SL ${trade.slInitial} | TP ${trade.tp1}/${trade.tp2}/${trade.tp3}`,
+      );
       saveTrade(trade);
       markSignalActed(sig.record.id, trade.id);
       emit('trade', { event: 'opened', trade });
@@ -388,24 +319,55 @@ class Trader {
     }
   }
 
+  /**
+   * Average fill price of OUR entry order, straight from Binance. Returns 0
+   * when the ledger is not available yet (the caller then keeps the signal
+   * price as a reference and the fill ledger corrects the PnL later).
+   */
+  private async entryFillPrice(symbol: string, prefix: string, ackAvg: number, openedAt: number): Promise<number> {
+    if (Number.isFinite(ackAvg) && ackAvg > 0) return ackAvg;
+    try {
+      const fills = await api.userTrades(symbol, { startTime: openedAt - 60_000, limit: 100 });
+      const mine = fills.filter((f) => String(f.clientOrderId || '') === `${prefix}E`);
+      if (!mine.length) return 0;
+      let qty = 0;
+      let cost = 0;
+      for (const f of mine) {
+        const q = Number(f.qty) || 0;
+        const p = Number(f.price) || 0;
+        if (q > 0 && p > 0) {
+          qty += q;
+          cost += q * p;
+        }
+      }
+      return qty > 0 ? cost / qty : 0;
+    } catch (e: any) {
+      this.log('error', `${symbol}: entry fill lookup failed: ${e?.message} — using signal price`);
+      return 0;
+    }
+  }
+
   // ---------------- TP / SL fills ----------------
+
+  /** Binance-reported fill numbers for one order (commission is negative in the API). */
+  private applyBinanceNumbers(t: Trade, rp?: number, commission?: number, commissionAsset?: string): void {
+    if (Number.isFinite(rp as number)) t.binanceRealizedPnl += Number(rp);
+    if (Number.isFinite(commission as number)) {
+      if (!commissionAsset || /USDT|USDC|BUSD|FDUSD/i.test(commissionAsset)) {
+        t.fees += Math.abs(Number(commission));
+      } else {
+        t.commissionOtherAsset += Math.abs(Number(commission));
+      }
+    }
+    t.realizedPnl = t.binanceRealizedPnl - t.fees;
+  }
 
   fillTP(t: Trade, n: 1 | 2 | 3, price: number, binance?: { rp?: number; commission?: number; commissionAsset?: string }): void {
     if (t.status !== 'OPEN') return;
-    const d = dir(t.side);
-    const s = getSettings();
     const q = n === 1 ? t.q1 : n === 2 ? t.q2 : t.q3;
     if (q <= 0 && n !== 3) return;
 
-    if (t.mode === 'paper') {
-      const gross = (price - t.entryPrice) * d * q;
-      const fee = price * q * s.feeRate;
-      t.realizedPnl += gross - fee;
-      t.fees += fee;
-      adjustPaperBalance(gross - fee);
-    } else if (binance) {
-      this.applyBinanceNumbers(t, binance.rp, binance.commission, binance.commissionAsset);
-    }
+    if (binance) this.applyBinanceNumbers(t, binance.rp, binance.commission, binance.commissionAsset);
 
     if (n === 1) {
       t.tp1Filled = true;
@@ -432,8 +394,8 @@ class Trader {
     emit('trade', { event: 'fill', level: n, price, trade: t });
 
     if (n === 3) {
-      this.finalize(t, 'TP3', price);
-    } else if (t.mode !== 'paper') {
+      void this.finalize(t, 'TP3', price);
+    } else {
       void this.moveSL(t);
     }
   }
@@ -441,25 +403,16 @@ class Trader {
   fillSL(t: Trade, stopPrice: number, marketPrice: number, binance?: { rp?: number; commission?: number; commissionAsset?: string }): void {
     if (t.status !== 'OPEN') return;
     const d = dir(t.side);
-    const s = getSettings();
     const remaining = remainingQtyOf(t);
     if (remaining <= 0) {
-      this.finalize(t, 'TP3', stopPrice);
+      void this.finalize(t, 'TP3', stopPrice);
       return;
     }
     // A stop that gapped through fills at the market, never better than the
-    // stop itself. This keeps the paper simulation honest on gaps.
+    // stop itself — the exchange decides the fill, we only mirror it.
     const market = Number.isFinite(marketPrice) && marketPrice > 0 ? marketPrice : stopPrice;
     const fill = d > 0 ? Math.min(stopPrice, market) : Math.max(stopPrice, market);
-    if (t.mode === 'paper') {
-      const gross = (fill - t.entryPrice) * d * remaining;
-      const fee = fill * remaining * s.feeRate;
-      t.realizedPnl += gross - fee;
-      t.fees += fee;
-      adjustPaperBalance(gross - fee);
-    } else if (binance) {
-      this.applyBinanceNumbers(t, binance.rp, binance.commission, binance.commissionAsset);
-    }
+    if (binance) this.applyBinanceNumbers(t, binance.rp, binance.commission, binance.commissionAsset);
     const anyTP = t.tp1Filled || t.tp2Filled;
     const reason: Trade['closeReason'] = anyTP ? 'SL_PARTIAL' : 'SL';
     this.log('info', `${t.symbol}: SL hit @ ${fill} — remaining closed, PnL ${t.realizedPnl >= 0 ? '+' : ''}${t.realizedPnl.toFixed(2)} USDT`);
@@ -467,25 +420,11 @@ class Trader {
       level: anyTP ? 'win' : 'loss',
       msg: `${t.symbol} SL ${anyTP ? '(after TP — still a WIN 🟢)' : '🔴'} hit @ ${fill}, PnL ${t.realizedPnl.toFixed(2)} USDT`,
     });
-    this.finalize(t, reason, fill);
-  }
-
-  /** Sum Binance-reported fills into the trade (commission is negative in the API). */
-  private applyBinanceNumbers(t: Trade, rp?: number, commission?: number, commissionAsset?: string): void {
-    if (Number.isFinite(rp as number)) t.binanceRealizedPnl += Number(rp);
-    if (Number.isFinite(commission as number)) {
-      if (!commissionAsset || /USDT|USDC|BUSD|FDUSD/i.test(commissionAsset)) {
-        t.fees += Math.abs(Number(commission));
-      } else {
-        t.commissionOtherAsset += Math.abs(Number(commission));
-      }
-    }
-    t.realizedPnl = t.binanceRealizedPnl - t.fees;
+    void this.finalize(t, reason, fill);
   }
 
   /** Pull Binance's own fill ledger for this trade (fees + realised PnL, idempotent). */
   async reconcileBinanceNumbers(t: Trade): Promise<void> {
-    if (t.mode === 'paper') return;
     try {
       const orders = await api.allOrders(t.symbol, { startTime: t.openedAt - 60_000, limit: 200 });
       const mine = new Set(orders.filter((o) => String(o.clientOrderId || '').startsWith(`VX${t.id}`)).map((o) => o.orderId));
@@ -512,7 +451,6 @@ class Trader {
 
   /** Funding paid/received while this trade was open (Binance income ledger). */
   async refreshFunding(t: Trade): Promise<void> {
-    if (t.mode === 'paper') return;
     try {
       const rows = await api.incomeHistory({
         symbol: t.symbol,
@@ -535,39 +473,30 @@ class Trader {
   /** Market-close a specific bot trade (reverse / kill switch). */
   async closeByMarket(t: Trade, reason: 'REVERSE' | 'KILL'): Promise<void> {
     if (!t || t.status !== 'OPEN') return;
-    const d = dir(t.side);
-    const s = getSettings();
     const remaining = remainingQtyOf(t);
     const price = this.priceOf(t.symbol) || t.entryPrice;
     if (remaining > 0) {
-      if (t.mode === 'paper') {
-        const gross = (price - t.entryPrice) * d * remaining;
-        const fee = price * remaining * s.feeRate;
-        t.realizedPnl += gross - fee;
-        t.fees += fee;
-        adjustPaperBalance(gross - fee);
-      } else {
-        try {
-          const dual = await api.isDualSide();
-          // Tagged + reduceOnly: the close can only shrink OUR position and is
-          // always attributable to this trade by client order id.
-          await api.marketOrder(
-            t.symbol,
-            closeSide(t.side),
-            remaining,
-            dual
-              ? { positionSide: t.side === 'LONG' ? 'LONG' : 'SHORT', newClientOrderId: `${t.orders.entry?.slice(0, -1) ?? `VX${t.id}`}X` }
-              : { reduceOnly: true, newClientOrderId: `${t.orders.entry?.slice(0, -1) ?? `VX${t.id}`}X` },
-          );
-          // Authoritative numbers straight from Binance's ledger.
-          await this.reconcileBinanceNumbers(t);
-        } catch (e: any) {
-          this.log('error', `${t.symbol}: market close failed: ${e?.message}`);
-        }
+      try {
+        const dual = await api.isDualSide();
+        const cid = `${t.orders.entry?.slice(0, -1) ?? `VX${t.id}`}X`;
+        // Tagged + reduceOnly: the close can only shrink OUR position and is
+        // always attributable to this trade by client order id.
+        await api.marketOrder(
+          t.symbol,
+          closeSide(t.side),
+          remaining,
+          dual
+            ? { positionSide: t.side === 'LONG' ? 'LONG' : 'SHORT', newClientOrderId: cid }
+            : { reduceOnly: true, newClientOrderId: cid },
+        );
+        // Authoritative numbers straight from Binance's ledger.
+        await this.reconcileBinanceNumbers(t);
+      } catch (e: any) {
+        this.log('error', `${t.symbol}: market close failed: ${e?.message}`);
       }
     }
     this.log('info', `${t.symbol}: closed (${reason}) @ ${price} — PnL ${t.realizedPnl.toFixed(2)} USDT`);
-    this.finalize(t, reason, price);
+    await this.finalize(t, reason, price);
   }
 
   private async finalize(t: Trade, reason: Trade['closeReason'], price: number): Promise<void> {
@@ -576,21 +505,17 @@ class Trader {
     t.closedAt = Date.now();
     t.closeReason = reason;
     t.result = reason === 'TP3' || reason === 'SL_PARTIAL' ? 'WIN' : reason === 'SL' ? 'LOSS' : null;
-    if (t.mode !== 'paper') {
-      await this.reconcileBinanceNumbers(t);
-      await this.refreshFunding(t);
-    }
+    await this.reconcileBinanceNumbers(t);
+    await this.refreshFunding(t);
     saveTrade(t);
-    if (t.mode !== 'paper') {
-      // Cancel what is left of OUR ladder (TPs, and the stop if the position was
-      // already flattened). Only client ids tagged VX<tradeId> are ever touched.
-      for (const key of ['sl', 'tp1', 'tp2', 'tp3'] as const) {
-        const cid = t.orders[key];
-        if (!cid) continue;
-        try {
-          await api.cancelOrder(t.symbol, undefined, cid);
-        } catch { /* already gone */ }
-      }
+    // Cancel what is left of OUR ladder (TPs, and the stop if the position was
+    // already flattened). Only client ids tagged VX<tradeId> are ever touched.
+    for (const key of ['sl', 'tp1', 'tp2', 'tp3'] as const) {
+      const cid = t.orders[key];
+      if (!cid) continue;
+      try {
+        await api.cancelOrder(t.symbol, undefined, cid);
+      } catch { /* already gone */ }
     }
     emit('trade', { event: 'closed', trade: t, price });
     emit('log', {
@@ -600,7 +525,7 @@ class Trader {
   }
 
   private async moveSL(t: Trade): Promise<void> {
-    if (t.status !== 'OPEN' || t.mode === 'paper' || this.slBusy.has(t.id)) return;
+    if (t.status !== 'OPEN' || this.slBusy.has(t.id)) return;
     this.slBusy.add(t.id);
     try {
       const info = await api.exchangeInfo(t.symbol);
@@ -647,7 +572,7 @@ class Trader {
     if (!cid.startsWith('VX')) return;
     // resolve the trade by the client order id (VX<tradeId><suffix>)
     const t = openTrades().find((x) => cid.startsWith(`VX${x.id}`)) || null;
-    if (!t || t.mode === 'paper' || t.symbol !== o.s) return;
+    if (!t || t.symbol !== o.s) return;
     const exec = o.x; // NEW | TRADED | CANCELED | EXPIRED | REJECTED
     const status = o.X;
     const price = Number(o.L) || Number(o.ap) || 0;
@@ -678,8 +603,7 @@ class Trader {
    * It never closes, reverses or adopts anything the bot did not open.
    */
   async reconcile(): Promise<void> {
-    const trades = openTrades().filter((t) => t.mode !== 'paper');
-    for (const t of trades) {
+    for (const t of openTrades()) {
       try {
         await this.reconcileOne(t);
       } catch (e: any) {
@@ -712,7 +636,7 @@ class Trader {
     const flat = Math.abs(pos) < info.stepSize / 2;
     if (flat && t.status === 'OPEN') {
       this.log('info', `${t.symbol}: position flat (external fill detected) — closing bot trade record`);
-      this.finalize(t, 'EXTERNAL', Number(byCid('3')?.avgPrice) || this.priceOf(t.symbol) || t.entryPrice);
+      void this.finalize(t, 'EXTERNAL', Number(byCid('3')?.avgPrice) || this.priceOf(t.symbol) || t.entryPrice);
       return;
     }
     if (!flat && !this.slBusy.has(t.id)) {
@@ -751,15 +675,6 @@ class Trader {
     }
     for (const t of trades) await this.closeByMarket(t, 'KILL');
     return trades.length;
-  }
-
-  usedPaperBalance(): number {
-    return openTrades().reduce((a, t) => a + t.margin, 0);
-  }
-
-  /** Only used by tests / maintenance. */
-  resetPaper(): void {
-    setPaperBalance(PAPER_START_BALANCE);
   }
 
   private log(level: 'info' | 'error' | 'win' | 'loss', msg: string): void {

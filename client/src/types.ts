@@ -1,4 +1,8 @@
-export type Mode = 'paper' | 'testnet' | 'live';
+/**
+ * Execution environment. There is no simulated mode: orders always go to a real
+ * Binance environment (testnet = Binance's test exchange, live = mainnet).
+ */
+export type Mode = 'testnet' | 'live';
 
 export interface Trade {
   id: string;
@@ -83,7 +87,8 @@ export interface BotTotals {
 }
 
 export interface AccountView {
-  source: 'binance' | 'paper-sim';
+  /** Always Binance — the account is never simulated. */
+  source: 'binance';
   mode: Mode;
   at: number;
   equity: number | null;
@@ -114,7 +119,7 @@ export interface ManagedPosition {
   margin: number;
   leverage: number;
   liquidationPrice: number;
-  source: 'binance' | 'paper-sim';
+  source: 'binance';
 }
 
 export interface ExternalPosition {
@@ -181,10 +186,9 @@ export interface ScanResult {
 }
 
 export interface FeedInfo {
-  feed: 'binance' | 'offline-demo' | 'binance-unreachable';
+  feed: 'binance' | 'binance-unreachable';
   source: string;
   reachable: boolean | null;
-  demoFeedAllowed?: boolean;
   lastRestOkAt: number;
   lastRestError: string | null;
   latencyMs: number;
@@ -302,7 +306,6 @@ export interface Settings {
   leverage: number;
   maxPositions: number;
   autoScan: boolean;
-  feeRate: number;
   scanner: ScannerSettings;
   emaLengths: number[];
   emaExtraLength: number;

@@ -51,7 +51,7 @@ export function PositionCard({ pos, slot, max, onClose }: { pos: ManagedPosition
         <span className="chip cyan">
           slot {slot}/{max}
         </span>
-        <span className="chip">{t.mode !== 'paper' ? 'binance' : 'paper-sim'}</span>
+        <span className="chip">{t.mode === 'live' ? 'binance' : 'binance testnet'}</span>
         <span className="spacer" />
         <span className="hint">{timeAgo(t.openedAt)}</span>
       </div>
@@ -228,7 +228,7 @@ export function AccountPanel({ account, latencyMs, feed }: { account: AccountVie
   return (
     <Panel
       title="Account · Binance"
-      sub={binance ? 'live exchange data' : 'paper simulation'}
+      sub={binance ? 'live exchange data' : 'exchange data unavailable'}
       icon={<IconWallet />}
       meta={
         <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
