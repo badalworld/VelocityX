@@ -1,0 +1,530 @@
+{
+  "sampleWorlds": [
+    0,
+    2,
+    5,
+    7,
+    9,
+    11,
+    14,
+    17
+  ],
+  "fees": [
+    0.0001,
+    0.0002,
+    0.0003,
+    0.0005,
+    0.0007,
+    0.001
+  ],
+  "rows": [
+    {
+      "world": 0,
+      "worldType": "bull",
+      "worldVol": 0.85,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": 4667.37,
+          "maxDrawdownPct": 69.1,
+          "expectancyR": 0.0103,
+          "grossPnl": 67652.7,
+          "feesPaid": 20939,
+          "trades": 25752
+        },
+        "0.0002": {
+          "totalReturnPct": 290.73,
+          "maxDrawdownPct": 73.36,
+          "expectancyR": -0.0192,
+          "grossPnl": 10116.1,
+          "feesPaid": 7192,
+          "trades": 25746
+        },
+        "0.0003": {
+          "totalReturnPct": -64.91,
+          "maxDrawdownPct": 87.63,
+          "expectancyR": -0.0493,
+          "grossPnl": 2523.8,
+          "feesPaid": 3165.9,
+          "trades": 25368
+        },
+        "0.0005": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0998,
+          "grossPnl": 479.7,
+          "feesPaid": 1476.9,
+          "trades": 13108
+        },
+        "0.0007": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.1688,
+          "grossPnl": 259.5,
+          "feesPaid": 1257.4,
+          "trades": 7541
+        },
+        "0.001": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.2868,
+          "grossPnl": 106.3,
+          "feesPaid": 1104.1,
+          "trades": 4399
+        }
+      }
+    },
+    {
+      "world": 2,
+      "worldType": "chop",
+      "worldVol": 0.85,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": 69.65,
+          "maxDrawdownPct": 74.77,
+          "expectancyR": -0.0064,
+          "grossPnl": 4455.5,
+          "feesPaid": 3779.8,
+          "trades": 25366
+        },
+        "0.0002": {
+          "totalReturnPct": -74.96,
+          "maxDrawdownPct": 84.71,
+          "expectancyR": -0.0304,
+          "grossPnl": 1482.5,
+          "feesPaid": 2231.4,
+          "trades": 25301
+        },
+        "0.0003": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0588,
+          "grossPnl": 487.6,
+          "feesPaid": 1485,
+          "trades": 21500
+        },
+        "0.0005": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0823,
+          "grossPnl": 61.6,
+          "feesPaid": 1057.2,
+          "trades": 15395
+        },
+        "0.0007": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.1008,
+          "grossPnl": 67.8,
+          "feesPaid": 1065.1,
+          "trades": 14416
+        },
+        "0.001": {
+          "totalReturnPct": -99.97,
+          "maxDrawdownPct": 99.97,
+          "expectancyR": -0.2552,
+          "grossPnl": -64.6,
+          "feesPaid": 933.6,
+          "trades": 4093
+        }
+      }
+    },
+    {
+      "world": 5,
+      "worldType": "bull",
+      "worldVol": 1,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": -63.89,
+          "maxDrawdownPct": 89.52,
+          "expectancyR": -0.0048,
+          "grossPnl": 990.2,
+          "feesPaid": 1629.8,
+          "trades": 25831
+        },
+        "0.0002": {
+          "totalReturnPct": -98.02,
+          "maxDrawdownPct": 99.51,
+          "expectancyR": -0.0232,
+          "grossPnl": 606.2,
+          "feesPaid": 1586.6,
+          "trades": 22207
+        },
+        "0.0003": {
+          "totalReturnPct": -99.77,
+          "maxDrawdownPct": 99.83,
+          "expectancyR": -0.0353,
+          "grossPnl": 440.5,
+          "feesPaid": 1438.5,
+          "trades": 19715
+        },
+        "0.0005": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0908,
+          "grossPnl": 189.5,
+          "feesPaid": 1188.9,
+          "trades": 7907
+        },
+        "0.0007": {
+          "totalReturnPct": -99.96,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.1717,
+          "grossPnl": 179.8,
+          "feesPaid": 1179.7,
+          "trades": 4816
+        },
+        "0.001": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.1894,
+          "grossPnl": 206.9,
+          "feesPaid": 1206.7,
+          "trades": 4531
+        }
+      }
+    },
+    {
+      "world": 7,
+      "worldType": "chop",
+      "worldVol": 1,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": 223.34,
+          "maxDrawdownPct": 61.42,
+          "expectancyR": 0.0159,
+          "grossPnl": 6380.1,
+          "feesPaid": 4165.9,
+          "trades": 25648
+        },
+        "0.0002": {
+          "totalReturnPct": -67.03,
+          "maxDrawdownPct": 81.11,
+          "expectancyR": -0.0036,
+          "grossPnl": 1457,
+          "feesPaid": 2128.5,
+          "trades": 25591
+        },
+        "0.0003": {
+          "totalReturnPct": -98.6,
+          "maxDrawdownPct": 98.7,
+          "expectancyR": -0.0198,
+          "grossPnl": 450.4,
+          "feesPaid": 1436.3,
+          "trades": 23066
+        },
+        "0.0005": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0583,
+          "grossPnl": 138.8,
+          "feesPaid": 1136.7,
+          "trades": 14174
+        },
+        "0.0007": {
+          "totalReturnPct": -99.96,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.1056,
+          "grossPnl": -4.4,
+          "feesPaid": 993.7,
+          "trades": 6182
+        },
+        "0.001": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.16,
+          "grossPnl": 24.5,
+          "feesPaid": 1022.9,
+          "trades": 5836
+        }
+      }
+    },
+    {
+      "world": 9,
+      "worldType": "crisis",
+      "worldVol": 1,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": 1494.33,
+          "maxDrawdownPct": 55.29,
+          "expectancyR": 0.0214,
+          "grossPnl": 25854.5,
+          "feesPaid": 10932.9,
+          "trades": 25682
+        },
+        "0.0002": {
+          "totalReturnPct": 29.14,
+          "maxDrawdownPct": 74.3,
+          "expectancyR": -0.0025,
+          "grossPnl": 5445,
+          "feesPaid": 5161.6,
+          "trades": 25682
+        },
+        "0.0003": {
+          "totalReturnPct": -91.9,
+          "maxDrawdownPct": 96.87,
+          "expectancyR": -0.0212,
+          "grossPnl": 2087.9,
+          "feesPaid": 3010.9,
+          "trades": 25482
+        },
+        "0.0005": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.0616,
+          "grossPnl": 870.5,
+          "feesPaid": 1872.1,
+          "trades": 16634
+        },
+        "0.0007": {
+          "totalReturnPct": -99.96,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.1145,
+          "grossPnl": 419.6,
+          "feesPaid": 1421.1,
+          "trades": 7657
+        },
+        "0.001": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.1509,
+          "grossPnl": 281.5,
+          "feesPaid": 1282.1,
+          "trades": 6173
+        }
+      }
+    },
+    {
+      "world": 11,
+      "worldType": "bear",
+      "worldVol": 1.25,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": 414.69,
+          "maxDrawdownPct": 85.59,
+          "expectancyR": 0.017,
+          "grossPnl": 7353.2,
+          "feesPaid": 3211.7,
+          "trades": 25550
+        },
+        "0.0002": {
+          "totalReturnPct": -65.44,
+          "maxDrawdownPct": 93.99,
+          "expectancyR": 0.001,
+          "grossPnl": 1283,
+          "feesPaid": 1938.2,
+          "trades": 25040
+        },
+        "0.0003": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0223,
+          "grossPnl": 384.7,
+          "feesPaid": 1382.5,
+          "trades": 14110
+        },
+        "0.0005": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0711,
+          "grossPnl": 259.6,
+          "feesPaid": 1257.8,
+          "trades": 8733
+        },
+        "0.0007": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0967,
+          "grossPnl": 209.2,
+          "feesPaid": 1207.9,
+          "trades": 8395
+        },
+        "0.001": {
+          "totalReturnPct": -99.97,
+          "maxDrawdownPct": 99.97,
+          "expectancyR": -0.1538,
+          "grossPnl": 125,
+          "feesPaid": 1124.5,
+          "trades": 6822
+        }
+      }
+    },
+    {
+      "world": 14,
+      "worldType": "crisis",
+      "worldVol": 1.25,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": 500.84,
+          "maxDrawdownPct": 80.64,
+          "expectancyR": 0.0105,
+          "grossPnl": 10272.1,
+          "feesPaid": 5256.6,
+          "trades": 25539
+        },
+        "0.0002": {
+          "totalReturnPct": -57.8,
+          "maxDrawdownPct": 92.71,
+          "expectancyR": -0.0113,
+          "grossPnl": 1937.1,
+          "feesPaid": 2517.4,
+          "trades": 25505
+        },
+        "0.0003": {
+          "totalReturnPct": -99.96,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.0332,
+          "grossPnl": 610.4,
+          "feesPaid": 1615.2,
+          "trades": 19145
+        },
+        "0.0005": {
+          "totalReturnPct": -99.97,
+          "maxDrawdownPct": 99.97,
+          "expectancyR": -0.0591,
+          "grossPnl": 123.8,
+          "feesPaid": 1126.4,
+          "trades": 12838
+        },
+        "0.0007": {
+          "totalReturnPct": -99.96,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.0959,
+          "grossPnl": -165.9,
+          "feesPaid": 835.5,
+          "trades": 6496
+        },
+        "0.001": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.1422,
+          "grossPnl": -174.4,
+          "feesPaid": 826.2,
+          "trades": 5311
+        }
+      }
+    },
+    {
+      "world": 17,
+      "worldType": "chop",
+      "worldVol": 1.55,
+      "results": {
+        "0.0001": {
+          "totalReturnPct": 39703.92,
+          "maxDrawdownPct": 70.67,
+          "expectancyR": 0.0312,
+          "grossPnl": 670944.8,
+          "feesPaid": 273521.3,
+          "trades": 25672
+        },
+        "0.0002": {
+          "totalReturnPct": 3031.04,
+          "maxDrawdownPct": 79.5,
+          "expectancyR": 0.0118,
+          "grossPnl": 102724.7,
+          "feesPaid": 72393.3,
+          "trades": 25672
+        },
+        "0.0003": {
+          "totalReturnPct": 96.25,
+          "maxDrawdownPct": 88.48,
+          "expectancyR": -0.0089,
+          "grossPnl": 18616,
+          "feesPaid": 17653.3,
+          "trades": 25669
+        },
+        "0.0005": {
+          "totalReturnPct": -98.18,
+          "maxDrawdownPct": 98.9,
+          "expectancyR": -0.0393,
+          "grossPnl": 4742.6,
+          "feesPaid": 5726.8,
+          "trades": 25052
+        },
+        "0.0007": {
+          "totalReturnPct": -99.95,
+          "maxDrawdownPct": 99.95,
+          "expectancyR": -0.0857,
+          "grossPnl": 1311.8,
+          "feesPaid": 2312.7,
+          "trades": 9648
+        },
+        "0.001": {
+          "totalReturnPct": -99.96,
+          "maxDrawdownPct": 99.96,
+          "expectancyR": -0.1289,
+          "grossPnl": 681.8,
+          "feesPaid": 1683,
+          "trades": 6484
+        }
+      }
+    }
+  ],
+  "summary": {
+    "0.0001": {
+      "feePctPerSide": 0.01,
+      "meanReturnPct": 5876.28125,
+      "medianReturnPct": 457.765,
+      "meanMaxDdPct": 73.375,
+      "meanExpR": 0.011887499999999999,
+      "meanFeesPaid": 40429.625,
+      "meanGross": 99237.88750000001,
+      "profitable": 7,
+      "worlds": 8
+    },
+    "0.0002": {
+      "feePctPerSide": 0.02,
+      "meanReturnPct": 373.4575,
+      "medianReturnPct": -61.62,
+      "meanMaxDdPct": 84.89875,
+      "meanExpR": -0.009675000000000001,
+      "meanFeesPaid": 11893.625,
+      "meanGross": 15631.45,
+      "profitable": 3,
+      "worlds": 8
+    },
+    "0.0003": {
+      "feePctPerSide": 0.03,
+      "meanReturnPct": -69.84875000000001,
+      "medianReturnPct": -99.185,
+      "meanMaxDdPct": 96.42125,
+      "meanExpR": -0.0311,
+      "meanFeesPaid": 3898.45,
+      "meanGross": 3200.1625,
+      "profitable": 1,
+      "worlds": 8
+    },
+    "0.0005": {
+      "feePctPerSide": 0.05,
+      "meanReturnPct": -99.73125000000002,
+      "medianReturnPct": -99.95,
+      "meanMaxDdPct": 99.8225,
+      "meanExpR": -0.0702875,
+      "meanFeesPaid": 1855.3500000000004,
+      "meanGross": 858.2625,
+      "profitable": 0,
+      "worlds": 8
+    },
+    "0.0007": {
+      "feePctPerSide": 0.06999999999999999,
+      "meanReturnPct": -99.95500000000001,
+      "medianReturnPct": -99.955,
+      "meanMaxDdPct": 99.95500000000001,
+      "meanExpR": -0.11746250000000001,
+      "meanFeesPaid": 1284.1374999999998,
+      "meanGross": 284.675,
+      "profitable": 0,
+      "worlds": 8
+    },
+    "0.001": {
+      "feePctPerSide": 0.1,
+      "meanReturnPct": -99.95625000000001,
+      "medianReturnPct": -99.95,
+      "meanMaxDdPct": 99.95750000000001,
+      "meanExpR": -0.18339999999999998,
+      "meanFeesPaid": 1147.8874999999998,
+      "meanGross": 148.375,
+      "profitable": 0,
+      "worlds": 8
+    }
+  }
+}

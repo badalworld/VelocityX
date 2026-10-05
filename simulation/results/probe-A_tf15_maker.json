@@ -1,0 +1,105 @@
+{
+  "sampleWorlds": [
+    0,
+    3,
+    6,
+    9,
+    12,
+    17
+  ],
+  "probes": [
+    {
+      "key": "A_tf15_maker",
+      "label": "15m + maker fee",
+      "cfg": {
+        "signalTimeframe": "15m",
+        "feeRate": 0.0002
+      },
+      "worlds": 6,
+      "meanReturnPct": 442.6750885773849,
+      "medianReturnPct": 103.62669875366657,
+      "bestReturnPct": 2145.8169011040072,
+      "worstReturnPct": -78.84136263908516,
+      "meanMaxDdPct": 74.34545248896025,
+      "meanExpR": 0.018075856816549954,
+      "meanTradesPerMonth": 298.97222222222223,
+      "meanFeesPctOfStart": 226.16065872991751,
+      "profitable": 4,
+      "ruined": 0,
+      "rows": [
+        {
+          "world": 0,
+          "worldType": "bull",
+          "totalReturnPct": 437.6718274393388,
+          "maxDrawdownPct": 60.05481769165756,
+          "expectancyR": 0.007032694295264357,
+          "trades": 3894,
+          "tradesPerMonth": 324.5,
+          "feesPaid": 3232.080610010244,
+          "ruined": false,
+          "liquidations": 10
+        },
+        {
+          "world": 3,
+          "worldType": "volatile",
+          "totalReturnPct": 2145.8169011040072,
+          "maxDrawdownPct": 49.731098179937256,
+          "expectancyR": 0.06574708594442166,
+          "trades": 3815,
+          "tradesPerMonth": 317.9166666666667,
+          "feesPaid": 7236.329109946245,
+          "ruined": false,
+          "liquidations": 14
+        },
+        {
+          "world": 6,
+          "worldType": "bear",
+          "totalReturnPct": -55.85023194728475,
+          "maxDrawdownPct": 75.31851398524991,
+          "expectancyR": -0.013253124988351489,
+          "trades": 3641,
+          "tradesPerMonth": 303.4166666666667,
+          "feesPaid": 340.3897622895541,
+          "ruined": false,
+          "liquidations": 20
+        },
+        {
+          "world": 9,
+          "worldType": "crisis",
+          "totalReturnPct": 66.8516021436509,
+          "maxDrawdownPct": 87.76091873413847,
+          "expectancyR": -0.005332896655680061,
+          "trades": 3633,
+          "tradesPerMonth": 302.75,
+          "feesPaid": 1127.2377491293057,
+          "ruined": false,
+          "liquidations": 41
+        },
+        {
+          "world": 12,
+          "worldType": "chop",
+          "totalReturnPct": -78.84136263908516,
+          "maxDrawdownPct": 92.72599640929968,
+          "expectancyR": 0.014014897593595617,
+          "trades": 3391,
+          "tradesPerMonth": 282.5833333333333,
+          "feesPaid": 434.1141864223263,
+          "ruined": false,
+          "liquidations": 50
+        },
+        {
+          "world": 17,
+          "worldType": "chop",
+          "totalReturnPct": 140.40179536368225,
+          "maxDrawdownPct": 80.48136993347856,
+          "expectancyR": 0.04024648471004963,
+          "trades": 3152,
+          "tradesPerMonth": 262.6666666666667,
+          "feesPaid": 1199.4881059973784,
+          "ruined": false,
+          "liquidations": 101
+        }
+      ]
+    }
+  ]
+}

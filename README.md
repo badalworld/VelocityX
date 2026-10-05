@@ -79,6 +79,24 @@ npm start              # http://localhost:4000
 
 Development: `npm run dev:server` (tsc watch) + `npm run dev:client` (vite on :5173, proxies to :4000).
 
+### Simulation study (how the strategy actually performs)
+
+A reproducible Monte-Carlo study lives in [`simulation/`](simulation/README.md): **20 independent one-year
+markets × 11 paired configurations**, an engine that mirrors `trader.ts` rule-for-rule (the repo's own
+compiled `signalAt()` is imported by the harness), a fee-tier sweep, and null tests (inverted signals,
+random entries). Read **[simulation/SIMULATION-REPORT.md](simulation/SIMULATION-REPORT.md)** or open
+**[simulation/report.html](simulation/report.html)**.
+
+Headline: the shipped 5-minute defaults fire ~1,000 trades/month and pay ~156 % of starting equity per
+year in taker fees against a measured ≈ 0 R edge (0/20 worlds profitable). On **15m candles with maker
+fees** the same bot reaches a **positive median year (+104 %) with no ruined worlds** — and the study
+found one real bug in paper-mode sizing (fixed; see the report §9).
+
+```bash
+cd simulation && node run.js && node validate.js && node curves.js && node report.js
+node run.js --data ./klines          # same study on real Binance 5m CSVs, when egress is available
+```
+
 ### Tests
 
 ```bash

@@ -4,3 +4,8 @@ server/data/
 *.log
 .env
 .DS_Store
+
+# simulation: heavy derived artifacts (regenerate with `node simulation/run.js`)
+simulation/results/simulations.json
+simulation/results/trades-default.json
+simulation/results/partial-*.jsonl
