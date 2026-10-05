@@ -38,10 +38,16 @@ export default function PnlDock({ account, trades }: { account: AccountView | nu
             <span className="cur">USDT</span>
           </div>
           <div className="pnl-sub">
-            <span className={up ? 'up' : 'down'} style={{ fontWeight: 800 }}>
-              {up ? '▲' : '▼'} <AnimatedNumber value={model.changePct} decimals={2} signed />%
-            </span>
-            <span style={{ color: 'var(--dim)' }}>vs {fmt(model.base, 2)} start equity</span>
+            {model.equityKnown ? (
+              <>
+                <span className={up ? 'up' : 'down'} style={{ fontWeight: 800 }}>
+                  {up ? '▲' : '▼'} <AnimatedNumber value={model.changePct} decimals={2} signed />%
+                </span>
+                <span style={{ color: 'var(--dim)' }}>vs {fmt(model.base, 2)} start equity</span>
+              </>
+            ) : (
+              <span style={{ color: 'var(--dim)' }}>realised + live unrealised from Binance · account equity pending</span>
+            )}
           </div>
         </div>
 

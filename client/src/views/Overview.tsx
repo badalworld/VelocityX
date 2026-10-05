@@ -74,18 +74,6 @@ export function FeedBanner({ status }: { status: Status | null }) {
       </div>
     );
   }
-  if (feed === 'offline-demo') {
-    return (
-      <div className="feed-banner warn" data-reveal="true">
-        <IconAlert style={{ width: 14, height: 14 }} />
-        <b>OFFLINE DEMO FEED — synthetic data, not Binance.</b>
-        <span>
-          This host cannot reach fapi.binance.com and <span className="mono">VX_OFFLINE_DEMO=1</span> is set, so a clearly
-          labelled simulator is driving the UI. Remove that flag on a networked host to see real Binance data only.
-        </span>
-      </div>
-    );
-  }
   return (
     <div className="feed-banner error" data-reveal="true">
       <IconAlert style={{ width: 14, height: 14 }} />
@@ -149,11 +137,11 @@ export default function Overview({
             <span className="chip cyan">
               <IconSparkles style={{ width: 11, height: 11 }} /> live binance desk
             </span>
-            <span className={`badge-mode ${status?.mode ?? 'paper'}`} style={{ padding: '3px 9px', fontSize: 9.5 }}>
-              {status?.mode ?? 'paper'}
+            <span className={`badge-mode ${status?.mode ?? 'live'}`} style={{ padding: '3px 9px', fontSize: 9.5 }}>
+              {status?.mode ?? 'live'}
             </span>
             <span className={`chip ${account?.source === 'binance' ? 'green' : 'amber'}`}>
-              {account?.source === 'binance' ? 'exchange equity' : 'paper simulation'}
+              {account?.source === 'binance' ? 'exchange equity' : 'exchange data unavailable'}
             </span>
           </span>
           <h1 className="hero-title">
@@ -322,7 +310,7 @@ export default function Overview({
           title="Execution Rules"
           sub="what the executor does on every signal"
           icon={<IconShield />}
-          meta={<span className="chip cyan">{status?.mode ?? 'paper'}</span>}
+          meta={<span className="chip cyan">{status?.mode ?? 'live'}</span>}
         >
           <div className="mini-grid">
             <div className="mini">
@@ -388,13 +376,13 @@ export default function Overview({
           title="Engine Health"
           sub="feed + rate budget"
           icon={<IconShield />}
-          meta={status?.feed === 'binance' ? 'binance live' : status?.feed === 'offline-demo' ? 'demo feed' : 'disconnected'}
+          meta={status?.feed === 'binance' ? 'binance live' : 'disconnected'}
         >
           <div className="mini-grid">
             <div className="mini">
               <div className="k">Content source</div>
               <div className={`v ${status?.feed === 'binance' ? 'up' : 'down'}`}>
-                {status?.feed === 'binance' ? 'Binance' : status?.feed === 'offline-demo' ? 'Simulated' : 'None'}
+                {status?.feed === 'binance' ? 'Binance' : 'None (unreachable)'}
               </div>
             </div>
             <div className="mini">

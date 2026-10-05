@@ -40,9 +40,9 @@ export interface Trade {
   /** Commission reported by Binance in a non-USDT asset (e.g. BNB), if any. */
   commissionOtherAsset: number;
   initialRisk: number; // |entry-sl| * qty (price risk at open)
-  /** live order ids (paper uses pseudo ids) */
+  /** Binance client order ids (VX<tradeId><suffix>) for this trade's ladder. */
   orders: { entry?: string; sl?: string; tp1?: string; tp2?: string; tp3?: string };
-  mode: 'paper' | 'testnet' | 'live';
+  mode: 'testnet' | 'live';
   result: 'WIN' | 'LOSS' | null;
   /** Always true: the bot NEVER adopts or manages trades it did not open. */
   botOwned: true;
@@ -63,13 +63,8 @@ export interface SignalRecord {
 }
 type SignalSide_ = 'LONG' | 'SHORT';
 
-export interface PaperState {
-  balance: number;
-}
-
 const TRADES_FILE = dataPath('trades.json');
 const SIGNALS_FILE = dataPath('signals.json');
-const PAPER_FILE = dataPath('paper.json');
 
 /**
  * Read a persisted JSON document. A corrupt journal is NEVER silently dropped:
@@ -126,10 +121,6 @@ export function openTrades(): Trade[] {
 export function openTradeOn(symbol: string): Trade | null {
   return trades.find((t) => t.status === 'OPEN' && t.symbol === symbol) || null;
 }
-/** Back-compat helper: the most recent OPEN trade (or null). */
-export function activeTrade(): Trade | null {
-  return trades.find((t) => t.status === 'OPEN') || null;
-}
 export function saveTrade(t: Trade): void {
   const idx = trades.findIndex((x) => x.id === t.id);
   if (idx >= 0) trades[idx] = t;
@@ -156,24 +147,6 @@ export function markSignalActed(id: string, tradeId: string): void {
     s.tradeId = tradeId;
     writeJson(SIGNALS_FILE, signals);
   }
-}
-
-// ---------- paper balance ----------
-let paper: PaperState = readJson<PaperState>(PAPER_FILE, { balance: -1 });
-
-export function getPaperBalance(fallback: number): number {
-  if (!Number.isFinite(paper.balance) || paper.balance < 0) {
-    paper.balance = fallback;
-    writeJson(PAPER_FILE, paper);
-  }
-  return paper.balance;
-}
-export function setPaperBalance(v: number): void {
-  paper.balance = Math.round(v * 1e8) / 1e8;
-  writeJson(PAPER_FILE, paper);
-}
-export function adjustPaperBalance(delta: number): void {
-  setPaperBalance(getPaperBalance(1000) + delta);
 }
 
 // ---------- pruning ----------

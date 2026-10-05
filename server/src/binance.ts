@@ -7,11 +7,13 @@
  *  • Every request is scheduled through the 95% weight budget in ratelimit.ts,
  *    inside its own work area, so realtime data keeps flowing while the
  *    scanner, the executor and the account poller all work at the same time.
+ *  • There is no synthetic fallback: when Binance is unreachable the client
+ *    reports `reachable: false`, callers surface the error and nothing is
+ *    fabricated anywhere.
  */
 import crypto from 'crypto';
 import { Candle } from './indicators';
 import { getSettings, Mode } from './settings';
-import { offlineFeed } from './offline';
 import { emit } from './broadcast';
 import { Area, ENDPOINT_WEIGHT, klineWeight, limiter } from './ratelimit';
 
@@ -19,11 +21,6 @@ export const MAINNET_REST = 'https://fapi.binance.com';
 export const TESTNET_REST = 'https://testnet.binancefuture.com';
 export const MAINNET_WS = 'wss://fstream.binance.com';
 export const TESTNET_WS = 'wss://stream.testnet.binancefuture.com';
-
-/** Current feed time: simulated clock in offline-demo mode, wall clock otherwise. */
-export function feedNow(): number {
-  return offlineFeed.active ? offlineFeed.now() : Date.now();
-}
 
 export function restBase(mode: Mode): string {
   return mode === 'testnet' ? TESTNET_REST : MAINNET_REST;
@@ -116,7 +113,6 @@ export class BinanceApi {
   private exchangeCache: { list: ExchangeSymbol[]; at: number } | null = null;
   private klineCache = new Map<string, { at: number; data: Candle[] }>();
   private inFlight = new Map<string, Promise<any>>();
-  private lastLiveTry = 0;
 
   /** Connection telemetry — surfaced in /api/diagnostics so the UI can prove the feed is real. */
   telemetry = {
@@ -131,48 +127,31 @@ export class BinanceApi {
     wsLastMessageAt: 0,
   };
 
-  /** True while the offline demo feed is serving synthetic candles. */
-  isOffline(): boolean {
-    return offlineFeed.active;
-  }
-
-  /** Nothing synthetic is ever served unless the operator opts in explicitly. */
-  demoAllowed(): boolean {
-    return process.env.VX_OFFLINE_DEMO === '1';
-  }
-
   /** `null` while unknown (first request not finished yet). */
   reachable: boolean | null = null;
 
-  private goOffline(): void {
+  /**
+   * Mark the exchange unreachable. No data is invented: callers get the real
+   * error, the feed badge flips to `binance-unreachable` and the bot simply
+   * waits for the connection to come back.
+   */
+  private markUnreachable(): void {
     if (this.reachable !== false) {
       this.reachable = false;
+      console.warn('[binance] unreachable — no market data available until the connection returns');
+      emit('log', { level: 'error', msg: '⚠ Binance API unreachable — no market data (nothing is simulated)' });
       emit('feed', { feed: 'binance-unreachable' });
-    }
-    if (this.demoAllowed() && !offlineFeed.active) {
-      offlineFeed.activate();
-      this.klineCache.clear();
-      console.warn('[binance] unreachable — OFFLINE DEMO feed engaged (VX_OFFLINE_DEMO=1, synthetic data)');
-      emit('log', { level: 'error', msg: '⚠ Binance API unreachable — OFFLINE DEMO feed engaged (simulated data, NOT Binance)' });
-      emit('feed', { feed: 'offline-demo' });
-    } else if (this.demoAllowed()) {
-      /* already active */
-    } else if (this.lastLiveTry) {
-      emit('log', { level: 'error', msg: 'Binance API unreachable from this host — no market data available (demo feed disabled)' });
     }
   }
 
   private goOnline(): void {
     const wasDown = this.reachable === false;
-    const wasDemo = offlineFeed.active;
     this.reachable = true;
-    if (wasDemo) {
-      offlineFeed.deactivate();
-      this.klineCache.clear();
+    if (wasDown) {
       console.log('[binance] connection restored — real Binance feed');
       emit('log', { level: 'win', msg: '✓ Binance API reachable again — real market feed restored' });
+      emit('feed', { feed: 'binance' });
     }
-    if (wasDown || wasDemo) emit('feed', { feed: 'binance' });
   }
 
   /** Keys for the *order* environment (never for market data). */
@@ -181,8 +160,8 @@ export class BinanceApi {
     return s.mode === 'live' ? s.keys.live : s.keys.testnet;
   }
 
-  orderMode(): Exclude<Mode, 'paper'> {
-    return getSettings().mode === 'live' ? 'live' : 'testnet';
+  orderMode(): Mode {
+    return getSettings().mode;
   }
 
   // ---------------- market data (mainnet public) ----------------
@@ -191,14 +170,6 @@ export class BinanceApi {
     const ck = `${symbol}|${interval}|${limit}`;
     const hit = this.klineCache.get(ck);
     if (hit && Date.now() - hit.at < cacheMs) return hit.data;
-
-    // Offline: serve synthetic candles; retry the real API at most every 60s.
-    if (offlineFeed.active && Date.now() - this.lastLiveTry < 60_000) {
-      const data = offlineFeed.candles(symbol, interval, limit);
-      this.klineCache.set(ck, { at: Date.now(), data });
-      return data;
-    }
-    this.lastLiveTry = Date.now();
 
     try {
       const p = this.throttle(ck, () =>
@@ -218,11 +189,8 @@ export class BinanceApi {
       this.klineCache.set(ck, { at: Date.now(), data });
       return data;
     } catch (e) {
-      this.goOffline();
-      if (!offlineFeed.active) throw e; // no synthetic data unless explicitly enabled
-      const data = offlineFeed.candles(symbol, interval, limit);
-      this.klineCache.set(ck, { at: Date.now(), data });
-      return data;
+      this.markUnreachable();
+      throw e;
     }
   }
 
@@ -230,14 +198,12 @@ export class BinanceApi {
   async ticker24hrAll(): Promise<
     { symbol: string; lastPrice: number; priceChangePercent: number; highPrice: number; lowPrice: number; quoteVolume: number; volume: number }[]
   > {
-    if (offlineFeed.active) return offlineFeed.tickers();
     let raw: any[];
     try {
       raw = (await this.publicGet('/fapi/v1/ticker/24hr', {}, 'scanner', ENDPOINT_WEIGHT.ticker24All)) as any[];
       this.goOnline();
     } catch (e) {
-      this.goOffline();
-      if (offlineFeed.active) return offlineFeed.tickers();
+      this.markUnreachable();
       throw e;
     }
     return raw.map((r) => ({
@@ -253,7 +219,6 @@ export class BinanceApi {
 
   /** Funding rates for the whole universe (weight 10) — scanner step 1b. */
   async premiumIndexAll(): Promise<{ symbol: string; markPrice: number; lastFundingRate: number; nextFundingTime: number }[]> {
-    if (offlineFeed.active) return [];
     try {
       const raw = (await this.publicGet('/fapi/v1/premiumIndex', {}, 'scanner', ENDPOINT_WEIGHT.premiumIndexAll)) as any[];
       return raw.map((r) => ({
@@ -397,11 +362,6 @@ export class BinanceApi {
   /** Full exchange metadata (cached 1h) — the scanner universe comes from here. */
   async exchangeInfoAll(): Promise<ExchangeSymbol[]> {
     if (this.exchangeCache && Date.now() - this.exchangeCache.at < 3600_000) return this.exchangeCache.list;
-    if (offlineFeed.active) {
-      const list = offlineFeed.universe() as ExchangeSymbol[];
-      this.exchangeCache = { list, at: Date.now() };
-      return list;
-    }
     const info = (await this.publicGet('/fapi/v1/exchangeInfo', {}, 'scanner', ENDPOINT_WEIGHT.exchangeInfo)) as any;
     const list: ExchangeSymbol[] = (info.symbols || [])
       .filter((s: any) => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
@@ -436,20 +396,12 @@ export class BinanceApi {
   async exchangeInfo(symbol: string): Promise<SymbolInfo> {
     const hit = this.symbolCache.get(symbol);
     if (hit && Date.now() - hit.at < 3600_000) return hit.info;
-    if (offlineFeed.active) {
-      const info = offlineFeed.exchangeInfo(symbol) as SymbolInfo;
-      this.symbolCache.set(symbol, { info, at: Date.now() });
-      return info;
-    }
     let list: ExchangeSymbol[];
     try {
       list = await this.exchangeInfoAll();
     } catch (e) {
-      this.goOffline();
-      if (!offlineFeed.active) throw e;
-      const oi = offlineFeed.exchangeInfo(symbol) as SymbolInfo;
-      this.symbolCache.set(symbol, { info: oi, at: Date.now() });
-      return oi;
+      this.markUnreachable();
+      throw e;
     }
     const s = list.find((x) => x.symbol === symbol);
     if (!s) throw new Error(`Symbol ${symbol} not found on Binance Futures`);
@@ -520,6 +472,9 @@ export class BinanceApi {
       this.telemetry.errors += 1;
       this.telemetry.lastRestError = e?.message || String(e);
       this.telemetry.lastRestErrorAt = Date.now();
+      // A transport failure on the public mainnet feed means the market data
+      // the engine needs is simply not available right now (never invented).
+      if (base === MAINNET_REST) this.markUnreachable();
       throw e;
     }
     limiter.observeHeaders(r.headers);
@@ -706,6 +661,12 @@ export class BinanceApi {
     });
   }
 
+  /**
+   * Take-profit leg for the bot's own quantity. One-way mode uses `reduceOnly`
+   * (the leg can only shrink our position); hedge mode must use `positionSide`
+   * instead — Binance rejects reduceOnly there — and `positionSide` always
+   * scopes the order to the bot's own side.
+   */
   async takeProfitMarket(
     symbol: string,
     side: 'BUY' | 'SELL',
@@ -713,14 +674,15 @@ export class BinanceApi {
     qty: number,
     opts: { newClientOrderId?: string; positionSide?: string } = {},
   ): Promise<any> {
+    const dual = await this.isDualSide();
     const p: any = {
       symbol,
       side,
       type: 'TAKE_PROFIT_MARKET',
       stopPrice: fmtPrice(stopPrice),
       quantity: fmtQty(qty),
-      reduceOnly: 'true',
     };
+    if (!dual) p.reduceOnly = 'true';
     if (opts.newClientOrderId) p.newClientOrderId = opts.newClientOrderId;
     if (opts.positionSide) p.positionSide = opts.positionSide;
     return this.newOrder(p);
@@ -733,9 +695,14 @@ export class BinanceApi {
     if (!key) throw new Error('No API key');
     const base = restBase(this.orderMode());
     await limiter.acquire('stream', ENDPOINT_WEIGHT.listenKey, 2);
-    const r = await fetch(`${base}/fapi/v1/listenKey`, { method: 'POST', headers: { 'X-MBX-APIKEY': key } });
+    const r = await fetch(`${base}/fapi/v1/listenKey`, {
+      method: 'POST',
+      headers: { 'X-MBX-APIKEY': key },
+      // A hung request must never wedge the user-data stream forever.
+      signal: AbortSignal.timeout(10_000),
+    });
     limiter.observeHeaders(r.headers);
-    const j = await r.json();
+    const j = await r.json().catch(() => ({}));
     if (!j.listenKey) throw new Error('listenKey failed: ' + JSON.stringify(j));
     return j.listenKey;
   }
@@ -745,7 +712,11 @@ export class BinanceApi {
     if (!key) return;
     const base = restBase(this.orderMode());
     await limiter.acquire('stream', ENDPOINT_WEIGHT.listenKey, 2);
-    await fetch(`${base}/fapi/v1/listenKey`, { method: 'PUT', headers: { 'X-MBX-APIKEY': key } });
+    await fetch(`${base}/fapi/v1/listenKey`, {
+      method: 'PUT',
+      headers: { 'X-MBX-APIKEY': key },
+      signal: AbortSignal.timeout(10_000),
+    });
   }
 
   /** Combined market-data stream URL (bookTicker + kline per active symbol). */

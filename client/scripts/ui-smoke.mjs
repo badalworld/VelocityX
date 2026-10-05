@@ -8,7 +8,7 @@
  * dock — while the removed BTCUSDT candlestick/EMA chart stays absent. It then
  * clicks through Scanner, Positions, Trades and Settings.
  *
- *   npm run smoke:ui            # fixture-fed (offline, deterministic)
+ *   npm run smoke:ui            # fixture-fed DOM smoke (deterministic, no exchange needed)
  *   npm run smoke:ui -- --live  # against a running server on :4000
  *
  * Exit code is non-zero if any check fails or the app logs a runtime error.
@@ -70,7 +70,7 @@ const openTrade = {
   commissionOtherAsset: 0,
   initialRisk: 210,
   orders: { entry: 'VXt1E', sl: 'VXt1S', tp1: 'VXt11', tp2: 'VXt12', tp3: 'VXt13' },
-  mode: 'paper',
+  mode: 'testnet',
   result: null,
   botOwned: true,
   unrealized: 12.75,
@@ -90,8 +90,8 @@ const trades = [
 
 /* ---- Binance account view (the P&L / ROI / equity source) ---- */
 const accountView = {
-  source: 'paper-sim',
-  mode: 'paper',
+  source: 'binance',
+  mode: 'testnet',
   at: now,
   equity: 1060.65,
   walletBalance: 1048.1,
@@ -111,7 +111,7 @@ const accountView = {
 };
 
 const positionsView = {
-  managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.06, notional: 3759.9, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'paper-sim' } ],
+  managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.06, notional: 3759.9, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'binance' } ],
   external: [ { symbol: 'DOGEUSDT', side: 'LONG', qty: 1200, notional: 512.4, entryPrice: 0.42, markPrice: 0.4173, unrealized: -3.2, leverage: 5, margin: 102.5, source: 'binance', managed: false, note: 'opened outside the bot — never adopted, never counted' } ],
   slots: { used: 1, max: 8 },
   note: 'external positions are never adopted, managed, closed or counted in bot PnL',
@@ -146,7 +146,7 @@ const routes = {
     symbol,
     autoTrade: true,
     autoScan: true,
-    mode: 'paper',
+    mode: 'testnet',
     feed: 'binance',
     startedAt: now - 9 * HOUR,
     engine: { lastSignal: signals[2], emas: [], atr: 210, ribbonBull: true, lastClosedCandleTime: now - 5 * MIN, startedAt: now - 9 * HOUR },
@@ -154,13 +154,13 @@ const routes = {
     openTrade: openTrade,
     slots: { used: 1, max: 8 },
     scanner: { at: now, selected: scannerView.selected, universe: 214, analysed: 30 },
-    feedInfo: { feed: 'binance', source: 'binance-usdm', reachable: true, demoFeedAllowed: false, lastRestOkAt: now - 1200, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300, candles: { symbols: 4, series: 4, bars: 812, lastWsAt: now - 300 } },
+    feedInfo: { feed: 'binance', source: 'binance-usdm', reachable: true, lastRestOkAt: now - 1200, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300, candles: { symbols: 4, series: 4, bars: 812, lastWsAt: now - 300 } },
     limits: { plannedLimitPerMin: 2280, usedWeight: 412, usedPct: 17.2, cooldownMsLeft: 0, areas: [ { area: 'scanner', sharePct: 40, weightUsed: 220, weightCap: 912, calls: 12, waiting: 0, avgWaitMs: 3 }, { area: 'market', sharePct: 25, weightUsed: 96, weightCap: 570, calls: 40, waiting: 0, avgWaitMs: 1 }, { area: 'account', sharePct: 20, weightUsed: 76, weightCap: 456, calls: 8, waiting: 0, avgWaitMs: 2 }, { area: 'orders', sharePct: 10, weightUsed: 15, weightCap: 228, calls: 6, waiting: 0, avgWaitMs: 0 }, { area: 'stream', sharePct: 5, weightUsed: 5, weightCap: 114, calls: 2, waiting: 0, avgWaitMs: 0 } ] },
     account: accountView,
     logs: [
       { t: now - 4000, level: 'info', msg: 'Scanner: 30 markets analysed · trading BTC, SOL, BNB, DOGE' },
       { t: now - 3000, level: 'win', msg: 'BTCUSDT TP1 hit @ 61515 — closed 0.02, SL → breakeven' },
-      { t: now - 2000, level: 'info', msg: 'PAPER LONG 0.06 BTCUSDT @ 61200 | SL 60780 | TP 61515/61830/62145' },
+      { t: now - 2000, level: 'info', msg: 'TESTNET LONG 0.06 BTCUSDT @ 61200 | SL 60780 | TP 61515/61830/62145' },
       { t: now - 1000, level: 'info', msg: 'Binance weight 412/2280 (18%) — scanner 220, market 96' },
     ],
     streams: { market: true, user: true },
@@ -186,7 +186,7 @@ const routes = {
     at: now,
   },
   '/api/settings': {
-    mode: 'paper',
+    mode: 'testnet',
     autoTrade: true,
     autoScan: true,
     symbol,
@@ -194,7 +194,6 @@ const routes = {
     tradeSizePercent: 5,
     leverage: 10,
     maxPositions: 8,
-    feeRate: 0.0005,
     emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
     emaExtraLength: 200,
     atrLength: 14,
@@ -328,6 +327,7 @@ let liveSignals = [];
 let liveClosed = 0;
 let liveExternal = 0;
 let liveScannerRows = 0;
+let liveMode = null;
 if (LIVE) {
   const jget = async (p) => {
     try {
@@ -337,6 +337,8 @@ if (LIVE) {
       return null;
     }
   };
+  const st = await jget('/api/status');
+  liveMode = st?.mode ?? null;
   const pos = await jget('/api/positions');
   liveManaged = Array.isArray(pos?.managed) ? pos.managed.length : 0;
   liveExternal = Array.isArray(pos?.external) ? pos.external.length : 0;
@@ -366,7 +368,7 @@ checkSoft(
 );
 {
   const banner = text('.feed-banner') ?? '';
-  check('feed banner is truthful', !!doc.querySelector('.feed-banner') && /binance/i.test(banner) && (LIVE ? /live|offline|unreachable|demo|stale|degraded/i.test(banner) : /live feed/i.test(banner)), banner.slice(0, 60));
+  check('feed banner is truthful', !!doc.querySelector('.feed-banner') && /binance/i.test(banner) && (LIVE ? /live|unreachable|stale|degraded/i.test(banner) : /live feed/i.test(banner)), banner.slice(0, 60));
 }
 check('hero + equity sparkline', !!text('.hero-title') && !!doc.querySelector('.hero .kpi-spark svg path'));
 check('four KPI pods', doc.querySelectorAll('.kpi').length === 4);
@@ -391,7 +393,21 @@ check('hit-rate bars', doc.querySelectorAll('.bar-row').length >= 5);
 check('MTF gauge', !!doc.querySelector('.gauge-svg .gauge-fill'));
 check('MTF timeframe chips', doc.querySelectorAll('.tf-chip').length >= 3);
 check('execution rules panel', /execution rules/i.test(doc.body.textContent));
-check('live banner hidden while paper', !doc.querySelector('.feed-banner[role="alert"]'));
+{
+  // The red/amber banner is a real-money warning: it MUST show whenever the
+  // server runs on mainnet (armed or disarmed) and MUST be absent on testnet.
+  const alert = doc.querySelector('.feed-banner[role="alert"]');
+  const alertText = alert ? (text('.feed-banner[role="alert"]') ?? '') : '';
+  const liveServer = LIVE ? liveMode === 'live' : false;
+  const known = !LIVE || liveMode != null;
+  checkSoft(
+    known,
+    'live-money banner matches the execution environment',
+    liveServer ? !!alert && /LIVE MONEY/.test(alertText) : !alert || !/LIVE MONEY/.test(alertText),
+    liveServer ? alertText.slice(0, 50) : alertText.slice(0, 50) || 'absent',
+    'the live server did not report its mode',
+  );
+}
 checkSoft(
   !LIVE || liveScannerRows > 0,
   'scanner top picks',
@@ -407,7 +423,10 @@ checkSoft(
   'the scanner is still warming up',
 );
 checkSoft(!LIVE || liveManaged > 0, 'managed position card', doc.querySelectorAll('.pos-item').length >= 1);
-check('no manual asset input', !/paper balance/i.test(doc.body.textContent) && !/enter .*(equity|assets)/i.test(doc.body.textContent));
+check(
+  'no simulation anywhere in the UI',
+  !/paper|demo feed|offline demo|simulated mode/i.test(doc.body.textContent) && !/enter .*(equity|assets)/i.test(doc.body.textContent),
+);
 check('activity feed', doc.querySelectorAll('.feed-line').length >= 3);
 check(
   'BTCUSDT candlestick chart removed',
@@ -494,6 +513,11 @@ check('settings inputs', doc.querySelectorAll('.input, .select, .textarea').leng
   connTab?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await sleep(300);
   check('connection tab renders (incl. API token field)', /API token/i.test(doc.body.textContent));
+  const modeSelect = [...doc.querySelectorAll('select')].find((sel) => [...sel.options].some((o) => /testnet/i.test(o.textContent || '')));
+  check(
+    'mode selector offers only real environments (testnet/live)',
+    !!modeSelect && modeSelect.options.length === 2 && ![...modeSelect.options].some((o) => /paper|simulat/i.test(o.textContent || '')),
+  );
 }
 check('scanner settings tab', (() => { const t = [...doc.querySelectorAll('.settings-sec h4')].some((h) => /market scanner/i.test(h.textContent || '')) || true; return t; })());
 check('guardrails panel', /execution guardrails/i.test(doc.body.textContent));

@@ -1,9 +1,9 @@
 /**
  * HTTP API for the dashboard UI.
  *
- * Every market/account number returned here comes from Binance (REST + WS);
- * the offline demo feed is clearly flagged as `feed: 'offline-demo'` and is
- * only ever used when the exchange is unreachable from the host.
+ * Every market/account number returned here comes from Binance (REST + WS).
+ * When the exchange is unreachable the feed is flagged `binance-unreachable`
+ * and payloads stay empty — nothing is ever simulated.
  */
 import express from 'express';
 import { api } from './binance';
@@ -29,7 +29,7 @@ export function apiRouter(): express.Router {
     res.json({
       ok: true,
       uptime: process.uptime(),
-      feed: api.isOffline() ? 'offline-demo' : 'binance',
+      feed: api.reachable === false ? 'binance-unreachable' : 'binance',
       authRequired: authRequired(),
       mode: getSettings().mode,
     });
@@ -42,13 +42,11 @@ export function apiRouter(): express.Router {
   const mutate = rateLimit({ perMinute: 60, burst: 20 });
 
   const feedInfo = () => {
-    const offline = api.isOffline();
-    const unreachable = !offline && api.reachable === false;
+    const unreachable = api.reachable === false;
     return {
-      feed: offline ? 'offline-demo' : unreachable ? 'binance-unreachable' : 'binance',
-      source: offline ? 'offline-demo' : 'binance-usdm',
+      feed: unreachable ? 'binance-unreachable' : 'binance',
+      source: 'binance-usdm',
       reachable: api.reachable,
-      demoFeedAllowed: api.demoAllowed(),
       lastRestOkAt: api.telemetry.lastRestOkAt,
       lastRestError: api.telemetry.lastRestError || null,
       latencyMs: api.telemetry.lastLatencyMs,
@@ -210,12 +208,12 @@ export function apiRouter(): express.Router {
     const patch = req.body || {};
     const wantsLive = patch.mode === 'live' && before.mode !== 'live';
 
-    if (patch.mode !== undefined && !['paper', 'testnet', 'live'].includes(patch.mode)) {
-      return res.status(400).json({ error: 'mode must be paper | testnet | live' });
+    if (patch.mode !== undefined && !['testnet', 'live'].includes(patch.mode)) {
+      return res.status(400).json({ error: 'mode must be testnet | live — simulation was removed' });
     }
     if (wantsLive && patch.confirmLive !== true) {
       return res.status(400).json({
-        error: 'Switching to LIVE places real orders — resend with confirmLive: true after testing on paper/testnet',
+        error: 'Switching to LIVE places real orders — resend with confirmLive: true after testing on Binance testnet',
       });
     }
     if (patch.symbol !== undefined && !/^[A-Z0-9]{4,24}$/.test(String(patch.symbol).toUpperCase())) {
@@ -232,7 +230,7 @@ export function apiRouter(): express.Router {
       emit('log', { level: 'info', msg: `Primary symbol changed to ${s.symbol}` });
     }
     if (patch.mode && patch.mode !== before.mode) {
-      if (s.mode === 'paper' || s.keys[s.mode]?.key) {
+      if (s.keys[s.mode]?.key && s.keys[s.mode]?.secret) {
         userStream.start();
         void accountService.refresh();
         emit('log', {

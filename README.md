@@ -12,7 +12,7 @@ Web dashboard + signal engine + trade executor. It computes the indicator *itsel
 │   user stream)     Signal Engine per symbol (EMA11/EMA34, 5m)         │
 │                          │  ATR(14)×2 SL · TP 1.5R/3R/4.5R            │
 │                          ▼                                            │
-│                   Trade Executor  (paper / testnet / live)            │
+│                   Trade Executor  (testnet / live — real orders)     │
 │                    max 8 positions · one per market                  │
 │                    TP1→33%+BE · TP2→50% rest+SL→TP1 · TP3→full        │
 │                          │                                            │
@@ -83,7 +83,7 @@ Development: `npm run dev:server` (tsc watch) + `npm run dev:client` (vite on :5
 
 ```bash
 npm test --prefix server            # indicator maths vs. independent Python vectors + ladder sizes
-npm run test:e2e --prefix server    # paper state machine + the 8-position cap
+npm run test:e2e --prefix server    # order-path state machine vs. a stubbed exchange + the 8-position cap
 npm run test:realtime --prefix server  # 95% budget, order rate, scanner gates, ownership guards
 npm run test:api --prefix server    # boots the real server: token auth, live arming, 404s, shutdown
 npm run verify:binance --prefix server # real exchange + WS + dashboard path (needs egress)
@@ -93,22 +93,22 @@ VX_API=http://localhost:4000 npm run smoke:ui --prefix client -- --live
 
 ### Modes (Settings → CONNECTION)
 
-1. **PAPER (default, safe)** — full logic against *live Binance prices*, fills simulated locally. No keys needed and **no manual balance input**: the equity line is always derived (paper sim is labelled `paper-sim`, live/testnet equity comes from Binance `/fapi/v2/account`).
-2. **TESTNET** — real orders on [testnet.binancefuture.com](https://testnet.binancefuture.com) with free test USDT. Generate keys: log in on the testnet site → *API Management*.
-3. **LIVE** — real mainnet orders. Configure your Binance API keys first (enable Futures, prefer IP-restricted keys).
+There is **no simulation mode**. VelocityX is a real trading system: both modes send real orders through the Binance API and every number shown comes from the exchange.
+
+1. **TESTNET** — orders on [testnet.binancefuture.com](https://testnet.binancefuture.com) with free test USDT. Use this to prove keys, the ladder and the safety rails with zero risk. Generate keys: log in on the testnet site → *API Management*.
+2. **LIVE (default)** — real mainnet orders. Configure your Binance API keys first (enable Futures, prefer IP-restricted keys). Switching to LIVE is confirmed explicitly, lands disarmed, and arming execution is its own deliberate step.
 
 Keys can be entered in the dashboard or via environment variables (see `.env.example`):
 
 ```bash
 BINANCE_TESTNET_KEY=...      BINANCE_TESTNET_SECRET=...
 BINANCE_LIVE_KEY=...         BINANCE_LIVE_SECRET=...
-BINANCE_MODE=paper           # paper | testnet | live
+BINANCE_MODE=live            # testnet | live (there is no paper mode)
 BINANCE_SYMBOL=BTCUSDT
 PORT=4000
 VX_HOST=0.0.0.0              # bind address
 VX_API_TOKEN=...             # optional: require this token on the API + WS
-VX_ALLOW_LIVE=1              # required to resume a persisted LIVE config at boot
-VX_OFFLINE_DEMO=1            # optional: labelled synthetic feed when Binance is unreachable
+VX_ALLOW_LIVE=1              # required to resume auto-trading on a persisted LIVE config at boot
 VX_DATA_DIR=./server/data    # journal/settings location
 ```
 
@@ -117,7 +117,7 @@ Dashboard settings override env vars. Keys are stored in `server/data/settings.j
 ### Production safety (real money)
 
 1. **Live arming is a three-step action.** Switching to LIVE needs an explicit confirmation in the UI, which the client echoes to the server as `confirmLive: true` — and the server then forces auto-trading **OFF** no matter what the request body said. Enabling auto-trading while LIVE is a separate `POST /api/autotrade` that again requires `confirmLive: true`. A stray POST, a stale tab or a script cannot move real funds by itself; the bot always spends at least one deliberate action disarmed.
-2. **Restarts never resume live trading silently.** If `mode: live` is persisted but `VX_ALLOW_LIVE=1` is not set, the server boots in PAPER with auto-trade OFF and says so in the log/activity feed.
+2. **Restarts never resume live trading silently.** If LIVE + auto-trade is persisted but `VX_ALLOW_LIVE=1` is not set, the server boots on the same environment with auto-trade **OFF** and says so in the log/activity feed. There is no simulated fallback — the bot simply does not trade until it is armed again.
 3. **API token.** Set `VX_API_TOKEN` and every REST route (except the tiny unauthenticated `/api/health` probe) plus the WebSocket upgrade requires it (`X-VX-Token` header for REST, `?token=` for the socket). Enter the same token in **Settings → Connection**; it is kept in browser storage only. The server logs a loud warning when it runs without a token, because this API can place orders and holds exchange keys.
 4. **Rate limiting** on every state-changing route (60/min, burst 20, per IP) so a stuck client cannot hammer the kill switch or consume the exchange order budget.
 5. **Graceful shutdown** on SIGINT/SIGTERM: feeds and timers stop, sockets close, and protective SL/TP orders are deliberately **left armed on the exchange** — a restart must never leave a position naked.
@@ -126,9 +126,9 @@ Dashboard settings override env vars. Keys are stored in `server/data/settings.j
 
 ### Operating sequence
 
-1. Start in **PAPER**, leave **Auto-Trading OFF**, watch signals/stats for a session.
-2. Switch to **TESTNET** (paste testnet keys) → enable auto-trade → verify order placement, TP scaling, SL moves.
-3. Only then switch to **LIVE**.
+1. **TESTNET** — paste testnet keys, leave auto-trading OFF, watch signals/scanner for a session.
+2. Enable auto-trading on testnet and verify order placement, TP scaling, SL moves and the Kill switch.
+3. Switch to **LIVE** (explicit confirmation + `confirmLive`) and arm auto-trading as a separate step. Start with a small `tradeSizePercent`.
 
 > ⚠️ Trading involves risk of loss. This software executes real orders when configured to do so. Test thoroughly; start small; the authors assume no liability.
 
@@ -149,7 +149,6 @@ server/src/
   binance.ts      market data (mainnet) + signed order API (testnet/live)
   streams.ts      bookTicker price stream + user-data ORDER_TRADE_UPDATE stream
   candles.ts      WS-first candle store (REST backfill only when needed)
-  offline.ts      offline demo feed (only used when Binance is unreachable)
   settings.ts     persisted settings (indicator defaults pre-filled)
   store.ts        trade/signal persistence (server/data/*.json)
   stats.ts        weekly stats table (indicator formulas)
@@ -160,7 +159,7 @@ client/src/
   motion/                 calm-by-default background, SVG maths, primitives and icons
   pnl.ts                  equity-curve model derived from bot trades + account data
   components/PnlDock      responsive P&L chart and performance statistics
-  components/...          position card, stats, MTF, screener, settings, history, log
+  components/...          position book, scanner/stats/MTF panels, settings, history, activity log
 ```
 
 The dashboard UI is documented in **[DESIGN.md](DESIGN.md)** — tokens, glass layers, motion vocabulary and responsive behaviour.
@@ -228,20 +227,20 @@ Each area has a reserved floor, may borrow up to 2× while the global pool is < 
 
 ## Binance-sourced P&L (nothing hand-entered)
 
-- **Equity / PnL / ROI** come from Binance (`/fapi/v2/account`, `/fapi/v2/positionRisk`) in testnet/live; in paper mode they are explicitly labelled `paper-sim`.
+- **Equity / PnL / ROI** come from Binance (`/fapi/v2/account`, `/fapi/v2/positionRisk`); the dashboard labels the account source as `binance` on every screen.
 - **Fees and funding** are read from `/fapi/v1/income` (`COMMISSION`, `FUNDING_FEE`) and per-trade from the user stream (`rp`, `n`), never estimated per row.
 - **Closed trades** are finalised with the exchange's realised PnL and commission; the journal shows market, fees and funding per row.
 - **External positions** (anything opened outside the bot) are listed read-only: `managed: false`, excluded from margin, slots, equity maths and every stat. The executor only ever addresses orders tagged `VX<tradeId>…` with `reduceOnly`, so manual positions are unreachable.
 - There is no manual asset/balance input anywhere in the UI or API.
 
-## Offline demo feed
+## No simulation, ever
 
-If the server **cannot reach Binance** (sandboxed networks, firewalled VPS), the bot automatically switches to a clearly-labeled **OFFLINE DEMO FEED**: synthetic regime-switching candles on a 10× clock so signals, TP/SL ladders and stats can be demonstrated end-to-end. It re-baselines the engine on every feed transition (never acts on spliced candles) and returns to real data automatically as soon as Binance is reachable. Orders are never sent in this state.
+VelocityX contains **no synthetic data path**: no demo feed, no paper fills, no virtual balance, no seeded journals. When Binance is unreachable the dashboard says so (`binance-unreachable`), the engine waits with no candles, no signal is produced and no order is sent — the bot reconnects automatically and resumes on real data.
 
 ## Reliability notes
 
 - Signals act **only on candles that close after engine start** — no backfill, no repainting.
-- Live/testnet: primary fill detection via `ORDER_TRADE_UPDATE` user stream + 10s REST reconciliation (missed fills caught, missing SL re-armed).
+- Fill detection via the `ORDER_TRADE_UPDATE` user stream + 10 s REST reconciliation (missed fills caught, missing SL re-armed, realised PnL/fees re-read from Binance's own ledger).
 - SL replace failure ⇒ position is flattened immediately (never left unprotected).
 - Up to **8 concurrent positions**, at most one per symbol; each symbol keeps its own signal guard, guard-rail price and SL/TP ladder.
 - `botOwned` is stamped on every trade the executor opens; anything else on the account is reported as external and can never enter the journal, the PnL or the stats.
