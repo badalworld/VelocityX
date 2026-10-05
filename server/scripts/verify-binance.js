@@ -130,6 +130,44 @@ async function timed(url, init) {
     const limits = limitsPayload?.limiter ?? limitsPayload; // /api/limits nests the scheduler view
     ok((limits?.plannedLimitPerMin ?? 0) === 2280, `server plans ${limits?.plannedLimitPerMin}/min = 95% of 2400`);
     ok((limits?.usedWeight ?? 0) <= 2280, `server stayed inside the 95% budget (${limits?.usedWeight} weight used)`);
+    // The dashboard's realtime path: the server's own WS hub must push ticks.
+    const wsUrl = SERVER.replace(/^http/, 'ws') + '/ws';
+    const hub = await new Promise((resolve) => {
+      let done = false;
+      const finish = (v, why) => {
+        if (!done) {
+          done = true;
+          resolve({ v, why });
+        }
+      };
+      const t = setTimeout(() => finish(false, 'no event within 8 s'), 8000);
+      try {
+        const sock = new WebSocket(wsUrl);
+        const seen = new Set();
+        sock.onmessage = (m) => {
+          try {
+            const e = JSON.parse(m.data);
+            if (e?.type) seen.add(e.type);
+            if (seen.has('price') || seen.has('prices')) {
+              clearTimeout(t);
+              sock.close();
+              finish(true, `types seen: ${[...seen].join(', ')}`);
+            }
+          } catch {
+            /* ignore */
+          }
+        };
+        sock.onerror = () => {
+          clearTimeout(t);
+          finish(false, 'hub socket error');
+        };
+      } catch (e) {
+        clearTimeout(t);
+        finish(false, e?.message || 'cannot open hub socket');
+      }
+    });
+    ok(hub.v, 'dashboard WS hub /ws pushes live price events', hub.why);
+
     const areas = limits?.areas ?? [];
     ok(areas.length === 5 && areas.every((a) => a.weightUsed <= a.weightCap),
       `work stayed inside every area reservation (${areas.map((a) => `${a.area} ${a.weightUsed}/${a.weightCap}`).join(', ')})`);

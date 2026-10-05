@@ -69,6 +69,8 @@ export interface IncomeSummary {
 
 export interface BotTotals {
   managedCount: number;
+  /** closed bot trades all-time (they keep contributing to realizedPnl/fees/funding) */
+  closedCount: number;
   maxPositions: number;
   marginUsed: number;
   notional: number;
@@ -124,6 +126,7 @@ export interface ExternalPosition {
   leverage: number;
   notional: number;
   managed: false;
+  note?: string;
 }
 
 export interface PositionsPayload {

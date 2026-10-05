@@ -42,6 +42,7 @@ async function main() {
   loadSettings();
   setPaperBalance(1000);
   updateSettings({ autoTrade: true, symbol: 'BTCUSDT', tradeSizePercent: 5, leverage: 10 });
+  const bal0 = getPaperBalance(1000); // captured BEFORE the first entry (entry fee included in the booking)
 
   const P = 68000, A = 100; // entry price, ATR
   // SL = ±200, TP1 = ±300, TP2 = ±600, TP3 = ±900
@@ -55,8 +56,6 @@ async function main() {
   assert(t1.qty > 0 && Math.abs(t1.q1 + t1.q2 + t1.q3 - t1.qty) < 1e-9, `qty ladder sums: ${t1.qty} = ${t1.q1}+${t1.q2}+${t1.q3}`);
   assert(Math.abs(t1.margin * t1.leverage - t1.notional) < 1e-6, 'notional = margin × leverage');
   assert(t1.margin <= 50 + 1e-6 && t1.margin > 42, `margin = 5% of 1000, floored to lot step = ${t1.margin}`);
-
-  const bal0 = getPaperBalance(1000);
 
   trader.onPrice(P + 301); await settle();
   t1 = activeTrade();
@@ -77,7 +76,8 @@ async function main() {
   assert(t1.realizedPnl > 0, `trade1 net PnL = ${t1.realizedPnl.toFixed(4)} USDT`);
   assert(!activeTrade(), 'no open trade after TP3');
   const balAfter1 = getPaperBalance(1000);
-  assert(Math.abs((balAfter1 - bal0) - t1.realizedPnl) < 1e-6, 'paper balance tracks realized PnL');
+  assert(Math.abs((balAfter1 - bal0) - t1.realizedPnl) < 1e-6, `paper balance tracks realized PnL (Δ${(balAfter1 - bal0).toFixed(4)} vs PnL ${t1.realizedPnl.toFixed(4)})`);
+  assert(Math.abs(t1.fees - (498.2 * 0.0005 * 2)) < 0.02, `both legs charged the taker fee (${t1.fees.toFixed(3)} USDT)`);
 
   // ---------- Trade 2: SL hit before TP ----------
   await trader.onSignal(mkSignal('SHORT', P, A));

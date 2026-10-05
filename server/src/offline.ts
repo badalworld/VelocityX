@@ -12,7 +12,7 @@ import { Candle } from './indicators';
 
 const BASE_PRICES: Record<string, number> = {
   BTCUSDT: 68000, ETHUSDT: 3500, SOLUSDT: 180, BNBUSDT: 700, XRPUSDT: 0.6,
-  DOGEUSDT: 0.15, ADAUSDT: 0.45, LINKUSDT: 14, AVAXUSDT: 28, BCCUSDT: 100,
+  DOGEUSDT: 0.15, ADAUSDT: 0.45, LINKUSDT: 14, AVAXUSDT: 28, BCHUSDT: 100,
 };
 
 const SPEED = 10; // simulated time multiplier

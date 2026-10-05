@@ -258,7 +258,20 @@ export default function App() {
   const headTotal = (account?.bot.netPnl ?? headModel.realized) + 0;
   void openCount;
 
-  const tickerRows = useMemo(() => screener?.rows ?? [], [screener]);
+  // The marquee is the scanner's volatility ranking (falls back to the legacy
+  // screener payload if a very old server is serving the UI).
+  const tickerRows = useMemo(
+    () =>
+      scan?.rows?.length
+        ? scan.rows.map((r) => ({
+            symbol: r.symbol,
+            state: `${r.marketType} · ${r.trend}`,
+            volatility: r.volatility,
+            tradable: r.tradable,
+          }))
+        : screener?.rows ?? [],
+    [scan, screener],
+  );
 
   return (
     <div className="app">

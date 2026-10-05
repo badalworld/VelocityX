@@ -9,7 +9,7 @@
  *      stream is down) — always scheduled through the 95% weight budget.
  */
 import { Candle } from './indicators';
-import { api } from './binance';
+import { api, feedNow } from './binance';
 
 const MAX_BARS = 1500;
 
@@ -37,14 +37,14 @@ class CandleStore {
   }
 
   /** Candles with the forming bar removed (what the signal engine may act on). */
-  closed(symbol: string, interval: string, now = Date.now()): Candle[] {
+  closed(symbol: string, interval: string, now = feedNow()): Candle[] {
     const all = this.get(symbol, interval);
     if (!all.length) return all;
     const last = all[all.length - 1];
     return last.closeTime <= now ? all : all.slice(0, -1);
   }
 
-  lastClosed(symbol: string, interval: string, now = Date.now()): Candle | null {
+  lastClosed(symbol: string, interval: string, now = feedNow()): Candle | null {
     const arr = this.closed(symbol, interval, now);
     return arr.length ? arr[arr.length - 1] : null;
   }

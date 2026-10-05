@@ -22,6 +22,8 @@ const {
   ORDER_BUDGET_1M, ORDER_BUDGET_10S, AREA_DISTRIBUTION, klineWeight, ENDPOINT_WEIGHT,
 } = require('../dist/ratelimit');
 const { __scanInternals } = require('../dist/scanner');
+const { trader } = require('../dist/trader');
+const account = require('../dist/account');
 const { adx, atr, ema } = require('../dist/indicators');
 
 let failures = 0;
@@ -172,6 +174,75 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   assert(store.remainingQtyOf(trade) === 1, 'remaining quantity helper works');
   trade.tp1Filled = true;
   assert(store.remainingQtyOf(trade) === 1, 'TP1 slice still counted until q1 > 0 (no phantom quantity)');
+
+  /* ------------------------------------------------------------------ 7 */
+  console.log('\n— External positions are never adopted or traded —');
+  // start from a clean journal: flatten whatever the earlier sections opened
+  await trader.kill();
+  await sleep(60);
+  assert(store.openTrades().length === 0, 'journal starts clean for the ownership test');
+
+  const binance = require('../dist/binance');
+  const orders = [];
+  const record = (kind) => (...args) => {
+    const opts = args.find((a) => a && typeof a === 'object') || {};
+    const strings = args.filter((a) => typeof a === 'string');
+    orders.push({
+      kind,
+      symbol: strings.find((x) => /USDT$/.test(x)) || '',
+      qty: args.find((a) => typeof a === 'number') ?? null,
+      reduceOnly: !!opts.reduceOnly || opts.closePosition === true || opts.closePosition === 'true',
+      cid: opts.newClientOrderId ?? strings.find((x) => /^VX/.test(x)) ?? null,
+    });
+    return { avgPrice: 100, orderId: orders.length };
+  };
+  // stub the exchange: one bot symbol (BTCUSDT) plus a manual DOGEUSDT position
+  binance.api.marketOrder = record('market');
+  binance.api.stopMarket = record('stopMarket');
+  binance.api.takeProfitMarket = record('takeProfitMarket');
+  binance.api.cancelOrder = record('cancel');
+  binance.api.setLeverage = async () => ({});
+  binance.api.setIsolated = async () => ({});
+  binance.api.isDualSide = async () => false;
+  binance.api.accountSnapshot = async () => ({ equity: 1000, walletBalance: 1000, availableBalance: 900, initialMargin: 100, maintMargin: 20, unrealizedPnl: 0 });
+  binance.api.positionAmount = async () => 5;
+  binance.api.positionRisk = async () => [
+    { symbol: 'BTCUSDT', positionAmt: 5, entryPrice: 100, markPrice: 101, unrealizedProfit: 5, leverage: 10, liquidationPrice: 90 },
+    { symbol: 'DOGEUSDT', positionAmt: 5000, entryPrice: 0.42, markPrice: 0.4, unrealizedProfit: -100, leverage: 5, liquidationPrice: 0.3 },
+  ];
+  binance.api.exchangeInfo = async () => ({ symbol: 'BTCUSDT', stepSize: 0.001, tickSize: 0.1, minQty: 0.001, minNotional: 5 });
+  binance.api.allOrders = async () => [];
+  binance.api.openOrders = async () => [];
+  binance.api.userTrades = async () => [];
+  binance.api.incomeHistory = async () => [];
+
+  settings.updateSettings({ mode: 'testnet', autoTrade: true, symbol: 'BTCUSDT', autoScan: false, maxPositions: 8, tradeSizePercent: 5, leverage: 10 });
+  trader.onPrice(100, 'BTCUSDT');
+  const extSignal = { record: { id: 'ext1', symbol: 'BTCUSDT', time: Date.now(), detectedAt: Date.now(), side: 'LONG', price: 100, atr: 1, acted: false, tradeId: null }, side: 'LONG', price: 100, atr: 1 };
+  await trader.onSignal(extSignal);
+  await sleep(120);
+  assert(orders.some((o) => o.kind === 'market' && o.symbol === 'BTCUSDT'), 'entry order went to the exchange for the bot symbol');
+  assert(orders.filter((o) => o.kind === 'market').every((o) => !o.reduceOnly), 'entry orders are not reduceOnly');
+  assert(orders.some((o) => o.kind === 'stopMarket' && o.reduceOnly && /^VX/.test(o.cid || '')), 'protective stop is reduceOnly and tagged VX<tradeId>');
+
+  const acct = await account.accountService.refresh();
+  assert(!!acct, 'account service refreshed against the stubbed exchange');
+  assert(acct.bot.managedCount === 1, `only the bot trade is managed (${acct.bot.managedCount})`);
+  assert(acct.positions.external.length === 1 && acct.positions.external[0].symbol === 'DOGEUSDT', 'the manual DOGE position is reported as external');
+  assert(acct.positions.external[0].managed === false, 'external rows are flagged managed:false');
+  assert(acct.external.count === 1 && acct.bot.notional > 0 && acct.bot.notional < 1000, `external notional (${acct.external.notional}) stays out of the bot totals (${acct.bot.notional})`);
+  const acctJson = JSON.stringify(acct);
+  assert(!/DOGE/.test(JSON.stringify(acct.bot)) && !/DOGE/.test(JSON.stringify(acct.positions.managed)), 'the external symbol never appears in the bot PnL/margin numbers');
+
+  const ordersBeforeKill = orders.length;
+  await trader.kill();
+  await sleep(60);
+  const killOrders = orders.slice(ordersBeforeKill);
+  assert(killOrders.length > 0 && killOrders.every((o) => /^VX/.test(o.cid || '')), 'kill only sends orders tagged with the bot trade id');
+  assert(killOrders.every((o) => o.symbol !== 'DOGEUSDT'), 'kill never touches the external DOGEUSDT position');
+  assert(orders.every((o) => o.symbol !== 'DOGEUSDT'), 'no order of any kind was ever sent for the external symbol');
+  settings.updateSettings({ mode: 'paper', autoTrade: false });
+  void acctJson;
 
   console.log(failures === 0 ? '\nREALTIME INVARIANTS: ALL CHECKS PASSED' : `\nREALTIME INVARIANTS: ${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

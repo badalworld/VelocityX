@@ -45,15 +45,15 @@ const signals = [
   { time: candles[130].time, side: 'LONG', price: 62000, id: 's3', acted: false },
 ];
 
-const baseTrade = {
+const openTrade = {
   id: 't1',
   symbol,
   side: 'LONG',
-  status: 'CLOSED',
-  qty: 0.05,
-  q1: 0.016,
-  q2: 0.017,
-  q3: 0.017,
+  status: 'OPEN',
+  qty: 0.06,
+  q1: 0.02,
+  q2: 0.02,
+  q3: 0.02,
   entryPrice: 61200,
   atrAtEntry: 210,
   slInitial: 60780,
@@ -62,24 +62,32 @@ const baseTrade = {
   tp1: 61515,
   tp2: 61830,
   tp3: 62145,
-  notional: 3060,
+  notional: 3672,
   margin: 306,
   leverage: 10,
-  closeReason: 'TP1',
+  openedAt: now - 4 * HOUR,
+  closedAt: null,
+  closeReason: null,
   tp1Filled: true,
   tp2Filled: false,
   tp3Filled: false,
-  fees: 1.2,
-  funding: -0.014,
+  realizedPnl: 0,
+  fees: 2.31,
+  funding: -0.021,
   binanceRealizedPnl: 0,
   commissionOtherAsset: 0,
-  initialRisk: 21,
+  initialRisk: 210,
+  orders: { entry: 'VXt1E', sl: 'VXt1S', tp1: 'VXt11', tp2: 'VXt12', tp3: 'VXt13' },
   mode: 'paper',
-  result: 'WIN',
+  result: null,
   botOwned: true,
-  scan: { volatility: 71.4, adx: 32.5, atrPct: 0.92, rank: 1 },
-  orders: {},
+  unrealized: 12.75,
+  markPrice: 62665.4,
+  remainingQty: 0.06,
+  scan: { volatility: 71.2, adx: 27.5, atrPct: 0.34, rank: 1 },
 };
+
+const baseTrade = { ...openTrade, id: 't0', status: 'CLOSED', closedAt: now - 5 * HOUR, closeReason: 'TP3', tp1Filled: true, tp2Filled: true, tp3Filled: true, realizedPnl: 47.9, result: 'WIN' };
 
 const trades = [
   { ...baseTrade, openedAt: now - 26 * HOUR, closedAt: now - 22 * HOUR, realizedPnl: 18.4 },
@@ -87,380 +95,119 @@ const trades = [
   { ...baseTrade, id: 't3', qty: 0.06, q1: 0.02, q2: 0.02, q3: 0.02, slStage: 2, tp1Filled: true, tp2Filled: true, tp3Filled: true, closeReason: 'TP3', openedAt: now - 5 * HOUR, closedAt: now - 2 * HOUR, realizedPnl: 43.7, initialRisk: 23.4 },
 ];
 
-const openTrade = {
-  ...baseTrade,
-  id: 't-open',
-  status: 'OPEN',
-  openedAt: now - 42 * MIN,
-  closedAt: null,
-  closeReason: null,
-  entryPrice: 62410,
-  slInitial: 62190,
-  slCurrent: 62190,
-  slStage: 0,
-  tp1: 62630,
-  tp2: 62950,
-  tp3: 63270,
-  realizedPnl: 0,
-  result: null,
-  unrealized: 12.75,
+
+/* ---- Binance account view (the P&L / ROI / equity source) ---- */
+const accountView = {
+  source: 'paper-sim',
+  mode: 'paper',
+  at: now,
+  equity: 1060.65,
+  walletBalance: 1048.1,
+  unrealizedPnl: 12.75,
+  availableBalance: 742,
+  initialMargin: 306,
+  maintMargin: 61,
+  roiPct: 4.17,
+  roiOnWalletPct: 4.17,
+  canTrade: true,
+  bot: { managedCount: 1, closedCount: 4, maxPositions: 8, marginUsed: 306, notional: 3745, unrealizedPnl: 12.75, realizedPnl: 47.9, fees: 2.31, funding: -0.021, netPnl: 60.65, roiPct: 4.17 },
+  income: { realizedPnl: 47.9, commission: 2.31, funding: -0.021, transfers: 0, insurance: 0, net: 45.57, bySymbol: [{ symbol, realizedPnl: 47.9, commission: 2.31, funding: -0.021, net: 45.57 }], records: 12 },
+  external: { count: 1, notional: 512.4, unrealized: -3.2 },
+  positions: { managed: [], external: [] },
+  errors: [],
+  latencyMs: 42,
+};
+
+const positionsView = {
+  managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.06, notional: 3759.9, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'paper-sim' } ],
+  external: [ { symbol: 'DOGEUSDT', side: 'LONG', qty: 1200, notional: 512.4, entryPrice: 0.42, markPrice: 0.4173, unrealized: -3.2, leverage: 5, margin: 102.5, source: 'binance', managed: false, note: 'opened outside the bot — never adopted, never counted' } ],
+  slots: { used: 1, max: 8 },
+  note: 'external positions are never adopted, managed, closed or counted in bot PnL',
+  at: now,
+};
+
+const scannerView = {
+  at: now,
+  durationMs: 820,
+  universe: 214,
+  analysed: 30,
+  gate: { minQuoteVolume24h: 20_000_000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, maxPositions: 8 },
+  selected: [symbol, 'SOLUSDT', 'BNBUSDT', 'DOGEUSDT'],
+  rows: [
+    ['BTCUSDT', 'BTC', 71.2, 27.5, 0.34, 1.8, 1200, 'TRENDING', true, 88.1, 'high volatility + trending'],
+    ['SOLUSDT', 'SOL', 66.4, 24.1, 0.91, 3.2, 520, 'TRENDING', true, 81.4, 'high volatility + trending'],
+    ['BNBUSDT', 'BNB', 58.9, 21.7, 0.77, 2.4, 380, 'TRENDING', true, 74.2, 'high volatility + trending'],
+    ['DOGEUSDT', 'DOGE', 54.3, 19.8, 1.02, 4.1, 240, 'TRENDING', true, 71.6, 'high volatility + trending'],
+    ['XRPUSDT', 'XRP', 31.2, 15.4, 0.42, 0.9, 190, 'RANGING', false, 42.0, 'trend not aligned on 15m/1h'],
+    ['ADAUSDT', 'ADA', 22.4, 12.1, 0.31, 0.4, 120, 'RANGING', false, 30.1, 'ADX 12 < 18 (no trend)'],
+    ['USDCUSDT', 'USDC', 1.2, 5.0, 0.01, 0.0, 900, 'PEGGED', false, 2.0, 'pegged / stable / staked market — never traded'],
+  ].map((r) => ({
+    symbol: r[0], base: r[1], price: 61200, change24hPct: r[5], range24hPct: r[4] * 3, quoteVolume24h: r[6] * 1e6,
+    atrPct: r[4], atrPct5m: r[4], adx: r[3], emaFast: 61300, emaSlow: 60800, trend: 'UP', alignment: 1,
+    fundingRate: 0.0001, nextFundingTime: 1791000000000, volatility: r[2], trendScore: r[3] * 3, liquidityScore: 80,
+    score: r[8], marketType: r[7], tradable: r[8], reason: r[9],
+  })),
 };
 
 const routes = {
   '/api/status': {
-    mode: 'paper',
-    autoTrade: true,
     symbol,
-    interval: '5m',
-    leverage: 10,
-    tradeSizePercent: 5,
-    maxPositions: 8,
+    autoTrade: true,
     autoScan: true,
-    price: 62665.4,
-    account: {
-      source: 'paper-sim',
-      mode: 'paper',
-      at: now,
-      equity: 1128.5,
-      walletBalance: 1100,
-      unrealizedPnl: 28.5,
-      availableBalance: 980,
-      initialMargin: 306,
-      maintMargin: 31,
-      roiPct: 9.31,
-      roiOnWalletPct: 2.59,
-      canTrade: true,
-      bot: { managedCount: 1, maxPositions: 8, marginUsed: 306, notional: 3745, unrealizedPnl: 12.75, realizedPnl: 47.9, fees: 2.31, funding: -0.021, netPnl: 60.65, roiPct: 4.17 },
-      income: null,
-      external: { count: 0, notional: 0, unrealized: 0 },
-    },
-    openTrades: [openTrade],
-    openTrade,
-    slots: { used: 1, max: 8 },
-    scanner: { at: now - 5000, universe: 380, analysed: 30, selected: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'], top: [] },
-    engine: {
-      atr: 187.4,
-      ribbonBull: true,
-      lastSignal: { id: 's3', symbol, time: candles[130].time, detectedAt: now - 30 * MIN, side: 'LONG', price: 62000, atr: 180, acted: true, tradeId: 't-open' },
-      emas: [62400, 62420, 62450, 62470, 62490, 62510, 62530, 62550],
-      emaExtra: 61800,
-      lastClosedCandleTime: candles[candles.length - 1].time,
-      startedAt: now - 3 * HOUR,
-    },
-    feed: 'binance',
-    feedInfo: {
-      feed: 'binance',
-      source: 'binance-usdm',
-      reachable: true,
-      demoFeedAllowed: false,
-      lastRestOkAt: now - 400,
-      lastRestError: null,
-      latencyMs: 42,
-      avgLatencyMs: 48,
-      serverTimeOffsetMs: 12,
-      wsLastMessageAt: now - 300,
-      candles: { symbols: 4, series: 4, bars: 2000, lastWsAt: now - 300 },
-    },
-    limits: {
-      weightLimitPerMin: 2400,
-      plannedLimitPerMin: 2280,
-      utilizationPct: 95,
-      usedWeight: 311,
-      usedPct: 13,
-      usedOrders1m: 2,
-      orderLimitPerMin: 1140,
-      usedOrders10s: 1,
-      orderLimit10s: 285,
-      cooldownMsLeft: 0,
-      cooldownReason: '',
-      areas: [
-        { area: 'scanner', sharePct: 40, weightUsed: 161, weightCap: 1824, calls: 8, waiting: 0, avgWaitMs: 1 },
-        { area: 'market', sharePct: 25, weightUsed: 40, weightCap: 1140, calls: 12, waiting: 0, avgWaitMs: 0 },
-        { area: 'account', sharePct: 20, weightUsed: 95, weightCap: 912, calls: 6, waiting: 0, avgWaitMs: 2 },
-        { area: 'orders', sharePct: 10, weightUsed: 10, weightCap: 456, calls: 4, waiting: 0, avgWaitMs: 0 },
-        { area: 'stream', sharePct: 5, weightUsed: 1, weightCap: 228, calls: 1, waiting: 0, avgWaitMs: 0 },
-      ],
-      totals: { calls: 31, avgWaitMs: 1, maxWaitMs: 12, throttled: 0, rejected429: 0 },
-    },
-    streams: { market: true, user: false, userLastMessageAt: 0 },
-    keysConfigured: { testnet: false, live: false },
-    logs: [
-      { t: now - 60_000, level: 'info', msg: 'Scanner: 30 markets analysed · trading BTC, ETH, SOL' },
-      { t: now - 40_000, level: 'win', msg: 'BTCUSDT TP1 33% closed @ 62630 — SL moved to breakeven' },
-      { t: now - 20_000, level: 'error', msg: 'Order rejected (error path exercised)' },
-    ],
-    now,
-  },
-
-  '/api/scanner': {
-    at: now - 5000,
-    durationMs: 820,
-    universe: 380,
-    analysed: 30,
-    selected: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
-    gate: { minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, maxPositions: 8 },
-    rows: [
-  {
-    "symbol": "BTCUSDT",
-    "base": "BTC",
-    "price": 62000,
-    "change24hPct": 4.2,
-    "range24hPct": 22.3,
-    "quoteVolume24h": 812000000,
-    "atrPct": 0.92,
-    "atrPct5m": 0.46,
-    "adx": 32.5,
-    "emaFast": 62400,
-    "emaSlow": 62100,
-    "trend": "UP",
-    "alignment": 1,
-    "fundingRate": 0.00012,
-    "nextFundingTime": 1791000000000,
-    "volatility": 71.4,
-    "trendScore": 70,
-    "liquidityScore": 88,
-    "score": 74,
-    "marketType": "TRENDING",
-    "tradable": true,
-    "reason": "high volatility + trending",
-    "updatedAt": 1791000000000
-  },
-  {
-    "symbol": "ETHUSDT",
-    "base": "ETH",
-    "price": 62000,
-    "change24hPct": 4.2,
-    "range24hPct": 18.7,
-    "quoteVolume24h": 812000000,
-    "atrPct": 0.81,
-    "atrPct5m": 0.405,
-    "adx": 27.4,
-    "emaFast": 62400,
-    "emaSlow": 62100,
-    "trend": "UP",
-    "alignment": 1,
-    "fundingRate": 0.00012,
-    "nextFundingTime": 1791000000000,
-    "volatility": 64.1,
-    "trendScore": 70,
-    "liquidityScore": 88,
-    "score": 74,
-    "marketType": "TRENDING",
-    "tradable": true,
-    "reason": "high volatility + trending",
-    "updatedAt": 1791000000000
-  },
-  {
-    "symbol": "SOLUSDT",
-    "base": "SOL",
-    "price": 62000,
-    "change24hPct": 4.2,
-    "range24hPct": 15.2,
-    "quoteVolume24h": 812000000,
-    "atrPct": 0.74,
-    "atrPct5m": 0.37,
-    "adx": 24.9,
-    "emaFast": 62400,
-    "emaSlow": 62100,
-    "trend": "DOWN",
-    "alignment": 1,
-    "fundingRate": 0.00012,
-    "nextFundingTime": 1791000000000,
-    "volatility": 58.7,
-    "trendScore": 70,
-    "liquidityScore": 88,
-    "score": 74,
-    "marketType": "TRENDING",
-    "tradable": true,
-    "reason": "high volatility + trending",
-    "updatedAt": 1791000000000
-  },
-  {
-    "symbol": "BNBUSDT",
-    "base": "BNB",
-    "price": 62000,
-    "change24hPct": 4.2,
-    "range24hPct": 11.4,
-    "quoteVolume24h": 812000000,
-    "atrPct": 0.52,
-    "atrPct5m": 0.26,
-    "adx": 19.2,
-    "emaFast": 62400,
-    "emaSlow": 62100,
-    "trend": "UP",
-    "alignment": 1,
-    "fundingRate": 0.00012,
-    "nextFundingTime": 1791000000000,
-    "volatility": 41.2,
-    "trendScore": 70,
-    "liquidityScore": 88,
-    "score": 74,
-    "marketType": "RANGING",
-    "tradable": false,
-    "reason": "below gate",
-    "updatedAt": 1791000000000
-  },
-  {
-    "symbol": "XRPUSDT",
-    "base": "XRP",
-    "price": 62000,
-    "change24hPct": 4.2,
-    "range24hPct": 9.8,
-    "quoteVolume24h": 812000000,
-    "atrPct": 0.44,
-    "atrPct5m": 0.22,
-    "adx": 16.4,
-    "emaFast": 62400,
-    "emaSlow": 62100,
-    "trend": "DOWN",
-    "alignment": 1,
-    "fundingRate": 0.00012,
-    "nextFundingTime": 1791000000000,
-    "volatility": 37.9,
-    "trendScore": 70,
-    "liquidityScore": 88,
-    "score": 74,
-    "marketType": "RANGING",
-    "tradable": false,
-    "reason": "below gate",
-    "updatedAt": 1791000000000
-  },
-  {
-    "symbol": "DOGEUSDT",
-    "base": "DOGE",
-    "price": 62000,
-    "change24hPct": 4.2,
-    "range24hPct": 4.2,
-    "quoteVolume24h": 812000000,
-    "atrPct": 0.21,
-    "atrPct5m": 0.105,
-    "adx": 8.1,
-    "emaFast": 62400,
-    "emaSlow": 62100,
-    "trend": "UP",
-    "alignment": 1,
-    "fundingRate": 0.00012,
-    "nextFundingTime": 1791000000000,
-    "volatility": 22.4,
-    "trendScore": 70,
-    "liquidityScore": 88,
-    "score": 74,
-    "marketType": "PEGGED",
-    "tradable": false,
-    "reason": "below gate",
-    "updatedAt": 1791000000000
-  }
-],
-    warming: false,
-  },
-  '/api/account': {
-    source: 'paper-sim',
     mode: 'paper',
-    at: now,
-    equity: 1128.5,
-    walletBalance: 1100,
-    unrealizedPnl: 28.5,
-    availableBalance: 980,
-    initialMargin: 306,
-    maintMargin: 31,
-    roiPct: 9.31,
-    roiOnWalletPct: 2.59,
-    canTrade: true,
-    bot: { managedCount: 1, maxPositions: 8, marginUsed: 306, notional: 3745, unrealizedPnl: 12.75, realizedPnl: 47.9, fees: 2.31, funding: -0.021, netPnl: 60.65, roiPct: 4.17 },
-    income: { windowDays: 7, realizedPnl: 47.9, commission: -2.31, funding: -0.021, transfers: 0, insurance: 0, other: 0, net: 45.57, records: 12, at: now, bySymbol: [ { symbol: 'BTCUSDT', realizedPnl: 47.9, commission: -2.31, funding: -0.021, net: 45.57 } ] },
-    external: { count: 0, notional: 0, unrealized: 0 },
-    errors: [],
-    latencyMs: 61,
-  },
-  '/api/positions': {
-    managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.06, notional: 3759.9, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'paper-sim' } ],
-    external: [],
+    feed: 'binance',
+    startedAt: now - 9 * HOUR,
+    engine: { lastSignal: signals[2], emas, atr: 210, ribbonBull: true, lastClosedCandleTime: candles[candles.length - 1].time, startedAt: now - 9 * HOUR },
+    openTrades: [openTrade],
+    openTrade: openTrade,
     slots: { used: 1, max: 8 },
-    note: 'external positions are never adopted',
-    at: now,
+    scanner: { at: now, selected: scannerView.selected, universe: 214, analysed: 30 },
+    feedInfo: { feed: 'binance', source: 'binance-usdm', reachable: true, demoFeedAllowed: false, lastRestOkAt: now - 1200, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300, candles: { symbols: 4, intervals: ['5m', '15m', '1h'] } },
+    limits: { plannedLimitPerMin: 2280, usedWeight: 412, usedPct: 17.2, cooldownMsLeft: 0, areas: [ { area: 'scanner', sharePct: 40, weightUsed: 220, weightCap: 912, calls: 12, waiting: 0, avgWaitMs: 3 }, { area: 'market', sharePct: 25, weightUsed: 96, weightCap: 570, calls: 40, waiting: 0, avgWaitMs: 1 }, { area: 'account', sharePct: 20, weightUsed: 76, weightCap: 456, calls: 8, waiting: 0, avgWaitMs: 2 }, { area: 'orders', sharePct: 10, weightUsed: 15, weightCap: 228, calls: 6, waiting: 0, avgWaitMs: 0 }, { area: 'stream', sharePct: 5, weightUsed: 5, weightCap: 114, calls: 2, waiting: 0, avgWaitMs: 0 } ] },
+    account: accountView,
+    logs: [
+      { t: now - 4000, level: 'info', msg: 'Scanner: 30 markets analysed · trading BTC, SOL, BNB, DOGE' },
+      { t: now - 3000, level: 'win', msg: 'BTCUSDT TP1 hit @ 61515 — closed 0.02, SL → breakeven' },
+      { t: now - 2000, level: 'info', msg: 'PAPER LONG 0.06 BTCUSDT @ 61200 | SL 60780 | TP 61515/61830/62145' },
+      { t: now - 1000, level: 'info', msg: 'Binance weight 412/2280 (18%) — scanner 220, market 96' },
+    ],
+    streams: { market: true, user: true },
+    price: 62665.4,
+    pnl: { total: 60.65, realized: 47.9, unrealized: 12.75, fees: 2.31, funding: -0.021, roiPct: 4.17 },
+    stats: { totalSignals: 6, winCount: 1, lossCount: 0 },
   },
-  '/api/diagnostics': {
-    feed: { feed: 'binance', source: 'binance-usdm', reachable: true, demoFeedAllowed: false, lastRestOkAt: now, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300 },
-    ping: { ok: true, latencyMs: 42, serverTimeOffsetMs: 12 },
-    ws: { market: { connected: true, lastMessageAt: now - 300 }, user: { connected: false, lastMessageAt: 0, mode: 'paper' } },
-    engine: { activeSymbols: ['BTCUSDT', 'ETHUSDT'], lastTickAt: now, lastClosedCandleTime: now },
-    scanner: { at: now, universe: 380, analysed: 30, selected: ['BTCUSDT'] },
-    limiter: { weightLimitPerMin: 2400, plannedLimitPerMin: 2280, utilizationPct: 95, usedWeight: 311, usedPct: 13, usedOrders1m: 2, orderLimitPerMin: 1140, usedOrders10s: 1, orderLimit10s: 285, cooldownMsLeft: 0, cooldownReason: '', areas: [], totals: { calls: 31, avgWaitMs: 1, maxWaitMs: 12, throttled: 0, rejected429: 0 } },
-    account: { source: 'paper-sim', at: now, errors: [] },
-    now,
-  },
-  '/api/chart': {
-    candles,
-    emas,
-    emaExtra: candles.map((c) => ({ time: c.time, value: c.close - 400 })),
-    signals,
-    trade: { side: 'LONG', entry: 62410, sl: 62190, slStage: 0, tp1: 62630, tp2: 62950, tp3: 63270, status: 'OPEN', tp1Filled: false, tp2Filled: false, tp3Filled: false },
-  },
+  '/api/chart': { symbol, candles, emas, emaExtra: emas[7].map((e) => ({ time: e.time, value: e.value - 200 })), signals, trade: openTrade },
   '/api/trades': trades,
-  '/api/signals': signals.map((s, i) => ({ id: s.id, symbol, time: s.time, detectedAt: s.time + 1000, side: s.side, price: s.price, atr: 180 + i, acted: s.acted, tradeId: s.acted ? `t${i}` : null })),
-  '/api/stats': {
-    windowDays: 7,
-    totalSignals: 14,
-    totalClosedTrades: 9,
-    tp1Count: 7,
-    tp2Count: 4,
-    tp3Count: 2,
-    slCount: 3,
-    tp1Pct: 77.8,
-    tp2Pct: 44.4,
-    tp3Pct: 22.2,
-    slPct: 33.3,
-    winCount: 6,
-    lossCount: 3,
-    overallWinRate: 66.7,
-    rrRatio: 1.5,
-    breakevenRate: 33.3,
-    expectancy: 0.42,
-    netPnl: 48.9,
-    totalFees: 3.7,
-  },
+  '/api/signals': signals,
+  '/api/stats': { totalSignals: 6, actedSignals: 4, totalClosedTrades: 1, winCount: 1, lossCount: 0, overallWinRate: 100, expectancy: 1.42, netPnl: 47.9, fees: 2.31, funding: -0.021, avgWin: 47.9, avgLoss: 0, profitFactor: 3.2, rrRatio: 1.5, breakevenRate: 40, tp1Count: 1, tp2Count: 1, tp3Count: 1, tp1Pct: 100, tp2Pct: 100, tp3Pct: 100, weekly: [ { label: 'W38', trades: 1, wins: 1, losses: 0, winRate: 100, netPnl: 47.9, expectancy: 1.42 } ], openTrades: 1, totalFunding: -0.021 },
+  '/api/account': accountView,
+  '/api/positions': positionsView,
+  '/api/scanner': scannerView,
+  '/api/limits': { limiter: {}, telemetry: {}, candles: {}, note: '' },
+  '/api/diagnostics': { ok: true, feed: 'binance', reachable: true, latencyMs: 42, ws: { market: true, user: true }, candles: { symbols: 4 }, limits: { usedWeight: 412, plannedLimitPerMin: 2280 }, errors: [] },
+  '/api/mtf': { 5: { bull: true, emaFast: 61300, emaSlow: 60800 }, 15: { bull: true, emaFast: 61100, emaSlow: 60600 }, 30: { bull: false, emaFast: 60500, emaSlow: 60700 } },
   '/api/settings': {
     mode: 'paper',
-    autoTrade: true,
     symbol,
-    interval: '5m',
-    tradeSizePercent: 5,
-    leverage: 10,
-    maxPositions: 8,
+    autoTrade: true,
     autoScan: true,
-    feeRate: 0.0004,
-    scanner: { enabled: true, intervalSec: 60, candidates: 30, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, topN: 8 },
-    emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
-    emaExtraLength: 200,
-    atrLength: 14,
-    atrSlMultiplier: 2,
+    leverage: 10,
+    tradeSizePercent: 5,
+    maxPositions: 8,
+    historyDays: 30,
+    feeRate: 0.0005,
+    slAtrMultiplier: 2,
     tpRrFactor: 1.5,
-    tp1ClosePct: 33,
-    tp2ClosePct: 50,
-    historyDays: 7,
-    dashboardTimeframes: ['5m', '15m', '30m'],
-    keys: { testnet: { key: '', secret: '', configured: false }, live: { key: '', secret: '', configured: false } },
-  },
-  '/api/mtf': {
-    timeframes: [
-      { tf: '5m', bull: true },
-      { tf: '15m', bull: true },
-      { tf: '30m', bull: false },
-    ],
-    atr: 187.4,
-    ribbonBull: true,
-    overall: 'BULLISH',
-    bullCount: 2,
-  },
-  '/api/screener': {
-    rows: [
-      { symbol: 'BTCUSDT', state: 'Bullish' },
-      { symbol: 'ETHUSDT', state: 'Bullish' },
-      { symbol: 'SOLUSDT', state: 'Bearish' },
-      { symbol: 'BNBUSDT', state: 'Bullish' },
-      { symbol: 'XRPUSDT', state: 'Long' },
-      { symbol: 'DOGEUSDT', state: 'Short' },
-    ],
+    emaFast: 11,
+    emaSlow: 34,
+    atrPeriod: 14,
+    interval: '5m',
+    mtfTimeframes: ['5m', '15m', '30m'],
+    hasTestnetKeys: false,
+    hasLiveKeys: false,
+    testnetKeyMask: '',
+    liveKeyMask: '',
+    scanner: { enabled: true, intervalSec: 60, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, candidates: 30, topN: 8, interval: '5m' },
   },
 };
 
@@ -488,9 +235,9 @@ const check = (name, ok, extra) => checks.push({ name, ok: !!ok, extra });
 /** Live runs depend on what is actually open/traded right now: if the account
  *  has nothing open, the matching UI surface legitimately shows its empty
  *  state — skip the check instead of reporting a false failure. */
-const checkSoft = (guard, name, ok, extra) => {
+const checkSoft = (guard, name, ok, extra, why) => {
   if (guard) return check(name, ok, extra);
-  checks.push({ name, ok: true, skipped: true, extra: 'skipped — nothing open in the live account right now' });
+  checks.push({ name, ok: true, skipped: true, extra: `skipped — ${why ?? 'the live account has nothing open right now'}` });
 };
 
 function boot(bundlePath) {
@@ -573,6 +320,7 @@ await sleep(1600);
 let liveManaged = 0;
 let liveSignals = [];
 let liveClosed = 0;
+let liveExternal = 0;
 if (LIVE) {
   const jget = async (p) => {
     try {
@@ -584,6 +332,7 @@ if (LIVE) {
   };
   const pos = await jget('/api/positions');
   liveManaged = Array.isArray(pos?.managed) ? pos.managed.length : 0;
+  liveExternal = Array.isArray(pos?.external) ? pos.external.length : 0;
   const sigs = await jget('/api/signals');
   liveSignals = Array.isArray(sigs) ? sigs : Array.isArray(sigs?.signals) ? sigs.signals : [];
   const trades = await jget('/api/trades?limit=200');
@@ -596,6 +345,7 @@ check('app shell mounted', !!doc.querySelector('.app'));
 check('liquid background layers', !!doc.querySelector('.bg-stack .aurora') && !!doc.querySelector('.grain') && !!doc.querySelector('.goo-layer'));
 check('brand + wordmark', /velocity/i.test(text('.brand-name') ?? ''));
 check('six nav tabs', doc.querySelectorAll('.navrow .seg-item').length === 6);
+check('binance feed banner', /binance live feed/i.test(doc.body.textContent));
 check('scanner marquee', doc.querySelectorAll('.ticker-item').length >= 6);
 {
   const banner = text('.feed-banner') ?? '';
@@ -606,15 +356,15 @@ check('four KPI pods', doc.querySelectorAll('.kpi').length === 4);
 {
   // one 4-level ladder (SL + TP1..TP3) per managed position
   const rungs = doc.querySelectorAll('.lad-row').length;
-  checkSoft(liveManaged > 0, 'position ladder (4 levels per position)', rungs >= 4 && rungs % 4 === 0, `${rungs} rungs`);
+  checkSoft(!LIVE || liveManaged > 0, 'position ladder (4 levels per position)', rungs >= 4 && rungs % 4 === 0, `${rungs} rungs`);
 }
 check('stats rings', doc.querySelectorAll('.ring').length === 3);
 check('hit-rate bars', doc.querySelectorAll('.bar-row').length >= 5);
 check('MTF gauge', !!doc.querySelector('.gauge-svg .gauge-fill'));
 check('scanner top picks', doc.querySelectorAll('.scr-item').length >= 3);
 check('scanner ranking table', doc.querySelectorAll('.scr-tbl tbody tr').length >= 5);
-checkSoft(liveManaged > 0, 'managed position card', doc.querySelectorAll('.pos-item').length >= 1);
-check('no manual asset input', !/paper balance/i.test(doc.body.textContent));
+checkSoft(!LIVE || liveManaged > 0, 'managed position card', doc.querySelectorAll('.pos-item').length >= 1);
+check('no manual asset input', !/paper balance/i.test(doc.body.textContent) && !/enter .*(equity|assets)/i.test(doc.body.textContent));
 check('activity feed', doc.querySelectorAll('.feed-line').length >= 3);
 check('no candlestick chart on dashboard', !doc.querySelector('.chart-canvas') && !doc.querySelector('.tv-lightweight-charts'));
 check('no NaN / Infinity in output', !/NaN|Infinity/.test(doc.getElementById('root').textContent));
@@ -633,7 +383,7 @@ check('pnl stat tiles', doc.querySelectorAll('.pnl-stat').length === 5);
 check('chart tab clickable', clickTab('chart'));
 await sleep(900);
 check('chart stage + toolbar + legend', !!doc.querySelector('.chart-canvas') && !!doc.querySelector('.chart-toolbar') && !!doc.querySelector('.chart-legend'));
-checkSoft(liveManaged > 0, 'position card persists across views', !!doc.querySelector('.side-badge'));
+checkSoft(!LIVE || liveManaged > 0, 'position card persists across views', !!doc.querySelector('.side-badge'));
 check('signal log renders table or empty state', !!doc.querySelector('.tbl') || /no signals detected yet/i.test(doc.body.textContent));
 
 check('scanner tab clickable', clickTab('scanner'));
@@ -644,6 +394,15 @@ check('positions tab clickable', clickTab('positions'));
 await sleep(800);
 check('positions view account ledger', /account \u00b7 binance/i.test(doc.body.textContent) || /Account/i.test(doc.body.textContent));
 check('closed trades with fees + funding', /funding/i.test(doc.body.textContent));
+
+check('binance account ledger', !!text('.acct-equity') || /equity/i.test(doc.body.textContent));
+checkSoft(
+  !LIVE || liveExternal > 0,
+  'external positions shown read-only, never adopted',
+  /external/i.test(doc.body.textContent) && /never adopt/i.test(doc.body.textContent),
+  undefined,
+  'no manual/external position exists on the account right now',
+);
 
 check('trades tab clickable', clickTab('trades'));
 await sleep(800);

@@ -15,7 +15,7 @@ import { apiRouter } from './api';
 import { initBroadcast, emit } from './broadcast';
 import { engine } from './engine';
 import { loadSettings, getSettings } from './settings';
-import { openTradeOn, openTrades, pruneOld } from './store';
+import { openTradeOn, openTrades, pruneOld, remainingQtyOf } from './store';
 import { trader } from './trader';
 import { scanner } from './scanner';
 import { accountService } from './account';
@@ -84,13 +84,23 @@ async function main(): Promise<void> {
   }
 
   // Keep the market stream subscribed to whatever the engine watches
-  // (scanner picks change, positions open/close).
+  // (scanner picks change, positions open/close) and refresh the account view
+  // whenever the set of bot positions changes, so the dashboard never lags.
   let lastKey = '';
+  let lastTradeKey = '';
   setInterval(() => {
     const key = engine.activeSymbols().sort().join(',');
     if (key !== lastKey) {
       lastKey = key;
       marketStream.subscribe(engine.activeSymbols());
+    }
+    const tradeKey = openTrades()
+      .map((t) => `${t.id}:${t.status}:${remainingQtyOf(t).toFixed(8)}`)
+      .sort()
+      .join('|');
+    if (tradeKey !== lastTradeKey) {
+      lastTradeKey = tradeKey;
+      void accountService.refresh();
     }
   }, 5000);
 

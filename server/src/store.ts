@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import { dataPath } from './settings';
 
 export type TradeStatus = 'OPEN' | 'CLOSED';
@@ -79,8 +80,15 @@ function readJson<T>(file: string, fallback: T): T {
 
 function writeJson(file: string, data: unknown): void {
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data));
-  fs.renameSync(tmp, file);
+  try {
+    // the data dir can disappear under a running bot (fresh checkout, manual
+    // cleanup) — recreate it instead of losing the journal
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    console.error(`[store] could not persist ${path.basename(file)}: ${(e as Error).message}`);
+  }
 }
 
 // ---------- trades ----------

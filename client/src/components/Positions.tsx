@@ -189,6 +189,10 @@ export function ExternalPositions({ rows }: { rows: ExternalPosition[] }) {
           </tbody>
         </table>
       </div>
+      <div className="hint warn" style={{ margin: '10px 14px 14px' }}>
+        <IconAlert style={{ width: 12, height: 12, verticalAlign: '-2px', marginRight: 4 }} />
+        {rows[0]?.note ?? 'opened outside the bot — never adopted, never closed, never counted in any bot number'}
+      </div>
       <div className="hint warn" style={{ padding: '10px 12px' }}>
         <IconShield style={{ width: 12, height: 12, verticalAlign: '-2px', marginRight: 4 }} />
         These positions were <b>not opened by VelocityX</b>. The bot will never adopt them, never close them and their
@@ -246,6 +250,12 @@ export function AccountPanel({ account, latencyMs, feed }: { account: AccountVie
         <div className="mini">
           <div className="k">Available</div>
           <div className="v">{fmt(account.availableBalance, 2)}</div>
+        </div>
+        <div className="mini">
+          <div className="k">Bot closed trades</div>
+          <div className="v">
+            {account.bot.closedCount} <span style={{ color: 'var(--dim)', fontWeight: 600 }}>of {account.bot.closedCount + account.bot.managedCount}</span>
+          </div>
         </div>
         <div className="mini">
           <div className="k">Bot realised PNL</div>

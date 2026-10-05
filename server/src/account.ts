@@ -14,6 +14,7 @@ import { api, AccountSnapshot, IncomeRecord, RawPosition } from './binance';
 import { getSettings, Mode, PAPER_START_BALANCE } from './settings';
 import { allTrades, getPaperBalance, openTrades, remainingQtyOf, Trade } from './store';
 import { emit } from './broadcast';
+import { priceOf } from './prices';
 
 export interface ManagedPosition {
   trade: Trade;
@@ -44,6 +45,8 @@ export interface ExternalPosition {
   notional: number;
   /** always false — the bot never adopts or manages these */
   managed: false;
+  /** shown in the UI: why this row is excluded from every bot number */
+  note?: string;
 }
 
 export interface IncomeSummary {
@@ -77,6 +80,7 @@ export interface AccountView {
   /** Bot-attributed numbers — managed trades only */
   bot: {
     managedCount: number;
+    closedCount: number;
     maxPositions: number;
     marginUsed: number;
     notional: number;
@@ -213,18 +217,25 @@ class AccountService {
             leverage: p.leverage,
             notional: Math.abs(extra * p.markPrice),
             managed: false,
+            note: 'opened outside the bot — never adopted, never closed, never counted in any bot number',
           });
         }
       }
 
-      // ---- bot totals ----------------------------------------------------
-      const realizedPnl = managed.reduce((a, m) => a + m.trade.realizedPnl, 0);
-      const fees = managed.reduce((a, m) => a + m.fees, 0);
-      const funding = managed.reduce((a, m) => a + m.funding, 0);
+      // ---- bot totals: closed history + the positions open right now -----
+      // (a closed trade keeps contributing to the P&L / fees / funding totals,
+      //  exactly like Binance's own income ledger does)
+      const closedTrades = allTrades().filter((t) => t.status === 'CLOSED');
+      const closedSum = (key: 'realizedPnl' | 'fees' | 'funding') =>
+        closedTrades.reduce((a, t) => a + (Number(t[key]) || 0), 0);
+      const realizedPnl = closedSum('realizedPnl') + managed.reduce((a, m) => a + m.trade.realizedPnl, 0);
+      const fees = closedSum('fees') + managed.reduce((a, m) => a + m.fees, 0);
+      const funding = closedSum('funding') + managed.reduce((a, m) => a + m.funding, 0);
       const unrealizedPnl = managed.reduce((a, m) => a + m.unrealized, 0);
       const marginUsed = managed.reduce((a, m) => a + m.margin, 0);
       const notional = managed.reduce((a, m) => a + m.notional, 0);
       const netPnl = realizedPnl + unrealizedPnl;
+      const closedCount = closedTrades.length;
 
       // Income (real fees / funding / realised PnL straight from Binance).
       if (mode !== 'paper') {
@@ -243,10 +254,13 @@ class AccountService {
         }
       }
 
-      const paperEquity = getPaperBalance(PAPER_START_BALANCE) + realizedPnl + unrealizedPnl;
+      // The paper balance already includes every booked fill (entry fees, TP
+      // slices, closes), so equity = balance + unrealised — never add realised
+      // on top or it would be counted twice.
+      const paperBalance = getPaperBalance(PAPER_START_BALANCE);
       const isPaper = mode === 'paper';
-      const equity = isPaper ? paperEquity : snapshot?.equity ?? null;
-      const walletBalance = isPaper ? getPaperBalance(PAPER_START_BALANCE) + realizedPnl : snapshot?.walletBalance ?? null;
+      const equity = isPaper ? paperBalance + unrealizedPnl : snapshot?.equity ?? null;
+      const walletBalance = isPaper ? paperBalance : snapshot?.walletBalance ?? null;
       const initialMargin = isPaper ? marginUsed : snapshot?.initialMargin ?? null;
 
       const view: AccountView = {
@@ -268,6 +282,7 @@ class AccountService {
         canTrade: isPaper ? true : snapshot?.canTrade ?? null,
         bot: {
           managedCount: managed.length,
+          closedCount,
           maxPositions: s.maxPositions,
           marginUsed,
           notional,
@@ -372,11 +387,16 @@ class AccountService {
     const s = getSettings();
     const out: ManagedPosition[] = [];
     for (const t of openTrades()) {
+      // Start from the freshest local price; live modes refine it with the mark
+      // price Binance reports straight afterwards.
+      const local = priceOf(t.symbol) || t.entryPrice;
+      const dirMul = t.side === 'LONG' ? 1 : -1;
+      const remaining = remainingQtyOf(t);
       out.push({
         trade: t,
-        markPrice: t.entryPrice,
-        unrealized: 0, // refined below with the real Binance mark price
-        roiPct: 0,
+        markPrice: local,
+        unrealized: (local - t.entryPrice) * dirMul * remaining,
+        roiPct: t.margin > 0 ? (((local - t.entryPrice) * dirMul * remaining) / t.margin) * 100 : 0,
         fees: t.fees,
         funding: t.funding ?? 0,
         remainingQty: remainingQtyOf(t),
@@ -388,6 +408,29 @@ class AccountService {
       });
     }
     return out;
+  }
+
+  /**
+   * Live view of the bot's positions, straight from the executor journal (never
+   * the cached account poll), enriched with the freshest mark prices we have.
+   * The Positions view must never lag behind a trade that just opened.
+   */
+  managedNow(): ManagedPosition[] {
+    const managed = this.managedPositions();
+    const cached = new Map((this.view?.positions.managed ?? []).map((m) => [m.trade.id, m]));
+    for (const m of managed) {
+      const price = priceOf(m.trade.symbol) || cached.get(m.trade.id)?.markPrice || m.trade.entryPrice;
+      m.markPrice = price;
+      const dirMul = m.trade.side === 'LONG' ? 1 : -1;
+      m.unrealized = (price - m.trade.entryPrice) * dirMul * m.remainingQty;
+      m.notional = m.remainingQty * price;
+      m.margin = m.trade.margin;
+      m.roiPct = m.margin > 0 ? (m.unrealized / m.margin) * 100 : 0;
+      m.fees = m.trade.fees;
+      m.funding = m.trade.funding ?? 0;
+      m.liquidationPrice = cached.get(m.trade.id)?.liquidationPrice ?? 0;
+    }
+    return managed;
   }
 
   /** Closed trades enriched with Binance fees/funding for the journal. */

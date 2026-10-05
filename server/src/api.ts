@@ -141,7 +141,7 @@ export function apiRouter(): express.Router {
   r.get('/positions', async (_req, res) => {
     const view = accountService.get() ?? (await accountService.refresh());
     res.json({
-      managed: view?.positions.managed ?? [],
+      managed: accountService.managedNow(),
       external: view?.positions.external ?? [],
       slots: { used: openTrades().length, max: getSettings().maxPositions },
       note: 'external positions are never adopted, managed, closed or counted in bot PnL',

@@ -21,6 +21,7 @@ import {
   remainingQtyOf, saveTrade, setPaperBalance, SignalRecord, Trade, allTrades,
 } from './store';
 import { getSettings, MAX_POSITIONS_CAP, PAPER_START_BALANCE } from './settings';
+import { priceOf, setPrice } from './prices';
 import { scanner } from './scanner';
 import { emit } from './broadcast';
 
@@ -60,8 +61,6 @@ export function splitQty(qty: number, step: number, p1: number, p2: number): { q
 }
 
 class Trader {
-  /** Latest price per symbol — multi-position mode must never mix them. */
-  private prices = new Map<string, number>();
   private priceQueue: { symbol: string; price: number } | null = null;
   private processing = false;
   private slBusy = new Set<string>();
@@ -82,18 +81,18 @@ class Trader {
 
   /** Latest price for a symbol (0 when unknown). */
   priceOf(symbol: string): number {
-    return this.prices.get(symbol) ?? 0;
+    return priceOf(symbol);
   }
 
   /** Primary-symbol price, kept for the dashboard/topbar. */
   lastPrice(): number {
-    return this.prices.get(getSettings().symbol) ?? 0;
+    return priceOf(getSettings().symbol);
   }
 
   onPrice(price: number, symbol?: string): void {
     if (!Number.isFinite(price) || price <= 0) return;
     const sym = symbol || getSettings().symbol;
-    this.prices.set(sym, price);
+    setPrice(sym, price);
     // trailing tick per symbol
     if (this.priceQueue === null || this.priceQueue.symbol === sym) this.priceQueue = { symbol: sym, price };
     if (!this.processing) {
@@ -273,6 +272,12 @@ class Trader {
       if (s.mode === 'paper') {
         const bal = getPaperBalance(PAPER_START_BALANCE);
         if (margin > bal) throw new Error(`Insufficient paper balance (${bal.toFixed(2)} USDT)`);
+        // Book the entry commission exactly like Binance does (taker fee on
+        // notional at entry) so paper fees match the real fee model.
+        const entryFee = notional * s.feeRate;
+        trade.fees = entryFee;
+        trade.realizedPnl -= entryFee;
+        adjustPaperBalance(-entryFee);
         trade.orders = {
           entry: `${prefix}E`, sl: `${prefix}S`,
           tp1: q1 > 0 ? `${prefix}1` : undefined,
@@ -319,7 +324,7 @@ class Trader {
         } catch (err: any) {
           this.log('error', `Order placement failed (${err?.message}) — flattening position`);
           try {
-            await api.marketOrder(symbol, closeSide(trade.side), qty, { reduceOnly: true });
+            await api.marketOrder(symbol, closeSide(trade.side), qty, { reduceOnly: true, newClientOrderId: `${prefix}X` });
           } catch { /* best effort */ }
           throw err;
         }
@@ -498,13 +503,15 @@ class Trader {
       } else {
         try {
           const dual = await api.isDualSide();
+          // Tagged + reduceOnly: the close can only shrink OUR position and is
+          // always attributable to this trade by client order id.
           await api.marketOrder(
             t.symbol,
             closeSide(t.side),
             remaining,
             dual
-              ? { positionSide: t.side === 'LONG' ? 'LONG' : 'SHORT' }
-              : { reduceOnly: true },
+              ? { positionSide: t.side === 'LONG' ? 'LONG' : 'SHORT', newClientOrderId: `${t.orders.entry?.slice(0, -1) ?? `VX${t.id}`}X` }
+              : { reduceOnly: true, newClientOrderId: `${t.orders.entry?.slice(0, -1) ?? `VX${t.id}`}X` },
           );
           // Authoritative numbers straight from Binance's ledger.
           await this.reconcileBinanceNumbers(t);
