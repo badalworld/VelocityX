@@ -1,0 +1,12 @@
+{
+  "name": "velocityx",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Binance USD-M Futures auto trading bot based on SUPER INDIBOT TradingView indicator",
+  "scripts": {
+    "build": "npm run build --prefix server && npm run build --prefix client",
+    "start": "node server/dist/index.js",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client"
+  }
+}

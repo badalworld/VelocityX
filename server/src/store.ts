@@ -1,0 +1,142 @@
+import fs from 'fs';
+import { dataPath } from './settings';
+
+export type TradeStatus = 'OPEN' | 'CLOSED';
+export type TradeSide = 'LONG' | 'SHORT';
+
+export interface Trade {
+  id: string;
+  symbol: string;
+  side: TradeSide;
+  status: TradeStatus;
+  qty: number;
+  q1: number; // TP1 slice
+  q2: number; // TP2 slice (of remaining)
+  q3: number; // TP3 slice (rest)
+  entryPrice: number;
+  atrAtEntry: number;
+  slInitial: number;
+  slCurrent: number;
+  slStage: 0 | 1 | 2; // 0 = initial, 1 = breakeven, 2 = at TP1
+  tp1: number;
+  tp2: number;
+  tp3: number;
+  notional: number;
+  margin: number;
+  leverage: number;
+  openedAt: number;
+  closedAt: number | null;
+  closeReason: 'TP3' | 'SL' | 'SL_PARTIAL' | 'REVERSE' | 'KILL' | 'EXTERNAL' | null;
+  tp1Filled: boolean;
+  tp2Filled: boolean;
+  tp3Filled: boolean;
+  realizedPnl: number; // net of fees
+  fees: number;
+  initialRisk: number; // |entry-sl| * qty (price risk at open)
+  /** live order ids (paper uses pseudo ids) */
+  orders: { entry?: string; sl?: string; tp1?: string; tp2?: string; tp3?: string };
+  mode: 'paper' | 'testnet' | 'live';
+  result: 'WIN' | 'LOSS' | null;
+}
+
+export interface SignalRecord {
+  id: string;
+  symbol: string;
+  time: number; // candle open time (ms)
+  detectedAt: number;
+  side: SignalSide_;
+  price: number;
+  atr: number;
+  acted: boolean; // bot opened a trade for this signal
+  tradeId: string | null;
+}
+type SignalSide_ = 'LONG' | 'SHORT';
+
+export interface PaperState {
+  balance: number;
+}
+
+const TRADES_FILE = dataPath('trades.json');
+const SIGNALS_FILE = dataPath('signals.json');
+const PAPER_FILE = dataPath('paper.json');
+
+function readJson<T>(file: string, fallback: T): T {
+  try {
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
+  } catch { /* ignore */ }
+  return fallback;
+}
+
+function writeJson(file: string, data: unknown): void {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.renameSync(tmp, file);
+}
+
+// ---------- trades ----------
+let trades: Trade[] = readJson<Trade[]>(TRADES_FILE, []);
+
+export function allTrades(): Trade[] {
+  return trades;
+}
+export function activeTrade(): Trade | null {
+  return trades.find((t) => t.status === 'OPEN') || null;
+}
+export function saveTrade(t: Trade): void {
+  const idx = trades.findIndex((x) => x.id === t.id);
+  if (idx >= 0) trades[idx] = t;
+  else trades.unshift(t);
+  if (trades.length > 1000) trades.length = 1000;
+  writeJson(TRADES_FILE, trades);
+}
+
+// ---------- signals ----------
+let signals: SignalRecord[] = readJson<SignalRecord[]>(SIGNALS_FILE, []);
+
+export function allSignals(): SignalRecord[] {
+  return signals;
+}
+export function saveSignal(s: SignalRecord): void {
+  signals.unshift(s);
+  if (signals.length > 2000) signals.length = 2000;
+  writeJson(SIGNALS_FILE, signals);
+}
+export function markSignalActed(id: string, tradeId: string): void {
+  const s = signals.find((x) => x.id === id);
+  if (s) {
+    s.acted = true;
+    s.tradeId = tradeId;
+    writeJson(SIGNALS_FILE, signals);
+  }
+}
+
+// ---------- paper balance ----------
+let paper: PaperState = readJson<PaperState>(PAPER_FILE, { balance: -1 });
+
+export function getPaperBalance(fallback: number): number {
+  if (!Number.isFinite(paper.balance) || paper.balance < 0) {
+    paper.balance = fallback;
+    writeJson(PAPER_FILE, paper);
+  }
+  return paper.balance;
+}
+export function setPaperBalance(v: number): void {
+  paper.balance = Math.round(v * 1e8) / 1e8;
+  writeJson(PAPER_FILE, paper);
+}
+export function adjustPaperBalance(delta: number): void {
+  setPaperBalance(getPaperBalance(1000) + delta);
+}
+
+// ---------- pruning ----------
+export function pruneOld(days: number): void {
+  const cutoff = Date.now() - days * 86400000;
+  const before = signals.length;
+  signals = signals.filter((s) => s.time >= cutoff);
+  if (signals.length !== before) writeJson(SIGNALS_FILE, signals);
+  // keep trade history longer (90 days) but always keep OPEN trades
+  const tradeCutoff = Date.now() - 90 * 86400000;
+  const tb = trades.length;
+  trades = trades.filter((t) => t.status === 'OPEN' || (t.closedAt || 0) >= tradeCutoff);
+  if (trades.length !== tb) writeJson(TRADES_FILE, trades);
+}
