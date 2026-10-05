@@ -1,21 +1,27 @@
 import { useMemo } from 'react';
-import { Mtf, ScreenerData, Stats, Status, Trade } from '../types';
+import { AccountView, Mtf, PositionsPayload, ScanResult, ScreenerData, Stats, Status, Trade } from '../types';
 import { fmt, timeAgo } from '../api';
-import { usePnlModel } from '../pnl';
-import { AnimatedNumber, BarRow, Panel, Sparkline } from '../motion/primitives';
-import PositionCard from '../components/PositionCard';
+import { AnimatedNumber, Panel, Sparkline } from '../motion/primitives';
+import { ManagedPositions } from '../components/Positions';
 import StatsPanel from '../components/StatsPanel';
-import { ActivityPanel, ScreenerPanel, TrendPanel } from '../components/Panels';
-import { IconBolt, IconCoins, IconShield, IconSparkles, IconTarget, IconTrend } from '../motion/Icons';
+import { ActivityPanel, TrendPanel } from '../components/Panels';
+import { ScannerPanel, TopPicks } from '../components/ScannerPanel';
+import { IconAlert, IconBolt, IconCoins, IconPulse, IconShield, IconSparkles, IconTarget, IconTrend } from '../motion/Icons';
 
 interface Props {
   status: Status | null;
   stats: Stats | null;
   mtf: Mtf | null;
   screener: ScreenerData | null;
+  scan: ScanResult | null;
+  account: AccountView | null;
+  positions: PositionsPayload | null;
   trades: Trade[];
   logs: { t: number; level: string; msg: string }[];
   onKill: () => void;
+  onClose: (id: string) => void;
+  onScan: () => void;
+  scanning: boolean;
 }
 
 function MiniBar({ pct, tone = 'cyan' }: { pct: number; tone?: 'cyan' | 'green' | 'red' }) {
@@ -27,12 +33,73 @@ function MiniBar({ pct, tone = 'cyan' }: { pct: number; tone?: 'cyan' | 'green' 
   );
 }
 
-export default function Overview({ status, stats, mtf, screener, trades, logs, onKill }: Props) {
-  const model = usePnlModel(status, trades, 'all');
-  const open = status?.openTrade ?? null;
-  const equity = status?.balance?.total ?? 0;
-  const unPnl = open?.unrealized ?? 0;
-  const totalPnl = model.realized + unPnl;
+/* ---------------------------------------------------------------------------
+   Data-source banner — the dashboard must never look "live" when it is not.
+   ------------------------------------------------------------------------- */
+export function FeedBanner({ status }: { status: Status | null }) {
+  const feed = status?.feedInfo?.feed ?? 'binance';
+  if (feed === 'binance') {
+    const latency = status?.feedInfo?.latencyMs ?? 0;
+    const age = status?.feedInfo?.wsLastMessageAt ? Date.now() - status.feedInfo.wsLastMessageAt : Infinity;
+    const stale = age > 15_000;
+    return (
+      <div className="feed-banner ok" data-reveal="true">
+        <span className="led-dot on" />
+        <b>Binance live feed</b>
+        <span className="chip cyan">{status?.feedInfo?.avgLatencyMs || latency} ms REST</span>
+        <span className="chip cyan">WS {Number.isFinite(age) ? `${Math.round(age / 1000)}s ago` : 'idle'}</span>
+        <span className="chip">
+          {status?.feedInfo?.candles?.symbols ?? 0} symbols · {status?.feedInfo?.candles?.bars ?? 0} candles cached
+        </span>
+        {stale && <span className="chip amber">stream quiet — reconnecting</span>}
+      </div>
+    );
+  }
+  if (feed === 'offline-demo') {
+    return (
+      <div className="feed-banner warn" data-reveal="true">
+        <IconAlert style={{ width: 14, height: 14 }} />
+        <b>OFFLINE DEMO FEED — synthetic data, not Binance.</b>
+        <span>
+          This host cannot reach fapi.binance.com and <span className="mono">VX_OFFLINE_DEMO=1</span> is set, so a clearly
+          labelled simulator is driving the UI. Remove that flag on a networked host to see real Binance data only.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="feed-banner error" data-reveal="true">
+      <IconAlert style={{ width: 14, height: 14 }} />
+      <b>Binance unreachable — no market data.</b>
+      <span>
+        {status?.feedInfo?.lastRestError ?? 'REST call failed'} · the bot will not fabricate prices, and no order will be
+        sent. It retries automatically.
+      </span>
+    </div>
+  );
+}
+
+export default function Overview({
+  status,
+  stats,
+  mtf,
+  scan,
+  account,
+  positions,
+  trades,
+  logs,
+  onKill,
+  onClose,
+  onScan,
+  scanning,
+}: Props) {
+  const openCount = positions?.managed.length ?? status?.openTrades?.length ?? 0;
+  const maxPos = positions?.slots.max ?? status?.maxPositions ?? 8;
+  const equity = account?.equity ?? 0;
+  const unreal = account?.unrealizedPnl ?? 0;
+  const botNet = account?.bot.netPnl ?? 0;
+  const realized = account?.bot.realizedPnl ?? 0;
+  const roi = account?.roiPct ?? 0;
 
   const uptime = useMemo(() => {
     const started = status?.engine?.startedAt;
@@ -40,31 +107,43 @@ export default function Overview({ status, stats, mtf, screener, trades, logs, o
     return timeAgo(started).replace(' ago', '');
   }, [status?.engine?.startedAt]);
 
-  const spark = useMemo(() => (model.curve.length > 2 ? model.curve : [0, 0, 0]), [model.curve]);
+  const spark = useMemo(() => {
+    const closed = trades
+      .filter((t) => t.status === 'CLOSED')
+      .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
+    if (!closed.length) return [0, 0, 0];
+    let cum = 0;
+    const pts = closed.map((t) => (cum += t.realizedPnl));
+    return [...pts, cum + unreal];
+  }, [trades, unreal]);
 
-  const kicker = (
-    <>
-      <span className="chip cyan">
-        <IconSparkles style={{ width: 11, height: 11 }} /> liquid glass command deck
-      </span>
-      <span className={`badge-mode ${status?.mode ?? 'paper'}`} style={{ padding: '3px 9px', fontSize: 9.5 }}>
-        {status?.mode ?? 'paper'}
-      </span>
-    </>
-  );
+  const totalClosed = stats?.totalClosedTrades ?? 0;
 
   return (
     <>
+      <FeedBanner status={status} />
+
       {/* ---------------- hero ---------------- */}
       <section className="panel hero" data-reveal="true">
         <div className="hero-main">
-          <span className="hero-kicker">{kicker}</span>
+          <span className="hero-kicker">
+            <span className="chip cyan">
+              <IconSparkles style={{ width: 11, height: 11 }} /> live binance desk
+            </span>
+            <span className={`badge-mode ${status?.mode ?? 'paper'}`} style={{ padding: '3px 9px', fontSize: 9.5 }}>
+              {status?.mode ?? 'paper'}
+            </span>
+            <span className={`chip ${account?.source === 'binance' ? 'green' : 'amber'}`}>
+              {account?.source === 'binance' ? 'exchange equity' : 'paper simulation'}
+            </span>
+          </span>
           <h1 className="hero-title">
-            {(status?.symbol ?? 'BTCUSDT').replace('USDT', '/USDT')} · {(status?.interval ?? '5m').toUpperCase()} automated desk
+            {openCount}/{maxPos} positions · {status?.autoScan ? 'scanner-driven' : (status?.symbol ?? 'BTCUSDT')} ·{' '}
+            {(status?.interval ?? '5m').toUpperCase()}
           </h1>
           <p className="hero-sub">
-            Every statistic the engine knows, in one glass pane. Chart lives in its own tab — this view is metrics
-            only, with the live equity curve pinned to the right on desktop and to the bottom on your phone.
+            Equity, PNL, ROI, fees and funding come straight from Binance. The scanner ranks the whole USD-M universe by
+            volatility and only trending markets reach the executor — up to {maxPos} bot positions, nothing else.
           </p>
         </div>
 
@@ -76,22 +155,15 @@ export default function Overview({ status, stats, mtf, screener, trades, logs, o
             </span>
           </div>
           <div className="hero-metric">
-            <span className="hm-k">Total P&amp;L</span>
-            <span className={`hm-v ${totalPnl >= 0 ? 'up' : 'down'}`}>
-              <AnimatedNumber value={totalPnl} decimals={2} signed />
+            <span className="hm-k">Bot net P&amp;L</span>
+            <span className={`hm-v ${botNet >= 0 ? 'up' : 'down'}`}>
+              <AnimatedNumber value={botNet} decimals={2} signed />
             </span>
           </div>
           <div className="hero-metric">
-            <span className="hm-k">Open R</span>
-            <span className={`hm-v ${unPnl >= 0 ? 'up' : 'down'}`}>
-              {open && open.initialRisk > 0 ? (
-                <>
-                  <AnimatedNumber value={(unPnl + open.realizedPnl) / open.initialRisk} decimals={2} signed />
-                  <span style={{ fontSize: 11, color: 'var(--dim)' }}>R</span>
-                </>
-              ) : (
-                '—'
-              )}
+            <span className="hm-k">ROI</span>
+            <span className={`hm-v ${roi >= 0 ? 'up' : 'down'}`}>
+              <AnimatedNumber value={roi} decimals={2} signed unit="%" />
             </span>
           </div>
           <div className="hero-metric">
@@ -103,32 +175,33 @@ export default function Overview({ status, stats, mtf, screener, trades, logs, o
         <div className="spacer" />
 
         <div style={{ width: 'min(240px, 100%)' }}>
-          <Sparkline data={spark} color={totalPnl >= 0 ? 'var(--green)' : 'var(--red)'} />
+          <Sparkline data={spark} color={botNet >= 0 ? 'var(--green)' : 'var(--red)'} />
           <div className="hint" style={{ textAlign: 'right' }}>
-            equity curve · {trades.length} trades logged
+            realised ladder + live unrealised · {trades.length} trades logged
           </div>
         </div>
       </section>
 
       {/* ---------------- KPI pods ---------------- */}
       <div className="grid-4" data-reveal-group>
-        <article className={`panel kpi tone-${totalPnl >= 0 ? 'green' : 'red'}`}>
+        <article className={`panel kpi tone-${botNet >= 0 ? 'green' : 'red'}`}>
           <div className="kpi-top">
             <span className="kpi-ico">
               <IconCoins />
             </span>
-            <span className="kpi-label">Net P&amp;L</span>
+            <span className="kpi-label">Net P&amp;L (bot)</span>
             <span className="spacer" />
-            <span className={`chip ${totalPnl >= 0 ? 'green' : 'red'}`}>
-              {totalPnl >= 0 ? '▲' : '▼'} {fmt(Math.abs(model.changePct), 2)}%
+            <span className={`chip ${botNet >= 0 ? 'green' : 'red'}`}>
+              realised {realized >= 0 ? '+' : ''}
+              {fmt(realized, 2)}
             </span>
           </div>
           <div className="kpi-value">
-            <AnimatedNumber value={totalPnl} decimals={2} signed />
+            <AnimatedNumber value={botNet} decimals={2} signed />
             <small>USDT</small>
           </div>
           <div className="kpi-foot">
-            <Sparkline data={spark} color={totalPnl >= 0 ? 'var(--green)' : 'var(--red)'} strokeWidth={1.6} />
+            <Sparkline data={spark} color={botNet >= 0 ? 'var(--green)' : 'var(--red)'} strokeWidth={1.6} />
           </div>
           <span className="kpi-glow" />
         </article>
@@ -184,7 +257,7 @@ export default function Overview({ status, stats, mtf, screener, trades, logs, o
             </span>
             <span className="kpi-label">Signals</span>
             <span className="spacer" />
-            <span className="chip violet">{stats?.totalClosedTrades ?? 0} closed</span>
+            <span className="chip violet">{totalClosed} closed</span>
           </div>
           <div className="kpi-value">
             <AnimatedNumber value={stats?.totalSignals ?? 0} decimals={0} />
@@ -200,8 +273,25 @@ export default function Overview({ status, stats, mtf, screener, trades, logs, o
         </article>
       </div>
 
-      {/* ---------------- position ---------------- */}
-      {open && <PositionCard trade={open} price={status?.price ?? 0} onKill={onKill} />}
+      {/* ---------------- live positions (bot-owned only) ---------------- */}
+      <ManagedPositions data={positions} onClose={onClose} />
+
+      {/* ---------------- scanner ---------------- */}
+      <div className="grid-2">
+        <ScannerPanel scan={scan} onScan={onScan} scanning={scanning} />
+        <Panel
+          title="Top Picks"
+          sub="trending · high volatility"
+          icon={<IconTrend />}
+          meta={<span className="chip green">{(scan?.rows ?? []).filter((r) => r.tradable).length} tradable</span>}
+        >
+          <TopPicks scan={scan} />
+          <div className="hint mt">
+            Scan runs every {scan?.gate ? '60' : '—'}s inside the 95% Binance weight budget — it never competes with the
+            engine, the account poller or the executor.
+          </div>
+        </Panel>
+      </div>
 
       {/* ---------------- stats + trend ---------------- */}
       <div className="grid-2">
@@ -209,56 +299,66 @@ export default function Overview({ status, stats, mtf, screener, trades, logs, o
         <TrendPanel mtf={mtf} status={status} />
       </div>
 
-      {/* ---------------- screener + activity ---------------- */}
+      {/* ---------------- health + activity ---------------- */}
       <div className="grid-2">
-        <ScreenerPanel data={screener} />
         <Panel
           title="Engine Health"
-          sub="runtime"
+          sub="feed + rate budget"
           icon={<IconShield />}
-          meta={status?.feed === 'offline-demo' ? 'offline demo feed' : 'binance live'}
+          meta={status?.feed === 'binance' ? 'binance live' : status?.feed === 'offline-demo' ? 'demo feed' : 'disconnected'}
         >
           <div className="mini-grid">
             <div className="mini">
-              <div className="k">Feed</div>
-              <div className="v">{status?.feed === 'offline-demo' ? 'Simulated' : 'Live'}</div>
+              <div className="k">Content source</div>
+              <div className={`v ${status?.feed === 'binance' ? 'up' : 'down'}`}>
+                {status?.feed === 'binance' ? 'Binance' : status?.feed === 'offline-demo' ? 'Simulated' : 'None'}
+              </div>
             </div>
             <div className="mini">
-              <div className="k">Mode</div>
-              <div className="v" style={{ textTransform: 'uppercase' }}>{status?.mode ?? '—'}</div>
+              <div className="k">REST latency</div>
+              <div className="v">{status?.feedInfo?.avgLatencyMs ?? 0} ms</div>
             </div>
             <div className="mini">
-              <div className="k">Leverage</div>
-              <div className="v">{status?.leverage ?? '—'}x</div>
+              <div className="k">Weight used</div>
+              <div className="v">
+                {status?.limits?.usedWeight ?? 0}/{status?.limits?.plannedLimitPerMin ?? 2280} · {status?.limits?.usedPct ?? 0}%
+              </div>
             </div>
             <div className="mini">
-              <div className="k">Size</div>
-              <div className="v">{status?.tradeSizePercent ?? '—'}%</div>
+              <div className="k">Order budget</div>
+              <div className="v">
+                {status?.limits?.usedOrders1m ?? 0}/{status?.limits?.orderLimitPerMin ?? 1140} /min
+              </div>
             </div>
             <div className="mini">
-              <div className="k">ATR(14)</div>
-              <div className="v">{fmt(status?.engine?.atr ?? 0, 2)}</div>
+              <div className="k">Positions</div>
+              <div className="v">
+                {openCount}/{maxPos}
+              </div>
             </div>
             <div className="mini">
-              <div className="k">Ribbon</div>
-              <div className={`v ${status?.engine?.ribbonBull ? 'up' : 'down'}`}>
-                {status?.engine?.ribbonBull ? 'Bullish' : 'Bearish'}
+              <div className="k">Scanner</div>
+              <div className="v">{status?.scanner?.selected.length ?? 0} symbols</div>
+            </div>
+            <div className="mini">
+              <div className="k">Externals</div>
+              <div className="v down">{account?.external.count ?? 0} excluded</div>
+            </div>
+            <div className="mini">
+              <div className="k">Fees · Funding</div>
+              <div className="v" style={{ fontSize: 12 }}>
+                {fmt(account?.bot.fees ?? 0, 2)} · {fmt(account?.bot.funding ?? 0, 3)}
               </div>
             </div>
           </div>
-
-          <div className="settings-sec">
-            <h4>Risk ladder in force</h4>
-            <div className="bars">
-              <BarRow label="TP1 · 1.5R" pct={stats?.tp1Pct ?? 0} value={`${fmt(stats?.tp1Pct ?? 0, 0)}%`} tone="green" />
-              <BarRow label="TP2 · 3R" pct={stats?.tp2Pct ?? 0} value={`${fmt(stats?.tp2Pct ?? 0, 0)}%`} tone="green" />
-              <BarRow label="TP3 · 4.5R" pct={stats?.tp3Pct ?? 0} value={`${fmt(stats?.tp3Pct ?? 0, 0)}%`} tone="green" />
-            </div>
+          <div className="hint mt" style={{ display: 'flex', gap: 7 }}>
+            <IconPulse style={{ width: 13, height: 13, flex: 'none', marginTop: 2, color: 'var(--cyan)' }} />
+            Limit plan: {status?.limits?.plannedLimitPerMin ?? 2280}/min (95% of {status?.limits?.weightLimitPerMin ?? 2400}),
+            split across {(status?.limits?.areas ?? []).length || 5} work areas — scanner, market, account, orders, stream.
           </div>
         </Panel>
+        <ActivityPanel logs={logs} />
       </div>
-
-      <ActivityPanel logs={logs} />
     </>
   );
 }

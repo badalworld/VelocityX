@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-/** Trading mode. Paper uses live Binance prices with simulated fills. */
+/** Trading mode. Paper uses live Binance market data with simulated fills. */
 export type Mode = 'paper' | 'testnet' | 'live';
 
 export interface ApiKeys {
@@ -9,19 +9,44 @@ export interface ApiKeys {
   secret: string;
 }
 
+/** Market-scanner gate: only high-volatility *trending* markets are traded. */
+export interface ScannerSettings {
+  /** Scan the whole USD-M universe and drive the engine (auto symbol selection). */
+  enabled: boolean;
+  /** Seconds between full scans (weights are budgeted by ratelimit.ts). */
+  intervalSec: number;
+  /** How many 24h leaders get full multi-timeframe analysis each scan. */
+  candidates: number;
+  /** Minimum 24h quote volume (USDT) — liquidity gate. */
+  minQuoteVolume24h: number;
+  /** Minimum 24h high-low range (% of price) — volatility gate. */
+  minRange24hPct: number;
+  /** Minimum ATR(14) on 15m (% of price) — volatility gate. */
+  minAtrPct: number;
+  /** Minimum ADX(14) on 15m — "trending, not chop" gate. */
+  minAdx: number;
+  /** Max symbols handed to the engine/executor (hard-capped by maxPositions). */
+  topN: number;
+}
+
 export interface Settings {
   mode: Mode;
   autoTrade: boolean;
+  /** Primary symbol (chart + manual mode). In auto-scan the engine follows the scanner. */
   symbol: string;
   interval: '5m';
-  /** % of wallet balance used as margin for each trade (your spec: 5%) */
+  /** % of balance used as margin for each trade (your spec: 5%) */
   tradeSizePercent: number;
   /** Leverage (your spec: 10x) */
   leverage: number;
-  /** Paper simulation starting balance (USDT) */
-  paperBalance: number;
-  /** Taker fee rate used for paper fill simulation & stats (0.05%) */
+  /** Max simultaneous bot positions — hard cap 8 (your spec). */
+  maxPositions: number;
+  /** Follow the scanner's top high-volatility trending markets. */
+  autoScan: boolean;
+  /** Taker fee rate used *only* for paper-mode simulation (live fees come from Binance). */
   feeRate: number;
+
+  scanner: ScannerSettings;
 
   // ---- SUPER INDIBOT indicator parameters (defaults preserved) ----
   emaLengths: number[]; // [5,11,15,18,21,24,28,34]
@@ -35,15 +60,18 @@ export interface Settings {
   tp1ClosePct: number; // 33
   /** TP2 closes 50% of REMAINING, SL -> TP1 */
   tp2ClosePct: number; // 50
-  /** TP3 closes the rest (full profit) */
 
   // ---- UI / analytics ----
   historyDays: number; // rolling stats window (indicator default 7)
-  screenerSymbols: string[];
   dashboardTimeframes: string[]; // ['5','15','30']
 
   keys: { testnet: ApiKeys; live: ApiKeys };
 }
+
+/** Paper mode starts from this fixed, non-editable virtual balance (no manual input). */
+export const PAPER_START_BALANCE = 1000;
+/** Hard cap on simultaneous positions — the bot never manages more. */
+export const MAX_POSITIONS_CAP = 8;
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: 'paper',
@@ -52,8 +80,20 @@ export const DEFAULT_SETTINGS: Settings = {
   interval: '5m',
   tradeSizePercent: 5,
   leverage: 10,
-  paperBalance: 1000,
+  maxPositions: MAX_POSITIONS_CAP,
+  autoScan: true,
   feeRate: 0.0005,
+
+  scanner: {
+    enabled: true,
+    intervalSec: 60,
+    candidates: 30,
+    minQuoteVolume24h: 20_000_000,
+    minRange24hPct: 3,
+    minAtrPct: 0.6,
+    minAdx: 18,
+    topN: MAX_POSITIONS_CAP,
+  },
 
   emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
   emaExtraLength: 200,
@@ -65,16 +105,18 @@ export const DEFAULT_SETTINGS: Settings = {
   tp2ClosePct: 50,
 
   historyDays: 7,
-  screenerSymbols: [
-    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
-    'DOGEUSDT', 'ADAUSDT', 'LINKUSDT', 'AVAXUSDT',
-  ],
   dashboardTimeframes: ['5', '15', '30'],
 
   keys: { testnet: { key: '', secret: '' }, live: { key: '', secret: '' } },
 };
 
-export const DATA_DIR = path.resolve(__dirname, '..', 'data');
+/**
+ * Where trades/signals/settings live. Overridable so tests can run on a clean
+ * sandbox without touching the operator's live journal.
+ */
+export const DATA_DIR = process.env.VX_DATA_DIR
+  ? path.resolve(process.env.VX_DATA_DIR)
+  : path.resolve(__dirname, '..', 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 function ensureDir(): void {
@@ -130,13 +172,25 @@ export function loadSettings(): Settings {
 function sanitize(s: Settings): Settings {
   s.tradeSizePercent = clamp(num(s.tradeSizePercent, 5), 0.5, 100);
   s.leverage = Math.round(clamp(num(s.leverage, 10), 1, 125));
+  s.maxPositions = Math.round(clamp(num(s.maxPositions, MAX_POSITIONS_CAP), 1, MAX_POSITIONS_CAP));
+  s.autoScan = s.autoScan !== false;
   s.atrLength = Math.round(clamp(num(s.atrLength, 14), 1, 500));
   s.atrSlMultiplier = clamp(num(s.atrSlMultiplier, 2), 0.1, 100);
   s.tpRrFactor = clamp(num(s.tpRrFactor, 1.5), 0.1, 100);
   s.historyDays = Math.round(clamp(num(s.historyDays, 7), 1, 365));
-  s.tradeSizePercent = clamp(num(s.tradeSizePercent, 5), 0.5, 100);
+  s.feeRate = clamp(num(s.feeRate, 0.0005), 0, 0.01);
   if (!Array.isArray(s.emaLengths) || s.emaLengths.length < 2) s.emaLengths = [...DEFAULT_SETTINGS.emaLengths];
-  if (!Array.isArray(s.screenerSymbols)) s.screenerSymbols = [...DEFAULT_SETTINGS.screenerSymbols];
+
+  const sc = (s.scanner = { ...DEFAULT_SETTINGS.scanner, ...(s.scanner || {}) });
+  sc.intervalSec = Math.round(clamp(num(sc.intervalSec, 60), 15, 600));
+  sc.candidates = Math.round(clamp(num(sc.candidates, 30), 8, 80));
+  sc.minQuoteVolume24h = clamp(num(sc.minQuoteVolume24h, 20_000_000), 0, 1e12);
+  sc.minRange24hPct = clamp(num(sc.minRange24hPct, 3), 0, 100);
+  sc.minAtrPct = clamp(num(sc.minAtrPct, 0.6), 0, 50);
+  sc.minAdx = clamp(num(sc.minAdx, 18), 0, 100);
+  sc.topN = Math.round(clamp(num(sc.topN, MAX_POSITIONS_CAP), 1, MAX_POSITIONS_CAP));
+  sc.enabled = sc.enabled !== false;
+
   if (!['paper', 'testnet', 'live'].includes(s.mode)) s.mode = 'paper';
   return s;
 }
@@ -159,13 +213,15 @@ export function updateSettings(patch: any): Settings {
     for (const env of ['testnet', 'live'] as const) {
       const k = patch.keys?.[env];
       if (k) {
-        // masked values are echoed back by the UI — never overwrite stored secrets with them
         if (typeof k.key === 'string' && k.key.includes('••••')) delete k.key;
         if (typeof k.secret === 'string' && k.secret.includes('••••')) delete k.secret;
         if (Object.keys(k).length === 0) delete patch.keys[env];
       }
     }
   }
+  // Manual asset input was removed — any legacy patch trying to set it is ignored.
+  delete patch.paperBalance;
+  delete patch.screenerSymbols;
   current = sanitize(deepMerge(current, patch));
   persistSettings();
   return current;

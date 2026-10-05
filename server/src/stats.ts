@@ -15,7 +15,7 @@ export function computeStats(): any {
   const counted = allTrades().filter(inWindow);
 
   let tp1Count = 0, tp2Count = 0, tp3Count = 0, slCount = 0, winCount = 0, lossCount = 0;
-  let netPnl = 0, totalFees = 0;
+  let netPnl = 0, totalFees = 0, totalFunding = 0;
   for (const t of counted) {
     if (t.tp1Filled) tp1Count++;
     if (t.tp2Filled) tp2Count++;
@@ -23,9 +23,14 @@ export function computeStats(): any {
     if (t.closeReason === 'SL') slCount++;
     if (t.result === 'WIN') winCount++;
     else if (t.result === 'LOSS') lossCount++;
+    // Only bot-owned trades exist in the store — external positions are never adopted.
     if (t.status === 'CLOSED') {
       netPnl += t.realizedPnl;
       totalFees += t.fees;
+      totalFunding += t.funding ?? 0;
+    } else {
+      totalFees += t.fees;
+      totalFunding += t.funding ?? 0;
     }
   }
 
@@ -55,5 +60,7 @@ export function computeStats(): any {
     expectancy,
     netPnl,
     totalFees,
+    totalFunding,
+    openTrades: counted.filter((t) => t.status === 'OPEN').length,
   };
 }

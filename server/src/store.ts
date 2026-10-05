@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import { dataPath } from './settings';
 
 export type TradeStatus = 'OPEN' | 'CLOSED';
@@ -32,11 +33,21 @@ export interface Trade {
   tp3Filled: boolean;
   realizedPnl: number; // net of fees
   fees: number;
+  /** Binance funding paid/received while this trade was open (USDT, real data). */
+  funding: number;
+  /** Binance-verified realised PnL from ORDER_TRADE_UPDATE (live/testnet only). */
+  binanceRealizedPnl: number;
+  /** Commission reported by Binance in a non-USDT asset (e.g. BNB), if any. */
+  commissionOtherAsset: number;
   initialRisk: number; // |entry-sl| * qty (price risk at open)
   /** live order ids (paper uses pseudo ids) */
   orders: { entry?: string; sl?: string; tp1?: string; tp2?: string; tp3?: string };
   mode: 'paper' | 'testnet' | 'live';
   result: 'WIN' | 'LOSS' | null;
+  /** Always true: the bot NEVER adopts or manages trades it did not open. */
+  botOwned: true;
+  /** Market-scanner snapshot at entry (volatility rank, ADX, ATR%). */
+  scan?: { volatility: number; adx: number; atrPct: number; rank: number } | null;
 }
 
 export interface SignalRecord {
@@ -69,8 +80,15 @@ function readJson<T>(file: string, fallback: T): T {
 
 function writeJson(file: string, data: unknown): void {
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data));
-  fs.renameSync(tmp, file);
+  try {
+    // the data dir can disappear under a running bot (fresh checkout, manual
+    // cleanup) — recreate it instead of losing the journal
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    console.error(`[store] could not persist ${path.basename(file)}: ${(e as Error).message}`);
+  }
 }
 
 // ---------- trades ----------
@@ -79,8 +97,24 @@ let trades: Trade[] = readJson<Trade[]>(TRADES_FILE, []);
 export function allTrades(): Trade[] {
   return trades;
 }
+/** Remaining quantity of a trade after the scale-out ladder fills. */
+export function remainingQtyOf(t: Trade): number {
+  return t.qty - (t.tp1Filled ? t.q1 : 0) - (t.tp2Filled ? t.q2 : 0) - (t.tp3Filled ? t.q3 : 0);
+}
+
+/** All OPEN trades the bot itself opened (≤ maxPositions). */
+export function openTrades(): Trade[] {
+  return trades.filter((t) => t.status === 'OPEN');
+}
+export function openTradeOn(symbol: string): Trade | null {
+  return trades.find((t) => t.status === 'OPEN' && t.symbol === symbol) || null;
+}
+/** Back-compat helper: the most recent OPEN trade (or null). */
 export function activeTrade(): Trade | null {
   return trades.find((t) => t.status === 'OPEN') || null;
+}
+export function openSymbols(): string[] {
+  return [...new Set(trades.filter((t) => t.status === 'OPEN').map((t) => t.symbol))];
 }
 export function saveTrade(t: Trade): void {
   const idx = trades.findIndex((x) => x.id === t.id);

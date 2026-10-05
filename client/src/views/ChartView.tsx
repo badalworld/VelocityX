@@ -50,7 +50,8 @@ export default function ChartView({
       .catch(() => {});
   }, [candleKey, limit]);
 
-  const open = status?.openTrade ?? null;
+  const open =
+    (status?.openTrades ?? []).find((t) => t.symbol === (status?.symbol ?? '')) ?? status?.openTrades?.[0] ?? null;
 
   return (
     <>

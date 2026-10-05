@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Trade, Status } from './types';
+import { AccountView, Trade } from './types';
 import { equityCurve } from './motion/chart';
 import type { PnlTradeBar } from './components/PnlChart';
 
@@ -138,10 +138,19 @@ export function buildPnl(
   };
 }
 
-/** Range + live equity are the only inputs that need to recompute the model. */
-export function usePnlModel(status: Status | null, trades: Trade[], rangeKey: PnlRangeKey): PnlModel {
-  const equity = status?.balance?.total ?? 0;
-  const unrealized = status?.openTrade?.unrealized ?? 0;
+/**
+ * Range + live equity are the only inputs that need to recompute the model.
+ * Equity and unrealised PnL come from Binance (account view), so the curve is
+ * plotted on real exchange numbers — never on a manually typed balance.
+ */
+export function usePnlModel(
+  _status: unknown,
+  trades: Trade[],
+  account: AccountView | null,
+  rangeKey: PnlRangeKey,
+): PnlModel {
+  const equity = account?.equity ?? 0;
+  const unrealized = account?.bot.unrealizedPnl ?? 0;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   return useMemo(
     () => buildPnl(trades, { equity, unrealized, rangeKey, fallbackBase: 1000 }),

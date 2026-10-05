@@ -6,9 +6,18 @@
  *   4. SHORT → kill switch                                                     [KILL]
  * Also validates paper balance accounting and the stats table output.
  */
+// Paper-mode harness: allow the labelled offline demo feed so exchange
+// metadata is available when this sandbox has no Binance egress.
+process.env.VX_OFFLINE_DEMO = process.env.VX_OFFLINE_DEMO || '1';
+// Hermetic run — never touch the operator's journal.
+const _fs = require('fs');
+const _os = require('os');
+const _path = require('path');
+process.env.VX_DATA_DIR = _fs.mkdtempSync(_path.join(_os.tmpdir(), 'vx-e2e-'));
+
 const { loadSettings, updateSettings, getSettings } = require('../dist/settings');
 const { trader } = require('../dist/trader');
-const { saveSignal, allTrades, activeTrade, getPaperBalance, setPaperBalance } = require('../dist/store');
+const { saveSignal, allTrades, activeTrade, openTrades, getPaperBalance, setPaperBalance } = require('../dist/store');
 const { computeStats } = require('../dist/stats');
 
 let failures = 0;
@@ -33,6 +42,7 @@ async function main() {
   loadSettings();
   setPaperBalance(1000);
   updateSettings({ autoTrade: true, symbol: 'BTCUSDT', tradeSizePercent: 5, leverage: 10 });
+  const bal0 = getPaperBalance(1000); // captured BEFORE the first entry (entry fee included in the booking)
 
   const P = 68000, A = 100; // entry price, ATR
   // SL = ±200, TP1 = ±300, TP2 = ±600, TP3 = ±900
@@ -46,8 +56,6 @@ async function main() {
   assert(t1.qty > 0 && Math.abs(t1.q1 + t1.q2 + t1.q3 - t1.qty) < 1e-9, `qty ladder sums: ${t1.qty} = ${t1.q1}+${t1.q2}+${t1.q3}`);
   assert(Math.abs(t1.margin * t1.leverage - t1.notional) < 1e-6, 'notional = margin × leverage');
   assert(t1.margin <= 50 + 1e-6 && t1.margin > 42, `margin = 5% of 1000, floored to lot step = ${t1.margin}`);
-
-  const bal0 = getPaperBalance(1000);
 
   trader.onPrice(P + 301); await settle();
   t1 = activeTrade();
@@ -68,7 +76,8 @@ async function main() {
   assert(t1.realizedPnl > 0, `trade1 net PnL = ${t1.realizedPnl.toFixed(4)} USDT`);
   assert(!activeTrade(), 'no open trade after TP3');
   const balAfter1 = getPaperBalance(1000);
-  assert(Math.abs((balAfter1 - bal0) - t1.realizedPnl) < 1e-6, 'paper balance tracks realized PnL');
+  assert(Math.abs((balAfter1 - bal0) - t1.realizedPnl) < 1e-6, `paper balance tracks realized PnL (Δ${(balAfter1 - bal0).toFixed(4)} vs PnL ${t1.realizedPnl.toFixed(4)})`);
+  assert(Math.abs(t1.fees - (498.2 * 0.0005 * 2)) < 0.02, `both legs charged the taker fee (${t1.fees.toFixed(3)} USDT)`);
 
   // ---------- Trade 2: SL hit before TP ----------
   await trader.onSignal(mkSignal('SHORT', P, A));
@@ -111,9 +120,36 @@ async function main() {
   assert(!activeTrade(), 'auto-trade OFF → signal logged but no entry');
   assert(require('../dist/store').allSignals().length === sigCountBefore + 1, 'signal still recorded once');
 
+  // ---------- Multi-position cap (max 8, one per symbol) ----------
+  updateSettings({ autoTrade: true, autoScan: false });
+  const syms = ['ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'LINKUSDT', 'AVAXUSDT'];
+  for (const sym of syms) {
+    const base = 100;
+    const sig = mkSignal('LONG', base, 0.5);
+    sig.record = { ...sig.record, symbol: sym };
+    sig.symbol = sym;
+    trader.onPrice(base, sym); // live price for that symbol (multi-symbol book)
+    await trader.onSignal(sig);
+    await settle();
+  }
+  assert(openTrades().length === 8, `8 concurrent positions open (${openTrades().length})`);
+  assert(openTrades().every((t) => t.botOwned === true), 'every open trade is bot-owned (never adopted)');
+  const extraSig = mkSignal('LONG', 100, 0.5);
+  extraSig.record = { ...extraSig.record, symbol: 'TRXUSDT' };
+  extraSig.symbol = 'TRXUSDT';
+  await trader.onSignal(extraSig); await settle();
+  assert(openTrades().length === 8, 'a 9th signal is rejected — hard cap of 8 positions');
+  assert(!openTrades().some((t) => t.symbol === 'TRXUSDT'), 'no position opened beyond the cap');
+
+  // ---------- Kill switch closes every bot position, nothing else ----------
+  for (const sym of syms) trader.onPrice(100, sym);
+  const killed = await trader.kill(); await settle();
+  assert(killed === 8 && openTrades().length === 0, `kill closed all 8 bot positions (${killed})`);
+
   // ---------- Stats ----------
   const st = computeStats();
-  assert(st.totalSignals === 5, `5 signals recorded (${st.totalSignals})`);  assert(st.totalClosedTrades === 4, `4 closed trades (${st.totalClosedTrades})`);
+  assert(st.totalSignals === 14, `14 signals recorded (${st.totalSignals})`);
+  assert(st.totalClosedTrades === 12, `12 closed trades (${st.totalClosedTrades})`);
   assert(st.winCount === 1 && st.lossCount === 1, `1 win / 1 loss (ignores REVERSE/KILL) → WR ${st.overallWinRate.toFixed(1)}%`);
   assert(Math.abs(st.expectancy - (0.5 * 1.5 - 0.5)) < 1e-9, `expectancy = ${st.expectancy}R at 50% WR`);
   assert(st.netPnl > -5 && st.netPnl < 10, `net PnL sanity: ${st.netPnl.toFixed(4)} USDT`);

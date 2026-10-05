@@ -10,6 +10,8 @@ export interface Trade {
   q2: number;
   q3: number;
   entryPrice: number;
+  markPrice?: number;
+  remainingQty?: number;
   atrAtEntry: number;
   slInitial: number;
   slCurrent: number;
@@ -28,9 +30,14 @@ export interface Trade {
   tp3Filled: boolean;
   realizedPnl: number;
   fees: number;
+  funding: number;
+  binanceRealizedPnl: number;
+  commissionOtherAsset: number;
   initialRisk: number;
   mode: Mode;
   result: 'WIN' | 'LOSS' | null;
+  botOwned: true;
+  scan?: { volatility: number; adx: number; atrPct: number; rank: number } | null;
   unrealized?: number;
 }
 
@@ -46,6 +53,173 @@ export interface SignalRecord {
   tradeId: string | null;
 }
 
+export interface IncomeSummary {
+  windowDays: number;
+  realizedPnl: number;
+  commission: number;
+  funding: number;
+  transfers: number;
+  insurance: number;
+  other: number;
+  net: number;
+  bySymbol: { symbol: string; realizedPnl: number; commission: number; funding: number; net: number }[];
+  records: number;
+  at: number;
+}
+
+export interface BotTotals {
+  managedCount: number;
+  /** closed bot trades all-time (they keep contributing to realizedPnl/fees/funding) */
+  closedCount: number;
+  maxPositions: number;
+  marginUsed: number;
+  notional: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+  fees: number;
+  funding: number;
+  netPnl: number;
+  roiPct: number;
+}
+
+export interface AccountView {
+  source: 'binance' | 'paper-sim';
+  mode: Mode;
+  at: number;
+  equity: number | null;
+  walletBalance: number | null;
+  unrealizedPnl: number | null;
+  availableBalance: number | null;
+  initialMargin: number | null;
+  maintMargin: number | null;
+  roiPct: number | null;
+  roiOnWalletPct: number | null;
+  canTrade: boolean | null;
+  bot: BotTotals;
+  income: IncomeSummary | null;
+  external: { count: number; notional: number; unrealized: number };
+  errors?: string[];
+  latencyMs?: number;
+}
+
+export interface ManagedPosition {
+  trade: Trade;
+  markPrice: number;
+  unrealized: number;
+  roiPct: number;
+  fees: number;
+  funding: number;
+  remainingQty: number;
+  notional: number;
+  margin: number;
+  leverage: number;
+  liquidationPrice: number;
+  source: 'binance' | 'paper-sim';
+}
+
+export interface ExternalPosition {
+  symbol: string;
+  positionAmt: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealized: number;
+  leverage: number;
+  notional: number;
+  managed: false;
+  note?: string;
+}
+
+export interface PositionsPayload {
+  managed: ManagedPosition[];
+  external: ExternalPosition[];
+  slots: { used: number; max: number };
+  note: string;
+  at: number;
+}
+
+export interface ScannerRow {
+  symbol: string;
+  base: string;
+  price: number;
+  change24hPct: number;
+  range24hPct: number;
+  quoteVolume24h: number;
+  atrPct: number;
+  atrPct5m: number;
+  adx: number;
+  emaFast: number;
+  emaSlow: number;
+  trend: 'UP' | 'DOWN';
+  alignment: number;
+  fundingRate: number;
+  nextFundingTime: number;
+  volatility: number;
+  trendScore: number;
+  liquidityScore: number;
+  score: number;
+  marketType: 'TRENDING' | 'RANGING' | 'QUIET' | 'PEGGED';
+  tradable: boolean;
+  reason: string;
+  updatedAt: number;
+}
+
+export interface ScanResult {
+  at: number;
+  durationMs?: number;
+  universe: number;
+  analysed: number;
+  rows: ScannerRow[];
+  selected: string[];
+  warming?: boolean;
+  gate: {
+    minQuoteVolume24h: number;
+    minRange24hPct: number;
+    minAtrPct: number;
+    minAdx: number;
+    maxPositions: number;
+  } | null;
+}
+
+export interface FeedInfo {
+  feed: 'binance' | 'offline-demo' | 'binance-unreachable';
+  source: string;
+  reachable: boolean | null;
+  demoFeedAllowed?: boolean;
+  lastRestOkAt: number;
+  lastRestError: string | null;
+  latencyMs: number;
+  avgLatencyMs: number;
+  serverTimeOffsetMs: number;
+  wsLastMessageAt: number;
+  candles?: { symbols: number; series: number; bars: number; lastWsAt: number };
+}
+
+export interface AreaStat {
+  area: string;
+  sharePct: number;
+  weightUsed: number;
+  weightCap: number;
+  calls: number;
+  waiting: number;
+  avgWaitMs: number;
+}
+
+export interface LimitStatus {
+  weightLimitPerMin: number;
+  plannedLimitPerMin: number;
+  utilizationPct: number;
+  usedWeight: number;
+  usedPct: number;
+  usedOrders1m: number;
+  orderLimitPerMin: number;
+  usedOrders10s: number;
+  orderLimit10s: number;
+  cooldownMsLeft: number;
+  cooldownReason: string;
+  areas: AreaStat[];
+  totals: { calls: number; avgWaitMs: number; maxWaitMs: number; throttled: number; rejected429: number };
+}
+
 export interface Status {
   mode: Mode;
   autoTrade: boolean;
@@ -53,9 +227,14 @@ export interface Status {
   interval: string;
   leverage: number;
   tradeSizePercent: number;
+  maxPositions: number;
+  autoScan: boolean;
   price: number;
-  balance: { source: string; total: number | null; available: number | null; error?: string };
+  account: AccountView | null;
+  openTrades: Trade[];
   openTrade: Trade | null;
+  slots: { used: number; max: number };
+  scanner: { at: number; universe: number; analysed: number; selected: string[]; top: ScannerRow[] } | null;
   engine: {
     atr: number;
     ribbonBull: boolean;
@@ -66,7 +245,9 @@ export interface Status {
     startedAt: number;
   } | null;
   feed?: string;
-  streams?: { market?: boolean };
+  feedInfo?: FeedInfo;
+  limits?: LimitStatus;
+  streams?: { market?: boolean; user?: boolean; userLastMessageAt?: number };
   keysConfigured: { testnet: boolean; live: boolean };
   logs: { t: number; level: string; msg: string }[];
   now: number;
@@ -74,6 +255,7 @@ export interface Status {
 
 export interface ChartPoint { time: number; value: number | null }
 export interface ChartData {
+  symbol?: string;
   candles: { time: number; open: number; high: number; low: number; close: number }[];
   emas: ChartPoint[][];
   emaExtra: ChartPoint[];
@@ -106,10 +288,36 @@ export interface Stats {
   expectancy: number;
   netPnl: number;
   totalFees: number;
+  totalFunding: number;
+  openTrades: number;
+  binance?: {
+    source: string;
+    equity: number | null;
+    walletBalance: number | null;
+    unrealizedPnl: number | null;
+    roiPct: number | null;
+    fees: number;
+    funding: number;
+    realizedPnlBot: number;
+    income: IncomeSummary | null;
+  } | null;
 }
 
-export interface Mtf { timeframes: { tf: string; bull: boolean }[]; atr: number; ribbonBull: boolean; overall: string; bullCount?: number }
-export interface ScreenerData { rows: { symbol: string; state: string }[] }
+export interface Mtf { symbol?: string; timeframes: { tf: string; bull: boolean }[]; atr: number; ribbonBull: boolean; overall: string; bullCount?: number }
+export interface ScreenerData {
+  rows: { symbol: string; full?: string; state: string; volatility?: number; trend?: string; tradable?: boolean }[];
+}
+
+export interface ScannerSettings {
+  enabled: boolean;
+  intervalSec: number;
+  candidates: number;
+  minQuoteVolume24h: number;
+  minRange24hPct: number;
+  minAtrPct: number;
+  minAdx: number;
+  topN: number;
+}
 
 export interface Settings {
   mode: Mode;
@@ -118,8 +326,10 @@ export interface Settings {
   interval: string;
   tradeSizePercent: number;
   leverage: number;
-  paperBalance: number;
+  maxPositions: number;
+  autoScan: boolean;
   feeRate: number;
+  scanner: ScannerSettings;
   emaLengths: number[];
   emaExtraLength: number;
   atrLength: number;
@@ -128,10 +338,23 @@ export interface Settings {
   tp1ClosePct: number;
   tp2ClosePct: number;
   historyDays: number;
-  screenerSymbols: string[];
   dashboardTimeframes: string[];
   keys: {
     testnet: { key: string; secret: string; configured?: boolean };
     live: { key: string; secret: string; configured?: boolean };
   };
+}
+
+export interface Diagnostics {
+  feed: FeedInfo & { reachable: boolean | null; demoFeedAllowed: boolean };
+  ping: { ok: boolean; latencyMs: number; serverTimeOffsetMs: number; error?: string };
+  ws: {
+    market: { connected: boolean; lastMessageAt: number };
+    user: { connected: boolean; lastMessageAt: number; mode: Mode };
+  };
+  engine: { activeSymbols: string[]; lastTickAt: number; lastClosedCandleTime: number };
+  scanner: { at: number; universe: number; analysed: number; selected: string[] };
+  limiter: LimitStatus;
+  account: { source: string | null; at: number; errors: string[] };
+  now: number;
 }

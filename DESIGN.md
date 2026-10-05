@@ -12,7 +12,7 @@ This document is the design spec for the VelocityX dashboard: a **super liquid g
 |---|---|---|
 | 1 | **Glass is a physical sheet** | Five stacked optical layers per panel: tint, backdrop blur + saturation, hairline ring, specular top edge, cursor-tracked sheen. |
 | 2 | **Liquid, never static** | A canvas colour field, drifting aurora bands, morphing metaball blobs, a faint technical mesh, film grain and a vignette — all continuously in motion. |
-| 3 | **Metrics before charts** | The Dashboard holds **no candlestick chart**. It is a metrics deck (KPIs, rings, gauges, hit-rate bars). The trading chart lives in its own *Chart* tab. |
+| 3 | **Metrics before charts** | The Dashboard holds **no candlestick chart** and no manual-asset tiles. It is a metrics deck (KPIs, rings, gauges, hit-rate bars) fed by the scanner + Binance account. The trading chart lives in its own *Chart* tab. |
 | 4 | **The P&L chart is always on screen** | Pinned rail on desktop, docked sheet on tablet/phone — see §5. |
 | 5 | **Every section animates** | Scroll reveal, staggered groups, count-ups, draw-in sparklines, morphing equity curve, sliding segmented thumb, liquid ripples, log slide-ins. |
 | 6 | **Motion is a setting** | A header switch (persisted in `localStorage`, `html[data-motion="off"]`) plus `prefers-reduced-motion` and `prefers-reduced-transparency` support. |
@@ -104,13 +104,16 @@ All layers are `pointer-events: none`, pause when the tab is hidden, render a si
 
 `client/src/components/PnlDock.tsx` + `PnlChart.tsx` + `client/src/pnl.ts`
 
-**Data model.** The server stores raw trades, so the curve is derived client-side:
+**Data model.** The server stores raw trades *and* the Binance account view, so the curve is derived client-side from **Binance-sourced** numbers:
 
 ```
-start equity = current equity − unrealised − Σ realised
-each closed trade  → a step in the curve
-the open trade     → a live unrealised tail
+equity        = Binance account equity (or the labelled paper-sim balance)
+start equity  = equity − unrealised − Σ realised
+each closed trade  → a step in the curve (realised PnL, fees and funding booked from Binance)
+open positions     → live unrealised tail (one tail per managed position)
 ```
+
+External (non-bot) positions never enter this model — they are shown read-only in *Positions* so the curve always describes exactly what the bot did.
 
 `buildPnl()` windows the series (24H / 7D / 30D / ALL), computes net / realised / unrealised, win-rate, average R, best/worst trade, peak and max drawdown, and samples a smoothed curve (`equityCurve()` with a 3-pass smoother) so a short log still reads as a flowing line.
 
@@ -139,17 +142,19 @@ The dock also reacts to the environment: sticky rail scrolls internally when ver
 ## 6. Information architecture
 
 ```
-Topbar       brand · mode badge · offline-feed badge · price pod · equity pod · open-P&L pod · KILL
-Nav row      Dashboard | Chart | Trades | Settings  ·  stream LEDs · Motion switch · Auto-Trade switch
-Ticker       screener states as an infinite marquee
+Topbar       brand · mode badge · feed badge (live / offline / unreachable) · price pod · equity pod · open-P&L pod · KILL
+Nav row      Dashboard | Scanner | Positions | Chart | Trades | Settings  ·  stream LEDs · Motion switch · Auto-Trade switch
+Ticker       scanner rows as an infinite marquee (top volatility first)
 Shell        content column  +  pinned P&L rail (see §5)
 Footer       build identity + connection state + risk reminder
 ```
 
-* **Dashboard** (no candlestick chart): hero summary (equity, total P&L, open R, engine uptime + equity sparkline) → four KPI pods (net P&L, win rate, expectancy, signals) → open position card with the risk ladder → weekly statistics (rings, hit-rate bars, metric grid) → trend engine (semi-circle gauge + timeframe chips) → screener grid → engine health → live activity feed.
+* **Dashboard** (no candlestick chart): hero summary (equity, total P&L, open R, engine uptime + equity sparkline) → four KPI pods (net P&L, win rate, expectancy, signals) → feed banner when the data is not live Binance → managed position cards with the risk ladder → weekly statistics (rings, hit-rate bars, metric grid) → trend engine (semi-circle gauge + timeframe chips) → scanner summary + top picks → engine health (request budget per area) → live activity feed.
+* **Scanner**: ranking table for the whole volatility scan (24h range, ATR%, ADX, trend, funding, score, verdict), score distribution + scan summary, the trade gates as configured, and the engine watchlist.
+* **Positions**: Binance account ledger (equity, available, margin used, unrealised, and the raw `/fapi/v1/income` ledger), bot positions with margin / fees / funding / liquidation ladder and a per-position close button, **external positions read-only**, closed trade table with fees + funding, risk rules, executor feed.
 * **Chart**: candlestick stage with the EMA ribbon (5→34) + EMA 200, signal markers, entry/SL/TP price lines, candle-count selector, per-layer visibility toggles, legend, position card and the signal log.
-* **Trades**: journal summary, full trade table, signal log, activity feed.
-* **Settings**: connection / trading / indicator tabs, guardrails panel, motion panel.
+* **Trades**: journal summary, full trade table (market / fees / funding), signal log, activity feed.
+* **Settings**: connection / markets & sizing / market scanner / indicator tabs, guardrails panel, motion panel — **no manual asset or balance entry field exists**.
 
 ---
 
@@ -162,6 +167,7 @@ Footer       build identity + connection state + risk reminder
 * `ErrorBoundary` isolates the chart module, each view and the P&L dock; chart-library init is wrapped in `try/catch` with a retry.
 * Safe-area insets respected on phones (`env(safe-area-inset-bottom)`).
 * Product copy always states what the bot is doing ("executing signals" vs "signals logged only") and paper/testnet/live is colour-coded.
+* The feed badge is tri-state and never lies: `Binance live feed` only when the exchange WS/REST answered recently, `Offline demo feed` for the labelled synthetic feed, `Feed stale/unreachable` when data cannot be refreshed — with the reason in the banner.
 
 ---
 

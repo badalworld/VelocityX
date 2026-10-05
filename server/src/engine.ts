@@ -1,15 +1,21 @@
 /**
- * Signal engine — syncs closed 5m candles from Binance and fires signals using
- * the indicator's non-repaint rule (EMA2/EMA8 = EMA(11)/EMA(34) confirmed values).
+ * Signal engine — multi-symbol.
  *
- * Only candles that CLOSE AFTER the engine starts are acted on — no backfill,
- * no repainting, no acting on historical crossovers.
+ * Watches every symbol the market scanner selected (top high-volatility
+ * trending markets, ≤ maxPositions) plus the primary chart symbol, and fires
+ * signals from the indicator's non-repaint rule (EMA11/EMA34 confirmed cross)
+ * on closed 5m candles.
+ *
+ * Only candles that CLOSE AFTER a symbol was first watched are acted on — no
+ * backfill, no repainting, no acting on historical crossovers.
  */
 import { api, feedNow } from './binance';
-import { computeSnapshot, signalAt, SignalSide, Candle, screenerState } from './indicators';
+import { computeSnapshot, signalAt, SignalSide, Candle, ema } from './indicators';
 import { getSettings } from './settings';
-import { saveSignal, SignalRecord, allSignals, activeTrade } from './store';
+import { saveSignal, SignalRecord, allSignals, openTradeOn } from './store';
 import { trader, OpenSignal } from './trader';
+import { scanner } from './scanner';
+import { candleStore } from './candles';
 import { emit } from './broadcast';
 
 function rndId(): string {
@@ -22,29 +28,31 @@ export interface IndicatorState {
   lastPrice: number;
   atr: number;
   ribbonBull: boolean;
-  emas: number[]; // current ribbon values
+  emas: number[];
   emaExtra: number;
   lastSignal: SignalRecord | null;
   lastClosedCandleTime: number;
   engineStartedAt: number;
+  tradable?: boolean;
 }
 
 class Engine {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
-  private lastProcessedOpen = 0;
   private startedAt = Date.now();
+  private lastProcessed = new Map<string, number>();
+  private baselined = new Set<string>();
+  private lastOffline: boolean | null = null;
   private klines: Candle[] = [];
   private snapshot: ReturnType<typeof computeSnapshot> | null = null;
   private lastSignalRec: SignalRecord | null = null;
-  private started = false;
-  private lastOffline: boolean | null = null;
+  private lastTickAt = 0;
 
   start(): void {
     if (this.timer) return;
     this.startedAt = Date.now();
     void this.tick(true);
-    this.timer = setInterval(() => void this.tick(), 3000);
+    this.timer = setInterval(() => void this.tick(), 2000);
   }
 
   stop(): void {
@@ -52,71 +60,96 @@ class Engine {
     this.timer = null;
   }
 
+  /** Symbols under the engine's watch right now. */
+  activeSymbols(): string[] {
+    const s = getSettings();
+    const set = new Set<string>([s.symbol]);
+    if (s.autoScan) for (const sym of scanner.activeSymbols()) set.add(sym);
+    for (const sym of trader.managedSymbols()) set.add(sym); // never lose sight of an open position
+    return [...set];
+  }
+
+  lastTick(): number {
+    return this.lastTickAt;
+  }
+
   private async tick(first = false): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
       const s = getSettings();
-      const candles = await api.klines(s.symbol, s.interval, 500, 2500);
-      if (candles.length < 60) return;
+      const symbols = this.activeSymbols();
+      this.lastTickAt = Date.now();
 
       // Feed mode flip (live <-> offline demo): re-baseline, never act on a splice.
       const off = api.isOffline();
       if (this.lastOffline !== null && this.lastOffline !== off) {
-        this.started = false;
+        this.baselined.clear();
+        this.lastProcessed.clear();
         emit('log', { level: 'info', msg: 'Feed mode changed — engine re-baselined (no action on transition candles)' });
       }
       this.lastOffline = off;
 
-      this.klines = candles;
-      const snap = computeSnapshot(candles, s.emaLengths, s.emaExtraLength, s.atrLength);
-      this.snapshot = snap;
+      for (const symbol of symbols) {
+        try {
+          await candleStore.ensure(symbol, s.interval, 500);
+        } catch (e: any) {
+          console.error('[engine] candles', symbol, e?.message || e);
+          continue;
+        }
+        const candles = candleStore.get(symbol, s.interval);
+        if (candles.length < 60) continue;
 
-      // latest *closed* candle (REST includes the currently-forming bar last)
-      const now = feedNow();
-      let idx = candles.length - 1;
-      if (candles[idx].closeTime > now) idx -= 1;
-      if (idx < 5) return;
-      const closed = candles[idx];
+        const snap = computeSnapshot(candles, s.emaLengths, s.emaExtraLength, s.atrLength);
 
-      if (!this.started) {
-        // first run: baseline — never act on candles that closed before start
-        this.lastProcessedOpen = closed.time;
-        this.started = true;
-        if (first) console.log(`[engine] baseline candle ${new Date(closed.time).toISOString()} — waiting for next close`);
-        return;
+        const now = feedNow();
+        let idx = candles.length - 1;
+        if (candles[idx].closeTime > now) idx -= 1;
+        if (idx < 5) continue;
+        const closed = candles[idx];
+
+        if (!this.baselined.has(symbol)) {
+          this.baselined.add(symbol);
+          this.lastProcessed.set(symbol, closed.time);
+          if (first) console.log(`[engine] ${symbol}: baseline candle ${new Date(closed.time).toISOString()} — waiting for next close`);
+          continue;
+        }
+        const prev = this.lastProcessed.get(symbol) ?? 0;
+        if (closed.time <= prev) continue;
+        this.lastProcessed.set(symbol, closed.time);
+
+        // primary symbol keeps the chart snapshot
+        if (symbol === s.symbol) {
+          this.klines = candles;
+          this.snapshot = snap;
+        }
+
+        const sig: SignalSide | null = signalAt(snap.emas[1], snap.emas[7], idx);
+        const atrVal = snap.atrSeries[idx];
+        if (!sig || !Number.isFinite(atrVal)) continue;
+
+        const record: SignalRecord = {
+          id: rndId(),
+          symbol,
+          time: closed.time,
+          detectedAt: Date.now(),
+          side: sig,
+          price: closed.close,
+          atr: atrVal,
+          acted: false,
+          tradeId: null,
+        };
+        saveSignal(record);
+        if (symbol === s.symbol) this.lastSignalRec = record;
+        console.log(`[engine] SIGNAL ${sig} ${symbol} @ ${closed.close} (ATR ${atrVal.toFixed(4)}) candle=${new Date(closed.time).toISOString()}`);
+        emit('signal', { signal: record });
+        emit('log', {
+          level: sig === 'LONG' ? 'win' : 'loss',
+          msg: `${symbol} signal ${sig} @ ${closed.close} — ATR ${atrVal.toFixed(4)}`,
+        });
+
+        await trader.onSignal({ record, side: sig, price: closed.close, atr: atrVal } as OpenSignal);
       }
-      if (closed.time <= this.lastProcessedOpen) return;
-      this.lastProcessedOpen = closed.time;
-
-      // --- non-repaint signal evaluation on the newly closed bar ---
-      const fast = snap.emas[1]; // EMA 11
-      const slow = snap.emas[7]; // EMA 34
-      const sig: SignalSide | null = signalAt(fast, slow, idx);
-      const atrVal = snap.atrSeries[idx];
-      if (!sig || !Number.isFinite(atrVal)) return;
-
-      const record: SignalRecord = {
-        id: rndId(),
-        symbol: s.symbol,
-        time: closed.time,
-        detectedAt: Date.now(),
-        side: sig,
-        price: closed.close,
-        atr: atrVal,
-        acted: false,
-        tradeId: null,
-      };
-      saveSignal(record);
-      this.lastSignalRec = record;
-      console.log(`[engine] SIGNAL ${sig} @ ${closed.close} (ATR ${atrVal.toFixed(4)}) candle=${new Date(closed.time).toISOString()}`);
-      emit('signal', { signal: record });
-      emit('log', {
-        level: sig === 'LONG' ? 'win' : 'loss',
-        msg: `Signal ${sig} @ ${closed.close} — ATR ${atrVal.toFixed(4)}`,
-      });
-
-      await trader.onSignal({ record, side: sig, price: closed.close, atr: atrVal } as OpenSignal);
     } catch (e: any) {
       console.error('[engine]', e?.message || e);
       emit('error', { message: `Engine: ${e?.message || e}` });
@@ -125,44 +158,60 @@ class Engine {
     }
   }
 
-  state(): IndicatorState | null {
-    if (!this.snapshot || this.klines.length === 0) return null;
+  /** Indicator state for a symbol (defaults to the primary chart symbol). */
+  state(symbol?: string): IndicatorState | null {
     const s = getSettings();
-    const snap = this.snapshot;
-    const i = this.klines.length - 1;
-    const last = this.klines[i];
-    const emas = snap.emas.map((a) => a[i]);
-    const bull = emas[7] < emas[1]; // ribbonDir: ema8 < ema2
+    const sym = symbol ?? s.symbol;
+    const candles = candleStore.get(sym, s.interval);
+    if (candles.length < 2) return null;
+    const snap = computeSnapshot(candles, s.emaLengths, s.emaExtraLength, s.atrLength);
+    const i = candles.length - 1;
+    const last = candles[i];
+    const vals = snap.emas.map((a) => a[i]);
+    const bull = vals[7] < vals[1];
     return {
-      symbol: s.symbol,
+      symbol: sym,
       interval: s.interval,
       lastPrice: last.close,
       atr: Number.isFinite(snap.atrSeries[i]) ? snap.atrSeries[i] : snap.atrSeries[i - 1] || 0,
       ribbonBull: bull,
-      emas,
+      emas: vals,
       emaExtra: snap.emaExtra[i],
-      lastSignal: this.lastSignalRec,
-      lastClosedCandleTime: this.klines.length && this.klines[this.klines.length - 1].closeTime <= feedNow()
-        ? this.klines[this.klines.length - 1].time
-        : this.klines.length > 1 ? this.klines[this.klines.length - 2].time : 0,
+      lastSignal: this.lastSignalRec && this.lastSignalRec.symbol === sym ? this.lastSignalRec : null,
+      lastClosedCandleTime: candleStore.closed(sym, s.interval).slice(-1)[0]?.time ?? 0,
       engineStartedAt: this.startedAt,
+      tradable: scanner.result() ? scanner.isTradable(sym) : undefined,
     };
   }
 
+  /** Indicator state for every watched symbol (dashboard + scanner). */
+  states(): Record<string, IndicatorState> {
+    const out: Record<string, IndicatorState> = {};
+    for (const sym of this.activeSymbols()) {
+      const st = this.state(sym);
+      if (st) out[sym] = st;
+    }
+    return out;
+  }
+
   /** Chart payload: candles + ribbon + trade levels (aligned arrays). */
-  chart(limit = 300): any {
+  chart(limit = 300, symbol?: string): any {
     const s = getSettings();
-    const candles = this.klines.slice(-limit);
-    if (!this.snapshot) return { candles: [], emas: [], emaExtra: [], signals: [], trade: null };
-    const start = this.klines.length - candles.length;
-    const ribbon = this.snapshot.emas.map((arr) => arr.slice(start));
-    const extra = this.snapshot.emaExtra.slice(start);
+    const sym = symbol ?? s.symbol;
+    const all = symbol && symbol !== s.symbol ? candleStore.get(sym, s.interval) : this.klines.length ? this.klines : candleStore.get(sym, s.interval);
+    const candles = all.slice(-limit);
+    if (!candles.length) return { symbol: sym, candles: [], emas: [], emaExtra: [], signals: [], trade: null, trades: [] };
+    const snap = computeSnapshot(all, s.emaLengths, s.emaExtraLength, s.atrLength);
+    const start = all.length - candles.length;
+    const ribbon = snap.emas.map((arr) => arr.slice(start));
+    const extra = snap.emaExtra.slice(start);
     const times = new Set(candles.map((c) => c.time));
     const signals = allSignals()
-      .filter((x) => x.symbol === s.symbol && times.has(x.time))
+      .filter((x) => x.symbol === sym && times.has(x.time))
       .map((x) => ({ time: x.time, side: x.side, price: x.price, id: x.id, acted: x.acted }));
-    const t = activeTrade();
+    const t = openTradeOn(sym);
     return {
+      symbol: sym,
       candles: candles.map((c) => ({
         time: Math.floor(c.time / 1000),
         open: c.open, high: c.high, low: c.low, close: c.close,
@@ -172,7 +221,7 @@ class Engine {
       ),
       emaExtra: extra.map((v, k) => ({ time: Math.floor(candles[k].time / 1000), value: Number.isFinite(v) ? v : null })).filter((p) => p.value !== null),
       signals,
-      trade: t && t.symbol === s.symbol ? {
+      trade: t ? {
         side: t.side, entry: t.entryPrice, sl: t.slCurrent, slStage: t.slStage,
         tp1: t.tp1, tp2: t.tp2, tp3: t.tp3, status: t.status,
         tp1Filled: t.tp1Filled, tp2Filled: t.tp2Filled, tp3Filled: t.tp3Filled,
@@ -184,19 +233,20 @@ class Engine {
 export const engine = new Engine();
 
 // ---------------------------------------------------------------------------
-// MTF dashboard + screener (cached, best-effort)
+// MTF dashboard (cached, budget-friendly)
 // ---------------------------------------------------------------------------
 
 let mtfCache: { at: number; data: any } | null = null;
-let screenerCache: { at: number; data: any } | null = null;
 
 /** Port of the indicator's TREND ANALYSIS dashboard. */
-export async function mtfDashboard(): Promise<any> {
+export async function mtfDashboard(symbol?: string): Promise<any> {
   const s = getSettings();
-  if (mtfCache && Date.now() - mtfCache.at < 30000) return mtfCache.data;
+  const sym = symbol ?? s.symbol;
+  const cacheKey = `${sym}`;
+  if (mtfCache && mtfCache.data?.symbol === cacheKey && Date.now() - mtfCache.at < 30_000) return mtfCache.data;
   const tfs = s.dashboardTimeframes;
-  const out: any = { timeframes: [], atr: 0, ribbonBull: false, overall: '—' };
-  const st = engine.state();
+  const out: any = { symbol: sym, timeframes: [], atr: 0, ribbonBull: false, overall: '—' };
+  const st = engine.state(sym);
   if (st) {
     out.atr = st.atr;
     out.ribbonBull = st.ribbonBull;
@@ -205,9 +255,8 @@ export async function mtfDashboard(): Promise<any> {
   for (const tf of tfs) {
     let isBull = false;
     try {
-      const ks = await api.klines(s.symbol, tfToInterval(tf), 300, 30000);
+      const ks = await api.klines(sym, tfToInterval(tf), 300, 30_000);
       const closes = ks.map((c) => c.close);
-      const { ema } = await import('./indicators');
       const f = ema(closes, s.emaLengths[1]);
       const sl = ema(closes, s.emaLengths[7]);
       const i = ks.length - 1;
@@ -220,26 +269,6 @@ export async function mtfDashboard(): Promise<any> {
   out.overall = bull >= Math.ceil(tfs.length / 2) ? 'BULLISH' : 'BEARISH';
   mtfCache = { at: Date.now(), data: out };
   return out;
-}
-
-/** Port of the SCREENER table — Binance perps instead of NSE symbols. */
-export async function screener(): Promise<any> {
-  const s = getSettings();
-  if (screenerCache && Date.now() - screenerCache.at < 45000) return screenerCache.data;
-  const rows: any[] = [];
-  const syms = s.screenerSymbols.slice(0, 9);
-  for (const sym of syms) {
-    try {
-      const ks = await api.klines(sym, '5m', 300, 30000);
-      const state = screenerState(ks, s.emaLengths[1], s.emaLengths[7]);
-      rows.push({ symbol: sym.replace(/USDT$/, ''), state });
-    } catch {
-      rows.push({ symbol: sym.replace(/USDT$/, ''), state: '—' });
-    }
-  }
-  const data = { rows };
-  screenerCache = { at: Date.now(), data };
-  return data;
 }
 
 function tfToInterval(tf: string): string {

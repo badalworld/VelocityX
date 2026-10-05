@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Settings } from '../types';
 import { apiPost } from '../api';
 import { Btn, Panel, Segmented } from '../motion/primitives';
-import { IconAlert, IconCheck, IconChart, IconCoins, IconSettings, IconTrend } from '../motion/Icons';
+import { IconAlert, IconCheck, IconChart, IconCoins, IconRadar, IconSettings, IconTrend } from '../motion/Icons';
 
 /** Deep clone that also works on browsers/patchy webviews without structuredClone. */
 function clone<T>(value: T): T {
@@ -22,11 +22,12 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-type Tab = 'conn' | 'trade' | 'ind';
+type Tab = 'conn' | 'trade' | 'scanner' | 'ind';
 
 const TABS: { value: Tab; label: string; icon: React.ReactNode }[] = [
   { value: 'conn', label: 'Connection', icon: <IconSettings /> },
   { value: 'trade', label: 'Trading', icon: <IconCoins /> },
+  { value: 'scanner', label: 'Scanner', icon: <IconRadar /> },
   { value: 'ind', label: 'Indicator', icon: <IconTrend /> },
 ];
 
@@ -56,16 +57,6 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
       onError(e.message);
     } finally {
       setSaving(false);
-    }
-  };
-
-  const resetPaper = async () => {
-    try {
-      await apiPost('/paper/reset', { balance: draft.paperBalance });
-      onError('');
-      setSavedAt(Date.now());
-    } catch (e: any) {
-      onError(e.message);
     }
   };
 
@@ -166,18 +157,32 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
       {tab === 'trade' && (
         <>
           <div className="settings-sec">
-            <h4>Symbol &amp; sizing</h4>
+            <h4>Markets &amp; sizing</h4>
             <div className="frow">
               <label className="field">
-                <span className="field-label">Futures symbol</span>
+                <span className="field-label">Auto-scan markets (recommended)</span>
+                <select
+                  className="select"
+                  value={draft.autoScan ? 'auto' : 'manual'}
+                  onChange={(e) => set({ autoScan: e.target.value === 'auto' })}
+                >
+                  <option value="auto">Scanner — trade the top trending high-volatility markets</option>
+                  <option value="manual">Manual — only the primary symbol below</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Primary chart symbol</span>
                 <input
                   className="input"
                   value={draft.symbol}
+                  disabled={draft.autoScan}
                   onChange={(e) => set({ symbol: e.target.value.toUpperCase().trim() })}
                 />
               </label>
+            </div>
+            <div className="frow">
               <label className="field">
-                <span className="field-label">Trade size (% of balance)</span>
+                <span className="field-label">Trade size (% of equity per trade)</span>
                 <input
                   className="input"
                   type="number"
@@ -188,8 +193,6 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                   onChange={(e) => set({ tradeSizePercent: Number(e.target.value) })}
                 />
               </label>
-            </div>
-            <div className="frow">
               <label className="field">
                 <span className="field-label">Leverage</span>
                 <select className="select" value={draft.leverage} onChange={(e) => set({ leverage: Number(e.target.value) })}>
@@ -200,26 +203,39 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                   ))}
                 </select>
               </label>
+            </div>
+            <div className="frow">
               <label className="field">
-                <span className="field-label">Paper balance (USDT)</span>
+                <span className="field-label">Max simultaneous positions (hard cap 8)</span>
+                <select
+                  className="select"
+                  value={draft.maxPositions}
+                  onChange={(e) => set({ maxPositions: Math.min(8, Number(e.target.value)) })}
+                >
+                  {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                    <option key={n} value={n}>
+                      {n} position{n > 1 ? 's' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Stats window (days)</span>
                 <input
                   className="input"
                   type="number"
-                  min={10}
-                  value={draft.paperBalance}
-                  onChange={(e) => set({ paperBalance: Number(e.target.value) })}
+                  min={1}
+                  max={365}
+                  value={draft.historyDays}
+                  onChange={(e) => set({ historyDays: Number(e.target.value) })}
                 />
               </label>
             </div>
             <div className="hint">
-              Every trade uses <b>{draft.tradeSizePercent}% of balance</b> as margin × <b>{draft.leverage}x</b> leverage.
-              SL = ATR(14) × {draft.atrSlMultiplier}, TPs at {draft.tpRrFactor}R / {draft.tpRrFactor * 2}R /{' '}
-              {draft.tpRrFactor * 3}R.
-            </div>
-            <div className="row mt">
-              <Btn size="sm" onClick={resetPaper}>
-                Reset paper balance
-              </Btn>
+              Every trade uses <b>{draft.tradeSizePercent}% of equity</b> as margin × <b>{draft.leverage}x</b> leverage, up
+              to <b>{draft.maxPositions}</b> positions. SL = ATR(14) × {draft.atrSlMultiplier}, TPs at {draft.tpRrFactor}R /{' '}
+              {draft.tpRrFactor * 2}R / {draft.tpRrFactor * 3}R. Equity, PNL, ROI, fees and funding are always read from
+              Binance — there is no manual balance to enter.
             </div>
           </div>
 
@@ -255,25 +271,121 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
             </div>
           </div>
 
+        </>
+      )}
+
+      {tab === 'scanner' && (
+        <>
           <div className="settings-sec">
-            <h4>Screener symbols (max 9, comma separated)</h4>
-            <div className="frow one">
+            <h4>Market scanner</h4>
+            <div className="frow">
               <label className="field">
-                <span className="field-label">Watchlist</span>
-                <textarea
-                  className="textarea"
-                  rows={2}
-                  value={draft.screenerSymbols.join(', ')}
-                  onChange={(e) =>
-                    set({
-                      screenerSymbols: e.target.value
-                        .split(',')
-                        .map((x) => x.trim().toUpperCase())
-                        .filter(Boolean),
-                    })
-                  }
+                <span className="field-label">Scanner</span>
+                <select
+                  className="select"
+                  value={draft.scanner.enabled ? 'on' : 'off'}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, enabled: e.target.value === 'on' } })}
+                >
+                  <option value="on">Enabled — sweep the whole USD-M universe</option>
+                  <option value="off">Disabled — manual symbol only</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Scan interval (seconds)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={15}
+                  max={600}
+                  value={draft.scanner.intervalSec}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, intervalSec: Number(e.target.value) } })}
                 />
               </label>
+            </div>
+            <div className="hint">
+              Scans run inside the <b>95% Binance weight budget</b> (2280 of 2400/min) in their own work area, so market
+              data, account data and the executor keep working at full speed.
+            </div>
+          </div>
+
+          <div className="settings-sec">
+            <h4>Trending &amp; volatility gates</h4>
+            <div className="frow two">
+              <label className="field">
+                <span className="field-label">Min 24h quote volume (USDT)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  step={1_000_000}
+                  value={draft.scanner.minQuoteVolume24h}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minQuoteVolume24h: Number(e.target.value) } })}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Min 24h range (%)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={draft.scanner.minRange24hPct}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minRange24hPct: Number(e.target.value) } })}
+                />
+              </label>
+            </div>
+            <div className="frow two">
+              <label className="field">
+                <span className="field-label">Min ATR(14) 15m (% of price)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={draft.scanner.minAtrPct}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minAtrPct: Number(e.target.value) } })}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Min ADX(14) — trending gate</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={draft.scanner.minAdx}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minAdx: Number(e.target.value) } })}
+                />
+              </label>
+            </div>
+            <div className="frow two">
+              <label className="field">
+                <span className="field-label">Candidates analysed per scan</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={8}
+                  max={80}
+                  value={draft.scanner.candidates}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, candidates: Number(e.target.value) } })}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Symbols handed to the engine</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={draft.scanner.topN}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, topN: Math.min(8, Number(e.target.value)) } })}
+                />
+              </label>
+            </div>
+            <div className="hint warn" style={{ display: 'flex', gap: 7 }}>
+              <IconAlert style={{ width: 14, height: 14, flex: 'none', marginTop: 2 }} />
+              Stable / pegged / staked / wrapped / index markets (USDC, FDUSD, BNSOL, WBETH, BTCDOM…) are rejected
+              automatically — the bot only trades trending, volatile directional markets.
             </div>
           </div>
         </>
@@ -335,19 +447,6 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                 step={0.1}
                 value={draft.tpRrFactor}
                 onChange={(e) => set({ tpRrFactor: Number(e.target.value) })}
-              />
-            </label>
-          </div>
-          <div className="frow">
-            <label className="field">
-              <span className="field-label">Stats window (days)</span>
-              <input
-                className="input"
-                type="number"
-                min={1}
-                max={365}
-                value={draft.historyDays}
-                onChange={(e) => set({ historyDays: Number(e.target.value) })}
               />
             </label>
           </div>
