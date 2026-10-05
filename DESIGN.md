@@ -31,11 +31,11 @@ The previous **Chart** navigation item and its BTCUSDT candlestick/EMA stage wer
 
 Views:
 
-* **Dashboard** — feed status, hero, KPIs, managed positions, scanner, statistics, MTF trend, engine health and activity.
+* **Dashboard** — feed status, hero, KPIs, managed positions, scanner, statistics, **MTF trend gauge** (EMA11/EMA34 across 5m/15m/30m with timeframe chips), **execution rules**, engine health and activity. A full-width alert banner (`role="alert"`) appears only while LIVE auto-trading is armed so real-money mode can never be mistaken for paper.
 * **Scanner** — volatility ranking, score distribution, trade gates and watchlist.
 * **Positions** — Binance account ledger, bot positions, external read-only positions, closed trades, fees and funding.
 * **Trades** — journal, signals and executor activity.
-* **Settings** — connection, sizing, scanner, indicator, guardrail and motion controls.
+* **Settings** — connection (mode, keys, **API token**), sizing, scanner, indicator, guardrail and motion controls. Arming LIVE asks for an explicit confirmation before the request is sent.
 
 ---
 
@@ -126,11 +126,20 @@ The background canvas persists through tab visibility changes instead of being c
 * The mobile P&L sheet header supports Enter and Space as well as pointer input.
 * Numeric fields use tabular numerals and layouts use `minmax(0, 1fr)`.
 * Feed labels never claim Binance is live while demo/unreachable data is active.
-* UI smoke tests assert five navigation items, absence of the BTCUSDT chart and `/api/chart` requests, presence of the P&L chart, default motion-off state, no flash classes, and no `NaN` / `Infinity` output.
+* UI smoke tests assert five navigation items, absence of the BTCUSDT chart and `/api/chart` requests, presence of the P&L chart, the MTF gauge with timeframe chips, the execution-rules panel, absence of the live banner in paper mode, the API-token field on the connection tab, default motion-off state, no flash classes, and no `NaN` / `Infinity` output.
 
 ---
 
-## 8. Extending
+## 8. Production hardening (UI contract)
+
+| Surface | Behaviour |
+|---|---|
+| Live trading | Red `role="alert"` banner while LIVE auto-trading is armed; the auto-trade switch asks for confirmation in LIVE mode and sends `confirmLive`. Entering LIVE always lands disarmed (server forces `autoTrade: false`), so arming execution is a second, deliberate action. |
+| Auth | The API token is stored in browser storage and attached to REST (`X-VX-Token`) and WS (`?token=`) calls; a 401 renders a single actionable toast. |
+| Errors | Every panel is inside an `ErrorBoundary`; server-side failures arrive as `error` events and become toasts plus activity-feed rows. |
+| Data honesty | Paper/live/demo/unreachable states are labelled; external positions are shown read-only and never merged into bot numbers. |
+
+## 9. Extending
 
 ```tsx
 <Panel title="My module" icon={<IconPulse />} meta="live">

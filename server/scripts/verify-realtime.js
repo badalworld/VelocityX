@@ -130,24 +130,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const ticker = { lastPrice: trendUp[trendUp.length - 1].close, priceChangePercent: 18, highPrice: trendUp[trendUp.length - 1].close * 1.08, lowPrice: trendUp[0].close * 0.99, quoteVolume: 500_000_000 };
   const gate = { minQuoteVolume24h: 20_000_000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, maxPositions: 8 };
-  const rowTrend = __scanInternals.analyse(mk('ETHUSDT', 'ETH'), ticker, trendUp, trendUp, null, { lastFundingRate: 0.0001, nextFundingTime: Date.now() + 3.6e6 }, gate);
+  const rowTrend = __scanInternals.analyse(mk('ETHUSDT', 'ETH'), ticker, trendUp, trendUp, { lastFundingRate: 0.0001, nextFundingTime: Date.now() + 3.6e6 }, gate);
   assert(rowTrend.tradable, 'trending + volatile market is tradable', rowTrend.reason);
   assert(rowTrend.marketType === 'TRENDING', `classified TRENDING (ADX ${rowTrend.adx.toFixed(1)})`);
 
   const chopTicker = { lastPrice: 100, priceChangePercent: 0.1, highPrice: 100.4, lowPrice: 99.6, quoteVolume: 500_000_000 };
-  const rowChop = __scanInternals.analyse(mk('XRPUSDT', 'XRP'), chopTicker, chop, chop, null, undefined, gate);
+  const rowChop = __scanInternals.analyse(mk('XRPUSDT', 'XRP'), chopTicker, chop, chop, undefined, gate);
   assert(!rowChop.tradable, 'choppy / low-range market is rejected', rowChop.reason);
   assert(rowChop.marketType !== 'TRENDING', `classified ${rowChop.marketType}`);
 
-  const rowPegged = __scanInternals.analyse(mk('USDCUSDT', 'USDC'), { ...ticker, priceChangePercent: 0 }, trendUp, trendUp, null, undefined, gate);
+  const rowPegged = __scanInternals.analyse(mk('USDCUSDT', 'USDC'), { ...ticker, priceChangePercent: 0 }, trendUp, trendUp, undefined, gate);
   assert(!rowPegged.tradable, 'pegged market can never be tradable', rowPegged.reason);
 
   /* ------------------------------------------------------------------ 5 */
   console.log('\n— Volatility ranking —');
   const rows = [
-    __scanInternals.analyse(mk('AAAUSDT', 'AAA'), { lastPrice: 10, priceChangePercent: 30, highPrice: 14, lowPrice: 9, quoteVolume: 100e6 }, trendUp, trendUp, null, undefined, gate),
-    __scanInternals.analyse(mk('BBBUSDT', 'BBB'), { lastPrice: 10, priceChangePercent: 12, highPrice: 11.5, lowPrice: 10, quoteVolume: 100e6 }, trendUp, trendUp, null, undefined, gate),
-    __scanInternals.analyse(mk('CCCUSDT', 'CCC'), { lastPrice: 10, priceChangePercent: 2, highPrice: 10.4, lowPrice: 10, quoteVolume: 100e6 }, trendUp, trendUp, null, undefined, gate),
+    __scanInternals.analyse(mk('AAAUSDT', 'AAA'), { lastPrice: 10, priceChangePercent: 30, highPrice: 14, lowPrice: 9, quoteVolume: 100e6 }, trendUp, trendUp, undefined, gate),
+    __scanInternals.analyse(mk('BBBUSDT', 'BBB'), { lastPrice: 10, priceChangePercent: 12, highPrice: 11.5, lowPrice: 10, quoteVolume: 100e6 }, trendUp, trendUp, undefined, gate),
+    __scanInternals.analyse(mk('CCCUSDT', 'CCC'), { lastPrice: 10, priceChangePercent: 2, highPrice: 10.4, lowPrice: 10, quoteVolume: 100e6 }, trendUp, trendUp, undefined, gate),
   ];
   const ranked = [...rows].sort((a, b) => b.volatility - a.volatility);
   assert(ranked[0].symbol === 'AAAUSDT' && ranked[2].symbol === 'CCCUSDT', 'ranking is volatility descending (max volatility first)',
@@ -190,7 +190,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     orders.push({
       kind,
       symbol: strings.find((x) => /USDT$/.test(x)) || '',
-      qty: args.find((a) => typeof a === 'number') ?? null,
+      // every numeric argument (prices, quantities, leverage) — callers differ
+      nums: args.filter((a) => typeof a === 'number'),
+      qty: args.filter((a) => typeof a === 'number')[0] ?? null,
+      // quantity passed through the order options (protective stops use it)
+      optsQty: typeof opts.qty === 'number' ? opts.qty : null,
+      leverage: typeof opts.leverage === 'number' ? opts.leverage : null,
       reduceOnly: !!opts.reduceOnly || opts.closePosition === true || opts.closePosition === 'true',
       cid: opts.newClientOrderId ?? strings.find((x) => /^VX/.test(x)) ?? null,
     });
@@ -204,8 +209,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   binance.api.setLeverage = async () => ({});
   binance.api.setIsolated = async () => ({});
   binance.api.isDualSide = async () => false;
-  binance.api.accountSnapshot = async () => ({ equity: 1000, walletBalance: 1000, availableBalance: 900, initialMargin: 100, maintMargin: 20, unrealizedPnl: 0 });
-  binance.api.positionAmount = async () => 5;
+  // Clamp the ticker set price to 100 (keeps the ladder' expectations valid)
+  binance.api.positionAmount = async (symbol) => (symbol === 'DOGEUSDT' ? 5000 : 0);
+  binance.api.maxLeverage = async () => 0; // no bracket data in this harness
+  binance.api.accountSnapshot = async () => ({ equity: 1000, walletBalance: 1000, availableBalance: 900, initialMargin: 100, maintMargin: 20, unrealizedPnl: 0, canTrade: true });
   binance.api.positionRisk = async () => [
     { symbol: 'BTCUSDT', positionAmt: 5, entryPrice: 100, markPrice: 101, unrealizedProfit: 5, leverage: 10, liquidationPrice: 90 },
     { symbol: 'DOGEUSDT', positionAmt: 5000, entryPrice: 0.42, markPrice: 0.4, unrealizedProfit: -100, leverage: 5, liquidationPrice: 0.3 },
@@ -224,6 +231,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   assert(orders.some((o) => o.kind === 'market' && o.symbol === 'BTCUSDT'), 'entry order went to the exchange for the bot symbol');
   assert(orders.filter((o) => o.kind === 'market').every((o) => !o.reduceOnly), 'entry orders are not reduceOnly');
   assert(orders.some((o) => o.kind === 'stopMarket' && o.reduceOnly && /^VX/.test(o.cid || '')), 'protective stop is reduceOnly and tagged VX<tradeId>');
+  const stops = orders.filter((o) => o.kind === 'stopMarket');
+  assert(stops.length > 0 && stops.every((o) => (o.optsQty ?? 0) > 0), 'protective stop carries an explicit quantity (never close-all)');
+  assert(!orders.some((o) => o.closePosition === true), 'no order ever uses closePosition (close-all would leak onto external positions)');
 
   const acct = await account.accountService.refresh();
   assert(!!acct, 'account service refreshed against the stubbed exchange');
@@ -241,6 +251,50 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   assert(killOrders.length > 0 && killOrders.every((o) => /^VX/.test(o.cid || '')), 'kill only sends orders tagged with the bot trade id');
   assert(killOrders.every((o) => o.symbol !== 'DOGEUSDT'), 'kill never touches the external DOGEUSDT position');
   assert(orders.every((o) => o.symbol !== 'DOGEUSDT'), 'no order of any kind was ever sent for the external symbol');
+  /* ------------------------------------------------------------------ 8 */
+  console.log('\n— Live-entry production guards —');
+  const mkSignalFor = (symbol, side = 'LONG', price = 100, atr = 1) => ({
+    record: { id: `sig-${symbol}-${Math.random().toString(36).slice(2, 7)}`, symbol, time: Date.now(), detectedAt: Date.now(), side, price, atr, acted: false, tradeId: null },
+    side,
+    price,
+    atr,
+  });
+
+  // (a) a market that already carries someone else's position is refused
+  binance.api.positionAmount = async (symbol) => (symbol === 'ETHUSDT' ? 2 : 0);
+  const beforeEth = orders.length;
+  await trader.onSignal(mkSignalFor('ETHUSDT'));
+  await sleep(80);
+  assert(!store.openTrades().some((t) => t.symbol === 'ETHUSDT'), 'entry refused when an external position already owns the symbol');
+  assert(orders.slice(beforeEth).every((o) => o.symbol !== 'ETHUSDT'), 'no order at all was sent for the guarded symbol');
+
+  // (b) leverage is clamped to the exchange bracket instead of failing the entry
+  binance.api.positionAmount = async () => 0;
+  binance.api.maxLeverage = async () => 3;
+  const levCalls = [];
+  binance.api.setLeverage = async (symbol, lev) => { levCalls.push({ symbol, lev }); return {}; };
+  await trader.onSignal(mkSignalFor('SOLUSDT'));
+  await sleep(150);
+  const sol = store.openTrades().find((t) => t.symbol === 'SOLUSDT');
+  assert(!!sol, 'entry placed with the clamped leverage');
+  assert(!!sol && sol.leverage === 3, `configured 10× clamped to the exchange bracket (${sol?.leverage}×)`);
+  assert(levCalls.some((c) => c.symbol === 'SOLUSDT' && c.lev === 3), 'setLeverage was called with the clamped value');
+
+  // (c) the protective stop's quantity follows the remaining size after TP1
+  const stopsBefore = orders.filter((o) => o.kind === 'stopMarket' && o.symbol === 'SOLUSDT').length;
+  if (sol) trader.fillTP(sol, 1, sol.tp1);
+  await sleep(150);
+  const solStops = orders.filter((o) => o.kind === 'stopMarket' && o.symbol === 'SOLUSDT');
+  const lastStop = solStops[solStops.length - 1] || { optsQty: null };
+  const remaining = sol ? store.remainingQtyOf(sol) : 0;
+  assert(solStops.length > stopsBefore, 'SL re-armed after TP1');
+  assert(solStops.length > 0 && Math.abs((lastStop.optsQty ?? -1) - remaining) < 1e-9, `re-armed stop quantity = remaining size (${lastStop.optsQty} ≈ ${remaining})`);
+  assert(solStops.length > 0 && (lastStop.optsQty ?? 0) < (sol?.qty ?? 0), 're-armed stop is smaller than the original size (never over-closes)');
+
+  await trader.kill();
+  await sleep(60);
+  assert(store.openTrades().length === 0, 'guard tests cleaned up the journal');
+
   settings.updateSettings({ mode: 'paper', autoTrade: false });
   void acctJson;
 

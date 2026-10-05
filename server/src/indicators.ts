@@ -152,17 +152,3 @@ export function computeSnapshot(candles: Candle[], emaLengths: number[], extraLe
   const atrSeries = atr(candles, atrLen);
   return { candles, emas, emaExtra, atrSeries };
 }
-
-/** Signal state for the screener: Bullish/Bearish bias + fresh cross (same logic, current bar). */
-export function screenerState(candles: Candle[], fastLen: number, slowLen: number): 'Long' | 'Short' | 'Bullish' | 'Bearish' {
-  const closes = candles.map((c) => c.close);
-  const f = ema(closes, fastLen);
-  const s = ema(closes, slowLen);
-  const i = candles.length - 1;
-  const sig = signalAt(f, s, i);
-  if (sig === 'LONG') return 'Long';
-  if (sig === 'SHORT') return 'Short';
-  const fi = f[i], si = s[i];
-  if (Number.isFinite(fi) && Number.isFinite(si)) return fi > si ? 'Bullish' : 'Bearish';
-  return 'Bearish';
-}

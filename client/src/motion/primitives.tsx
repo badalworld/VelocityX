@@ -392,29 +392,6 @@ export function LiquidLoader({ label }: { label?: string }) {
 }
 
 /* ---------- mini stat tile ---------------------------------------------- */
-export function Mini({
-  k,
-  v,
-  tone,
-  hint,
-  reveal,
-}: {
-  k: ReactNode;
-  v: ReactNode;
-  tone?: 'green' | 'red' | 'cyan' | 'amber' | 'violet';
-  hint?: ReactNode;
-  reveal?: boolean;
-}) {
-  return (
-    <div className="mini" data-reveal={reveal ? 'true' : undefined}>
-      <div className="k">{k}</div>
-      <div className={`v ${tone ? `t-${tone}` : ''}`}>{v}</div>
-      {hint ? <div className="hint">{hint}</div> : null}
-    </div>
-  );
-}
-
-/* ---------- distribution bar ------------------------------------------- */
 export function BarRow({
   label,
   pct,

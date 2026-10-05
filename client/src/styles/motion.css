@@ -158,19 +158,6 @@
   }
 }
 
-@keyframes slide-in-right {
-  0% {
-    opacity: 0;
-    transform: translateX(28px) scale(0.97);
-    filter: blur(8px);
-  }
-  100% {
-    opacity: 1;
-    transform: none;
-    filter: blur(0);
-  }
-}
-
 @keyframes log-in {
   0% {
     opacity: 0;
@@ -187,18 +174,6 @@
   }
 }
 
-@keyframes ring-sweep {
-  from {
-    stroke-dashoffset: var(--ring-len);
-  }
-}
-
-@keyframes bar-grow {
-  from {
-    transform: scaleX(0);
-  }
-}
-
 @keyframes dot-ping {
   0% {
     transform: scale(0.7);
@@ -211,16 +186,6 @@
   100% {
     transform: scale(2.4);
     opacity: 0;
-  }
-}
-
-@keyframes candle-breathe {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 0.8;
   }
 }
 
@@ -291,37 +256,6 @@
 /* only run the stagger once the group is on screen */
 [data-reveal-group]:not(.is-in) > * {
   animation-play-state: paused;
-}
-
-/* ---------- utility animations ------------------------------------------- */
-.anim-pop { animation: pop-in var(--t-slow) var(--ease-spring) both; }
-.anim-drop { animation: drop-in var(--t-slow) var(--ease-spring) both; }
-.anim-rise { animation: rise-in var(--t-lazy) var(--ease-liquid) both; }
-.anim-slide-right { animation: slide-in-right var(--t-slow) var(--ease-liquid) both; }
-.anim-float { animation: float-y 5.5s var(--ease-inout) infinite; }
-.anim-spin-slow { animation: spin-angle 9s linear infinite; }
-.d1 { animation-delay: 80ms; }
-.d2 { animation-delay: 160ms; }
-.d3 { animation-delay: 240ms; }
-.d4 { animation-delay: 320ms; }
-.d5 { animation-delay: 400ms; }
-.d6 { animation-delay: 480ms; }
-
-.shimmer-line {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.shimmer-line::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 38%;
-  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.22), transparent);
-  animation: sheen-sweep 3.6s var(--ease-inout) infinite;
 }
 
 /* ---------- reduced motion / motion switch ------------------------------- */

@@ -57,6 +57,16 @@ All defaults are pre-filled and editable in **Settings → INDICATOR**.
 
 Rounding is lot-step aware; on exchange minimum-lot symbols the ladder degrades gracefully to a single full exit at TP3.
 
+**Ownership guarantees (production hardened)**
+
+| Guarantee | How it is enforced |
+|---|---|
+| The bot never touches a manual position | Every exit order is `reduceOnly` with an **explicit quantity** equal to the bot's own remaining size — `closePosition`/close-all is never used, so a stop can only ever shrink the bot's own quantity. |
+| The bot never opens a market someone else is trading | Before an entry the executor reads `positionRisk`; a non-zero position it did not open **blocks the entry** for that symbol. |
+| The bot never over-leverages | `/fapi/v1/leverageBracket` clamps the configured leverage per symbol instead of failing the entry. |
+| Duplicate signals cannot double-open | One entry round-trip per symbol at a time (`entering` guard). |
+| A bad key cannot start trading | `canTrade: false` from Binance aborts the entry with a logged reason. |
+
 ---
 
 ## Quick start
@@ -72,9 +82,10 @@ Development: `npm run dev:server` (tsc watch) + `npm run dev:client` (vite on :5
 ### Tests
 
 ```bash
-npm test --prefix server            # unit smoke (indicators, ladder sizes)
+npm test --prefix server            # indicator maths vs. independent Python vectors + ladder sizes
 npm run test:e2e --prefix server    # paper state machine + the 8-position cap
-npm run test:realtime --prefix server  # 95% budget, order rate, scanner gates, ownership
+npm run test:realtime --prefix server  # 95% budget, order rate, scanner gates, ownership guards
+npm run test:api --prefix server    # boots the real server: token auth, live arming, 404s, shutdown
 npm run verify:binance --prefix server # real exchange + WS + dashboard path (needs egress)
 npm run smoke:ui --prefix client    # headless dashboard render (fixtures)
 VX_API=http://localhost:4000 npm run smoke:ui --prefix client -- --live
@@ -86,7 +97,7 @@ VX_API=http://localhost:4000 npm run smoke:ui --prefix client -- --live
 2. **TESTNET** — real orders on [testnet.binancefuture.com](https://testnet.binancefuture.com) with free test USDT. Generate keys: log in on the testnet site → *API Management*.
 3. **LIVE** — real mainnet orders. Configure your Binance API keys first (enable Futures, prefer IP-restricted keys).
 
-Keys can be entered in the dashboard or via environment variables:
+Keys can be entered in the dashboard or via environment variables (see `.env.example`):
 
 ```bash
 BINANCE_TESTNET_KEY=...      BINANCE_TESTNET_SECRET=...
@@ -94,9 +105,24 @@ BINANCE_LIVE_KEY=...         BINANCE_LIVE_SECRET=...
 BINANCE_MODE=paper           # paper | testnet | live
 BINANCE_SYMBOL=BTCUSDT
 PORT=4000
+VX_HOST=0.0.0.0              # bind address
+VX_API_TOKEN=...             # optional: require this token on the API + WS
+VX_ALLOW_LIVE=1              # required to resume a persisted LIVE config at boot
+VX_OFFLINE_DEMO=1            # optional: labelled synthetic feed when Binance is unreachable
+VX_DATA_DIR=./server/data    # journal/settings location
 ```
 
-Dashboard settings override env vars. Keys are stored in `server/data/settings.json` (never committed), masked in the UI and API responses.
+Dashboard settings override env vars. Keys are stored in `server/data/settings.json` (never committed, written `0600`), masked in the UI and every API response.
+
+### Production safety (real money)
+
+1. **Live arming is a three-step action.** Switching to LIVE needs an explicit confirmation in the UI, which the client echoes to the server as `confirmLive: true` — and the server then forces auto-trading **OFF** no matter what the request body said. Enabling auto-trading while LIVE is a separate `POST /api/autotrade` that again requires `confirmLive: true`. A stray POST, a stale tab or a script cannot move real funds by itself; the bot always spends at least one deliberate action disarmed.
+2. **Restarts never resume live trading silently.** If `mode: live` is persisted but `VX_ALLOW_LIVE=1` is not set, the server boots in PAPER with auto-trade OFF and says so in the log/activity feed.
+3. **API token.** Set `VX_API_TOKEN` and every REST route (except the tiny unauthenticated `/api/health` probe) plus the WebSocket upgrade requires it (`X-VX-Token` header for REST, `?token=` for the socket). Enter the same token in **Settings → Connection**; it is kept in browser storage only. The server logs a loud warning when it runs without a token, because this API can place orders and holds exchange keys.
+4. **Rate limiting** on every state-changing route (60/min, burst 20, per IP) so a stuck client cannot hammer the kill switch or consume the exchange order budget.
+5. **Graceful shutdown** on SIGINT/SIGTERM: feeds and timers stop, sockets close, and protective SL/TP orders are deliberately **left armed on the exchange** — a restart must never leave a position naked.
+6. **Journals are never silently lost.** A corrupt `trades.json`/`signals.json` is moved to `<name>.corrupt-<ts>` and reported instead of being overwritten with defaults.
+7. **Unhandled errors surface in the UI** activity feed, and `uncaughtException` exits the process instead of trading on undefined state.
 
 ### Operating sequence
 
@@ -141,12 +167,18 @@ The dashboard UI is documented in **[DESIGN.md](DESIGN.md)** — tokens, glass l
 
 ### API surface
 
-`GET /api/health` · `/api/status` · `/api/account` · `/api/positions` · `/api/income` · `/api/chart` ·
+`GET /api/health` (public) · `/api/status` · `/api/account` · `/api/positions` · `/api/income` ·
 `/api/scanner` · `/api/limits` · `/api/diagnostics` · `/api/settings` · `/api/trades` · `/api/signals` · `/api/stats` · `/api/mtf`
 
-`POST /api/scanner/scan` · `/api/settings` · `/api/autotrade` · `/api/kill` · `/api/positions/close`
+Unknown `/api/*` paths answer JSON `404` (never the SPA shell). The retired `/api/chart` and
+`/api/screener` endpoints were removed together with the dead client code that used to call them.
 
-`WS /ws` — price ticks, account updates, scanner rows, signals, trade events, activity log.
+`POST /api/scanner/scan` · `/api/settings` · `/api/autotrade` · `/api/kill` · `/api/positions/close`
+(all state-changing routes are rate limited; `/api/settings` and `/api/autotrade` need `confirmLive: true`
+when the action arms real-money trading, and every `/api/*` route needs the token when `VX_API_TOKEN` is set)
+
+`WS /ws` — price ticks, account updates, scanner rows, signals, trade events, activity log
+(`?token=…` when `VX_API_TOKEN` is set).
 
 ---
 
@@ -156,7 +188,7 @@ Five views behind one sticky, frosted header:
 
 | View | Contents |
 |---|---|
-| **Dashboard** | Metrics deck: hero summary, net P&L / win rate / expectancy / signal KPIs, open positions with the live risk ladder, weekly statistics, MTF trend, scanner summary, engine health and activity feed. |
+| **Dashboard** | Metrics deck: hero summary, net P&L / win rate / expectancy / signal KPIs, open positions with the live risk ladder, weekly statistics, the MTF EMA11/EMA34 gauge across 5m/15m/30m, execution rules, scanner summary, engine health and activity feed. A red banner is shown while LIVE auto-trading is armed. |
 | **Scanner** | The volatility ranking table, scan summary, trade gates and engine watchlist. |
 | **Positions** | Binance account ledger, managed positions, **external positions listed read-only**, closed trades, fees, funding and risk rules. |
 | **Trades** | Journal summary, full trade table, signal log and activity feed. |

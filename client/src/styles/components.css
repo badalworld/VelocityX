@@ -222,22 +222,6 @@
   font-weight: 800;
 }
 
-.t-green {
-  color: var(--green);
-}
-.t-red {
-  color: var(--red);
-}
-.t-cyan {
-  color: var(--cyan);
-}
-.t-amber {
-  color: var(--amber);
-}
-.t-violet {
-  color: var(--violet);
-}
-
 .btn.is-active {
   border-color: rgba(62, 240, 255, 0.5);
   background-image: linear-gradient(120deg, rgba(62, 240, 255, 0.24), rgba(91, 157, 255, 0.18));
@@ -247,12 +231,6 @@
 
 .save-btn {
   min-width: 172px;
-}
-
-.trend {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
 /* ---------- panel icon micro-interactions ------------------------------ */
@@ -442,8 +420,7 @@
 }
 
 @media (max-width: 620px) {
-  .grid-4,
-  .grid-auto {
+  .grid-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

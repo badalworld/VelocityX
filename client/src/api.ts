@@ -1,18 +1,57 @@
+/**
+ * Browser API client.
+ *
+ * `VX_API_TOKEN` on the server turns on token auth for the REST API and the
+ * WebSocket. The token is stored locally (never sent anywhere except this
+ * server) and can be entered in Settings → Connection.
+ */
+
+const TOKEN_KEY = 'vx.apiToken';
+
+export function getApiToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setApiToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* private mode / storage disabled — the in-memory header still works */
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getApiToken();
+  return token ? { 'X-VX-Token': token } : {};
+}
+
+function fail(r: Response, j: any): never {
+  if (r.status === 401) {
+    throw new Error('Unauthorised — enter the API token in Settings → Connection');
+  }
+  throw new Error((j as any)?.error || `HTTP ${r.status}`);
+}
+
 export async function apiGet<T = any>(path: string): Promise<T> {
-  const r = await fetch(`/api${path}`);
+  const r = await fetch(`/api${path}`, { headers: authHeaders() });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((j as any).error || `HTTP ${r.status}`);
+  if (!r.ok) fail(r, j);
   return j as T;
 }
 
 export async function apiPost<T = any>(path: string, body?: any): Promise<T> {
   const r = await fetch(`/api${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body ?? {}),
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((j as any).error || `HTTP ${r.status}`);
+  if (!r.ok) fail(r, j);
   return j as T;
 }
 

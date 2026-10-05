@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Settings } from '../types';
-import { apiPost } from '../api';
+import { apiPost, getApiToken, setApiToken } from '../api';
 import { Btn, Panel, Segmented } from '../motion/primitives';
 import { IconAlert, IconCheck, IconChart, IconCoins, IconRadar, IconSettings, IconTrend } from '../motion/Icons';
 
@@ -36,6 +36,12 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [tab, setTab] = useState<Tab>('trade');
+  // API access token lives in localStorage only — it is never part of the
+  // traded settings document and never leaves this origin.
+  const [token, setToken] = useState(() => getApiToken());
+  const [tokenSaved, setTokenSaved] = useState(false);
+  const [liveConfirmed, setLiveConfirmed] = useState(false);
+  const [liveNotice, setLiveNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (settings) setDraft(clone(settings));
@@ -50,14 +56,41 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
   const save = async () => {
     setSaving(true);
     try {
-      const saved = await apiPost<Settings>('/settings', { ...draft });
+      // Arming LIVE (real money) is a two-step action: an explicit confirmation
+      // here, echoed to the server as confirmLive so a stray POST cannot do it.
+      const armingLive = draft.mode === 'live' && settings?.mode !== 'live';
+      if (armingLive && !liveConfirmed) {
+        const ok = window.confirm(
+          'Switch to LIVE mainnet?\n\nReal orders will be placed on your Binance account when auto-trading is on. Test on paper and testnet first.',
+        );
+        if (!ok) {
+          setSaving(false);
+          return;
+        }
+        setLiveConfirmed(true);
+      }
+      const saved = await apiPost<Settings>('/settings', { ...draft, confirmLive: armingLive });
       onSaved(saved);
+      setLiveConfirmed(false);
+      // The server always lands LIVE disarmed; say so instead of leaving the
+      // user wondering why the auto-trade switch flipped back off.
+      setLiveNotice(
+        armingLive && saved.mode === 'live'
+          ? 'LIVE armed — auto-trading is OFF. Switch it on from the header when you are ready to execute.'
+          : null,
+      );
       setSavedAt(Date.now());
     } catch (e: any) {
       onError(e.message);
     } finally {
       setSaving(false);
     }
+  };
+
+  const saveToken = () => {
+    setApiToken(token.trim());
+    setTokenSaved(true);
+    window.setTimeout(() => setTokenSaved(false), 4000);
   };
 
   const justSaved = savedAt != null && Date.now() - savedAt < 4000;
@@ -78,7 +111,15 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
             <div className="frow one">
               <label className="field">
                 <span className="field-label">Mode</span>
-                <select className="select" value={draft.mode} onChange={(e) => set({ mode: e.target.value as Settings['mode'] })}>
+                <select
+                  className="select"
+                  value={draft.mode}
+                  onChange={(e) => {
+                    const next = e.target.value as Settings['mode'];
+                    if (next === 'live' && !window.confirm('Select LIVE mainnet? Real funds are at risk. Confirm to continue.')) return;
+                    set({ mode: next });
+                  }}
+                >
                   <option value="paper">Paper — simulate fills on live prices (safe)</option>
                   <option value="testnet">Binance Futures Testnet — real test orders</option>
                   <option value="live">🔴 LIVE Mainnet — real money</option>
@@ -120,6 +161,31 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                 <IconCheck style={{ width: 13, height: 13, color: 'var(--green)' }} /> keys configured (masked)
               </div>
             )}
+          </div>
+
+          <div className="settings-sec">
+            <h4>Dashboard API access</h4>
+            <div className="frow one">
+              <label className="field">
+                <span className="field-label">API token (server VX_API_TOKEN)</span>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder="leave empty when the server has no token"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                />
+              </label>
+            </div>
+            <div className="row mt" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Btn size="sm" onClick={saveToken}>
+                {tokenSaved ? 'Token saved — reconnecting' : 'Save token'}
+              </Btn>
+              <span className="hint">
+                Stored only in this browser. Set <span className="mono">VX_API_TOKEN</span> on the server to require it for
+                every API call, the WebSocket and the kill switch.
+              </span>
+            </div>
           </div>
 
           <div className="settings-sec">
@@ -476,6 +542,7 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
           )}
         </Btn>
         {justSaved && <span className="chip green">applied to the engine</span>}
+        {liveNotice && <span className="chip amber">{liveNotice}</span>}
       </div>
     </Panel>
   );

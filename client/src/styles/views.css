@@ -157,11 +157,6 @@
   background: var(--violet-dim);
   border-color: rgba(168, 116, 255, 0.3);
 }
-.kpi.tone-amber .kpi-ico {
-  color: var(--amber);
-  background: var(--amber-dim);
-  border-color: rgba(255, 200, 87, 0.3);
-}
 
 .kpi-label {
   font-size: 10px;
@@ -196,15 +191,6 @@
   justify-content: space-between;
   gap: 10px;
   margin-top: auto;
-}
-
-.kpi-delta {
-  font-size: 11px;
-  font-weight: 800;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-variant-numeric: tabular-nums;
 }
 
 .hero .kpi-spark {
@@ -242,9 +228,6 @@
 }
 .kpi.tone-violet .kpi-glow {
   background: radial-gradient(circle, rgba(168, 116, 255, 0.24), transparent 68%);
-}
-.kpi.tone-amber .kpi-glow {
-  background: radial-gradient(circle, rgba(255, 200, 87, 0.2), transparent 68%);
 }
 
 /* ---------------------------------------------------------------------------
@@ -743,10 +726,22 @@
 
 .lad-row .lad-fill {
   position: absolute;
-  inset: 0;
+  left: 0;
+  top: 0;
+  bottom: 0;
   border-radius: inherit;
   transform-origin: left center;
   transition: width 900ms var(--ease-liquid);
+}
+
+/* wet-glass highlight so the progress bar reads as liquid, not a flat chip */
+.lad-row .lad-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35));
+  opacity: 0.5;
 }
 
 .lad-row .lad-px {
@@ -787,10 +782,6 @@
 
 .lad-row.lvl-sl.lvl-be .lad-fill {
   background: linear-gradient(90deg, rgba(255, 200, 87, 0.9), rgba(255, 226, 150, 0.7));
-}
-
-.lad-row.lvl-sl.lvl-tp1 .lad-fill {
-  background: linear-gradient(90deg, rgba(91, 157, 255, 0.9), rgba(62, 240, 255, 0.7));
 }
 
 .lad-row.lvl-tp .lad-fill {
@@ -1120,12 +1111,6 @@
   white-space: nowrap;
 }
 
-.pnl-mini .mini-spark {
-  flex: 1 1 auto;
-  height: 30px;
-  min-width: 40px;
-}
-
 @media (max-width: 1080px) {
   .pnl-mini {
     display: flex;
@@ -1205,7 +1190,6 @@
   transition: width 120ms linear;
   pointer-events: none;
 }
-
 
 /* ---------------------------------------------------------------------------
    Binance realtime additions

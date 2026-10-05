@@ -10,9 +10,9 @@
  * backfill, no repainting, no acting on historical crossovers.
  */
 import { api, feedNow } from './binance';
-import { computeSnapshot, signalAt, SignalSide, Candle, ema } from './indicators';
+import { computeSnapshot, signalAt, SignalSide, ema } from './indicators';
 import { getSettings } from './settings';
-import { saveSignal, SignalRecord, allSignals, openTradeOn } from './store';
+import { saveSignal, SignalRecord } from './store';
 import { trader, OpenSignal } from './trader';
 import { scanner } from './scanner';
 import { candleStore } from './candles';
@@ -43,8 +43,6 @@ class Engine {
   private lastProcessed = new Map<string, number>();
   private baselined = new Set<string>();
   private lastOffline: boolean | null = null;
-  private klines: Candle[] = [];
-  private snapshot: ReturnType<typeof computeSnapshot> | null = null;
   private lastSignalRec: SignalRecord | null = null;
   private lastTickAt = 0;
 
@@ -118,12 +116,6 @@ class Engine {
         if (closed.time <= prev) continue;
         this.lastProcessed.set(symbol, closed.time);
 
-        // primary symbol keeps the chart snapshot
-        if (symbol === s.symbol) {
-          this.klines = candles;
-          this.snapshot = snap;
-        }
-
         const sig: SignalSide | null = signalAt(snap.emas[1], snap.emas[7], idx);
         const atrVal = snap.atrSeries[idx];
         if (!sig || !Number.isFinite(atrVal)) continue;
@@ -194,40 +186,6 @@ class Engine {
     return out;
   }
 
-  /** Chart payload: candles + ribbon + trade levels (aligned arrays). */
-  chart(limit = 300, symbol?: string): any {
-    const s = getSettings();
-    const sym = symbol ?? s.symbol;
-    const all = symbol && symbol !== s.symbol ? candleStore.get(sym, s.interval) : this.klines.length ? this.klines : candleStore.get(sym, s.interval);
-    const candles = all.slice(-limit);
-    if (!candles.length) return { symbol: sym, candles: [], emas: [], emaExtra: [], signals: [], trade: null, trades: [] };
-    const snap = computeSnapshot(all, s.emaLengths, s.emaExtraLength, s.atrLength);
-    const start = all.length - candles.length;
-    const ribbon = snap.emas.map((arr) => arr.slice(start));
-    const extra = snap.emaExtra.slice(start);
-    const times = new Set(candles.map((c) => c.time));
-    const signals = allSignals()
-      .filter((x) => x.symbol === sym && times.has(x.time))
-      .map((x) => ({ time: x.time, side: x.side, price: x.price, id: x.id, acted: x.acted }));
-    const t = openTradeOn(sym);
-    return {
-      symbol: sym,
-      candles: candles.map((c) => ({
-        time: Math.floor(c.time / 1000),
-        open: c.open, high: c.high, low: c.low, close: c.close,
-      })),
-      emas: ribbon.map((arr) =>
-        arr.map((v, k) => ({ time: Math.floor(candles[k].time / 1000), value: Number.isFinite(v) ? v : null })).filter((p) => p.value !== null),
-      ),
-      emaExtra: extra.map((v, k) => ({ time: Math.floor(candles[k].time / 1000), value: Number.isFinite(v) ? v : null })).filter((p) => p.value !== null),
-      signals,
-      trade: t ? {
-        side: t.side, entry: t.entryPrice, sl: t.slCurrent, slStage: t.slStage,
-        tp1: t.tp1, tp2: t.tp2, tp3: t.tp3, status: t.status,
-        tp1Filled: t.tp1Filled, tp2Filled: t.tp2Filled, tp3Filled: t.tp3Filled,
-      } : null,
-    };
-  }
 }
 
 export const engine = new Engine();

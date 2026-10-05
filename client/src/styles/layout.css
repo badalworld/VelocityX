@@ -313,7 +313,6 @@
   border-color: rgba(255, 79, 116, 0.3);
 }
 
-
 /* ---------------------------------------------------------------------------
    Ticker (marquee)
    ------------------------------------------------------------------------- */
@@ -459,28 +458,11 @@
   align-items: start;
 }
 
-.grid-3 {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: clamp(12px, 1.5vw, 18px);
-  align-items: start;
-}
-
 .grid-4 {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: clamp(10px, 1.2vw, 16px);
   align-items: stretch;
-}
-
-.grid-auto {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: clamp(10px, 1.2vw, 16px);
-}
-
-.span-2 {
-  grid-column: span 2;
 }
 
 /* ---------------------------------------------------------------------------
@@ -673,13 +655,8 @@
 }
 
 @media (max-width: 860px) {
-  .grid-2,
-  .grid-3 {
+  .grid-2 {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .span-2 {
-    grid-column: span 1;
   }
 
   .brand-sub {
@@ -702,8 +679,7 @@
     padding: 10px 10px 130px;
   }
 
-  .grid-4,
-  .grid-auto {
+  .grid-4 {
     grid-template-columns: minmax(0, 1fr);
   }
 

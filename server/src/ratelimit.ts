@@ -78,8 +78,6 @@ const AREA_SHARE: Record<Area, number> = {
 const WINDOW_MS = 60_000;
 const TICK_MS = 200;
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
 class BinanceLimiter {
   private entries: Entry[] = [];
   private orderStamps: number[] = []; // ms timestamps of order-endpoint calls
@@ -92,6 +90,7 @@ class BinanceLimiter {
   private headerUsedWeight = 0;
   private headerAt = 0;
   private headerUsedOrders = 0;
+  private headerOrdersAt = 0;
   private timer: NodeJS.Timeout | null = null;
   private perArea = new Map<Area, { calls: number; waitMs: number; maxWaitMs: number }>();
   private totals = { calls: 0, waitMs: 0, maxWaitMs: 0, throttled: 0, rejected429: 0 };
@@ -124,11 +123,17 @@ class BinanceLimiter {
     }
     // Fold in the exchange-reported figure when it is higher than our estimate.
     if (!area && now - this.headerAt < WINDOW_MS) sum = Math.max(sum, this.headerUsedWeight);
-    void now;
     return sum;
   }
 
-  private areaCap(area: Area, globalUsed: number, now: number): number {
+  /** Orders counted in the last minute (local stamps + the exchange header). */
+  private usedOrders1m(now: number): number {
+    const local = this.orderStamps.filter((t) => now - t < WINDOW_MS).length;
+    if (now - this.headerOrdersAt < WINDOW_MS) return Math.max(local, this.headerUsedOrders);
+    return local;
+  }
+
+  private areaCap(area: Area, globalUsed: number): number {
     const cap = this.weightCap();
     const share = AREA_SHARE[area];
     // borrow up to 2× own share while the global pool is below 60% utilisation
@@ -160,7 +165,7 @@ class BinanceLimiter {
       const globalUsed = this.usedWeight(now);
       const areaUsed = this.usedWeight(now, w.area);
       const cap = this.weightCap();
-      if (globalUsed + w.weight > cap || areaUsed + w.weight > this.areaCap(w.area, globalUsed, now)) {
+      if (globalUsed + w.weight > cap || areaUsed + w.weight > this.areaCap(w.area, globalUsed)) {
         i += 1;
         continue;
       }
@@ -180,7 +185,9 @@ class BinanceLimiter {
 
   private orderSlotFree(now: number, pad = 0): boolean {
     const in10 = this.orderStamps.filter((t) => now - t < 10_000).length + pad;
-    const in60 = this.orderStamps.filter((t) => now - t < WINDOW_MS).length + pad;
+    // The 1-minute figure also honours X-MBX-ORDER-COUNT-1M, so orders placed by
+    // another process sharing the same IP can never push us past the limit.
+    const in60 = this.usedOrders1m(now) + pad;
     return in10 < ORDER_BUDGET_10S && in60 < ORDER_BUDGET_1M;
   }
 
@@ -196,7 +203,7 @@ class BinanceLimiter {
     if (now >= this.cooldownUntil) {
       const globalUsed = this.usedWeight(now);
       const areaUsed = this.usedWeight(now, area);
-      if (globalUsed + w <= this.weightCap() && areaUsed + w <= this.areaCap(area, globalUsed, now)) {
+      if (globalUsed + w <= this.weightCap() && areaUsed + w <= this.areaCap(area, globalUsed)) {
         this.entries.push({ t: now, w, area });
         const st = this.perArea.get(area)!;
         st.calls += 1;
@@ -258,7 +265,10 @@ class BinanceLimiter {
       const o = get('x-mbx-order-count-1m');
       if (o) {
         const used = Number(o);
-        if (Number.isFinite(used)) this.headerUsedOrders = used;
+        if (Number.isFinite(used)) {
+          this.headerUsedOrders = used;
+          this.headerOrdersAt = Date.now();
+        }
       }
     } catch {
       /* header accounting is best-effort */
@@ -307,7 +317,7 @@ class BinanceLimiter {
         area,
         sharePct: Number((AREA_SHARE[area] * 100).toFixed(1)),
         weightUsed: this.usedWeight(now, area),
-        weightCap: Math.round(this.areaCap(area, globalUsed, now)),
+        weightCap: Math.round(this.areaCap(area, globalUsed)),
         calls: st.calls,
         waiting: this.waiters.filter((w) => w.area === area).length,
         avgWaitMs: st.calls ? Math.round(st.waitMs / st.calls) : 0,
@@ -319,7 +329,7 @@ class BinanceLimiter {
       utilizationPct: Number(((cap / EXCHANGE_WEIGHT_LIMIT_1M) * 100).toFixed(1)),
       usedWeight: used,
       usedPct: Number(((used / EXCHANGE_WEIGHT_LIMIT_1M) * 100).toFixed(1)),
-      usedOrders1m: this.orderStamps.filter((t) => now - t < WINDOW_MS).length,
+      usedOrders1m: this.usedOrders1m(now),
       orderLimitPerMin: ORDER_BUDGET_1M,
       usedOrders10s: this.orderStamps.filter((t) => now - t < 10_000).length,
       orderLimit10s: ORDER_BUDGET_10S,
@@ -351,15 +361,11 @@ export const ENDPOINT_WEIGHT = {
   time: 1, // /fapi/v1/time
   exchangeInfo: 1, // /fapi/v1/exchangeInfo
   klines: klineWeight, // /fapi/v1/klines (by limit)
-  tickerPrice: 1, // single symbol
-  tickerPriceAll: 2,
-  ticker24: 1, // single symbol
   ticker24All: 40, // all symbols — scanner workhorse
-  premiumIndex: 1, // single symbol funding
   premiumIndexAll: 10,
-  openInterest: 1,
   account: 5, // /fapi/v2/account
   positionRisk: 5, // /fapi/v2/positionRisk
+  leverageBracket: 1, // /fapi/v1/leverageBracket
   income: 30, // /fapi/v1/income (fees, funding, realised PnL)
   userTrades: 5, // /fapi/v1/userTrades
   allOrders: 5, // /fapi/v1/allOrders

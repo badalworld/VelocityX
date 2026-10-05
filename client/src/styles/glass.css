@@ -80,23 +80,6 @@
   }
 }
 
-/* small variant — less blur, tighter radius (chips, cells, list rows) */
-.glass-sm {
-  border-radius: var(--r-s);
-  background-image: none;
-  background-color: var(--glass-1);
-  backdrop-filter: blur(var(--blur-s)) saturate(140%);
-  -webkit-backdrop-filter: blur(var(--blur-s)) saturate(140%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: none;
-  contain: none;
-}
-
-.glass-sm::before,
-.glass-sm::after {
-  display: none;
-}
-
 /* frosted variant — for bars / sheets that sit above scrolling content */
 .glass-frost {
   background-color: var(--glass-frost);
@@ -193,10 +176,6 @@
 
 .panel-body.flush {
   padding: 0;
-}
-
-.panel-body.tight {
-  padding: 8px 10px;
 }
 
 /* ---------- buttons -------------------------------------------------------- */
@@ -725,23 +704,6 @@
   text-align: right;
 }
 
-/* ---------- loading / skeleton ------------------------------------------- */
-.skel {
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--r-xs);
-  background: rgba(255, 255, 255, 0.05);
-  min-height: 12px;
-}
-
-.skel::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.14) 50%, transparent 80%);
-  animation: shimmer 1.6s linear infinite;
-}
-
 .loading {
   display: flex;
   align-items: center;
@@ -753,49 +715,9 @@
   letter-spacing: 0.6px;
 }
 
-/* ---------- liquid divider ---------------------------------------------- */
-.liquid-div {
-  height: 1px;
-  border: none;
-  background: linear-gradient(90deg, transparent, rgba(62, 240, 255, 0.45), rgba(168, 116, 255, 0.45), transparent);
-  background-size: 200% 100%;
-  animation: liquid-slide 8s linear infinite;
-  opacity: 0.6;
-}
-
-/* ---------- animated gradient border ------------------------------------ */
-.glow-ring {
-  position: relative;
-}
-
-.glow-ring::after {
-  content: '';
-  position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  padding: 1.5px;
-  background: conic-gradient(
-    from var(--vx-angle),
-    rgba(62, 240, 255, 0.9),
-    rgba(91, 157, 255, 0.55),
-    rgba(168, 116, 255, 0.9),
-    rgba(52, 240, 178, 0.7),
-    rgba(62, 240, 255, 0.9)
-  );
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  animation: spin-angle 6s linear infinite;
-  pointer-events: none;
-  z-index: 4;
-  opacity: 0.85;
-}
-
 /* ---------- graceful degradation without backdrop blur ------------------ */
 @supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
   .glass,
-  .glass-sm,
   .glass-frost {
     background-color: rgba(11, 17, 31, 0.94);
   }

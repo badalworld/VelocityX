@@ -199,7 +199,7 @@ class MarketScanner {
         try {
           const k15 = await api.klines(c.sym.symbol, '15m', 120, 20_000);
           const k1h = await api.klines(c.sym.symbol, '1h', 120, 60_000);
-          const row = analyse(c.sym, c.t, k15, k1h, null, fundMap.get(c.sym.symbol), gate);
+          const row = analyse(c.sym, c.t, k15, k1h, fundMap.get(c.sym.symbol), gate);
           if (leaders.has(c.sym.symbol)) {
             try {
               const k5 = await api.klines(c.sym.symbol, '5m', 120, 10_000);
@@ -272,7 +272,6 @@ export function analyse(
   t: { lastPrice: number; priceChangePercent: number; highPrice: number; lowPrice: number; quoteVolume: number },
   k15: { open: number; high: number; low: number; close: number; time: number; closeTime: number; volume: number }[],
   k1h: { open: number; high: number; low: number; close: number; time: number; closeTime: number; volume: number }[],
-  _unused: null,
   fund: { lastFundingRate: number; nextFundingTime: number } | undefined,
   gate: ScanResult['gate'],
 ): ScanRow {

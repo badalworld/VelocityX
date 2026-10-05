@@ -144,8 +144,6 @@ export default function PnlChart({ start, end, base, series, bars, live, height 
   const accent2 = up ? '#3ef0ff' : '#ff9a6b';
   const uid = useMemo(() => `pnl-${Math.random().toString(36).slice(2, 8)}`, []);
 
-  const plotStartX = pts.length ? pts[0].x : padL;
-  const plotEndX = pts.length ? pts[pts.length - 1].x : padL + innerW;
   const last = pts.length ? pts[pts.length - 1] : { x: padL, y: padT };
 
   const timeTicks = useMemo(() => {
@@ -155,7 +153,7 @@ export default function PnlChart({ start, end, base, series, bars, live, height 
   }, [fStart, span, w]);
 
   /* ---------- pointer ---------------------------------------------------- */
-  const onMove = (clientX: number, clientY: number, rect: DOMRect) => {
+  const onMove = (clientX: number, rect: DOMRect) => {
     const x = clientX - rect.left;
     const i = Math.max(0, Math.min(vals.length - 1, Math.round(((x - padL) / innerW) * (vals.length - 1))));
     setHover({ x: pts[i]?.x ?? x, y: pts[i]?.y ?? 0, i });
@@ -189,8 +187,8 @@ export default function PnlChart({ start, end, base, series, bars, live, height 
       className="pnl-chart"
       ref={wrapRef}
       style={{ height }}
-      onPointerMove={(e) => onMove(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect())}
-      onPointerDown={(e) => onMove(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect())}
+      onPointerMove={(e) => onMove(e.clientX, e.currentTarget.getBoundingClientRect())}
+      onPointerDown={(e) => onMove(e.clientX, e.currentTarget.getBoundingClientRect())}
       onPointerLeave={() => setHover(null)}
       onPointerCancel={() => setHover(null)}
     >

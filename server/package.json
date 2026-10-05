@@ -11,7 +11,8 @@
     "smoke": "node scripts/smoke.js",
     "test:e2e": "node scripts/e2e-paper.js",
     "test:realtime": "node scripts/verify-realtime.js",
-    "verify:binance": "node scripts/verify-binance.js"
+    "verify:binance": "node scripts/verify-binance.js",
+    "test:api": "npm run build && node scripts/verify-api.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

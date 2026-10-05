@@ -12,9 +12,10 @@ import express from 'express';
 import http from 'http';
 import path from 'path';
 import { apiRouter } from './api';
-import { initBroadcast, emit } from './broadcast';
+import { closeBroadcast, emit, initBroadcast } from './broadcast';
+import { authRequired } from './auth';
 import { engine } from './engine';
-import { loadSettings, getSettings } from './settings';
+import { loadSettings, getSettings, updateSettings } from './settings';
 import { openTradeOn, openTrades, pruneOld, remainingQtyOf } from './store';
 import { trader } from './trader';
 import { scanner } from './scanner';
@@ -25,10 +26,33 @@ import { candleStore } from './candles';
 import { limiter } from './ratelimit';
 
 const PORT = Number(process.env.PORT) || 4000;
+/** Host binding: 0.0.0.0 by default (containers/preview), override with VX_HOST. */
+const HOST = process.env.VX_HOST || '0.0.0.0';
+/** Live trading must be explicitly re-armed at boot: restarting the process
+ *  alone must never resume real-money execution silently. */
+const ALLOW_LIVE = process.env.VX_ALLOW_LIVE === '1';
 
 async function main(): Promise<void> {
   const settings = loadSettings();
   pruneOld(settings.historyDays);
+
+  // ---- boot safety -------------------------------------------------------
+  // A persisted `mode: live` + auto-trade would otherwise start placing real
+  // orders the second the process comes back up (crash loop, deploy, restart).
+  if (settings.mode === 'live' && !ALLOW_LIVE) {
+    updateSettings({ mode: 'paper', autoTrade: false });
+    console.warn('[boot] SAFETY: live mode was persisted but VX_ALLOW_LIVE is not set — starting in PAPER with auto-trade OFF');
+    emit('log', {
+      level: 'error',
+      msg: 'Live mode was persisted but VX_ALLOW_LIVE is not set — started in PAPER with auto-trade OFF (re-arm explicitly)',
+    });
+  } else if (settings.mode !== 'paper' && settings.autoTrade) {
+    console.warn(`[boot] SAFETY: starting with auto-trade ON in ${settings.mode.toUpperCase()} mode`);
+  }
+  if (!authRequired()) {
+    console.warn('[boot] SAFETY: VX_API_TOKEN is not set — the API (orders, kill switch, keys) is open to anyone who can reach this port');
+  }
+
   console.log(
     `[boot] VelocityX | mode=${settings.mode} primary=${settings.symbol} auto=${settings.autoTrade ? 'ON' : 'OFF'} ` +
       `maxPositions=${settings.maxPositions} scan=${settings.autoScan ? 'ON' : 'OFF'}`,
@@ -39,7 +63,15 @@ async function main(): Promise<void> {
   );
 
   const app = express();
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
+  // Minimal security headers that never break the hosted preview / iframe
+  // embedding (no X-Frame-Options / frame-ancestors restrictions).
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
   app.use('/api', apiRouter());
 
   // static dashboard (client/dist)
@@ -61,8 +93,8 @@ async function main(): Promise<void> {
   const server = http.createServer(app);
   initBroadcast(server);
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[boot] listening on http://0.0.0.0:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`[boot] listening on http://${HOST}:${PORT}`);
   });
 
   // --- scanner <-> executor wiring (the bot never loses sight of its positions) ---
@@ -71,6 +103,9 @@ async function main(): Promise<void> {
     marketStream.subscribe(engine.activeSymbols());
     emit('scanner', { at: scanner.result()?.at, selected: scanner.result()?.selected ?? [] });
   });
+
+  // Long-lived timers are tracked so shutdown can stop them deterministically.
+  const engineTimers: NodeJS.Timeout[] = [];
 
   // --- engines & streams ---
   engine.start();
@@ -88,7 +123,7 @@ async function main(): Promise<void> {
   // whenever the set of bot positions changes, so the dashboard never lags.
   let lastKey = '';
   let lastTradeKey = '';
-  setInterval(() => {
+  engineTimers.push(setInterval(() => {
     const key = engine.activeSymbols().sort().join(',');
     if (key !== lastKey) {
       lastKey = key;
@@ -102,11 +137,11 @@ async function main(): Promise<void> {
       lastTradeKey = tradeKey;
       void accountService.refresh();
     }
-  }, 5000);
+  }, 5000));
 
   // offline-demo price ticker (only when Binance is unreachable from this host)
   let offlineTicker: NodeJS.Timeout | null = null;
-  setInterval(() => {
+  engineTimers.push(setInterval(() => {
     const off = offlineFeed.active;
     if (off && !offlineTicker) {
       offlineTicker = setInterval(() => {
@@ -126,32 +161,66 @@ async function main(): Promise<void> {
       marketStream.subscribe(engine.activeSymbols());
       candleStore.stats();
     }
-  }, 2000);
+  }, 2000));
 
   // periodic housekeeping
-  setInterval(() => {
+  engineTimers.push(setInterval(() => {
     const s = getSettings();
     pruneOld(s.historyDays);
     emit('status', { t: Date.now() });
-  }, 60_000);
+  }, 60_000));
 
   // live-mode safety reconcile (catch missed fills, re-arm missing SL) — 10s
-  setInterval(() => {
+  engineTimers.push(setInterval(() => {
     if (getSettings().mode !== 'paper') void trader.reconcile();
-  }, 10_000);
+  }, 10_000));
 
   // funding accrual for every open bot position — 5 min (Binance income ledger)
-  setInterval(() => {
+  engineTimers.push(setInterval(() => {
     if (getSettings().mode === 'paper') return;
     for (const t of openTrades()) void trader.refreshFunding(t);
-  }, 300_000);
+  }, 300_000));
 
+  // ---- error surfacing: never swallow a failure silently ------------------
   process.on('unhandledRejection', (e: any) => {
-    console.error('[unhandledRejection]', e?.message || e);
+    const msg = e?.message || String(e);
+    console.error('[unhandledRejection]', msg);
+    emit('log', { level: 'error', msg: `Unhandled promise rejection: ${msg}` });
   });
   process.on('uncaughtException', (e: any) => {
-    console.error('[uncaughtException]', e?.message || e);
+    const msg = e?.message || String(e);
+    console.error('[uncaughtException]', msg);
+    emit('log', { level: 'error', msg: `Uncaught exception: ${msg}` });
+    // A torn process must not keep trading on undefined state: flatten nothing
+    // (protective stops stay armed on the exchange) but stop the engine loop
+    // and exit so a supervisor restarts us cleanly.
+    void shutdown('uncaughtException', 1);
   });
+
+  // ---- graceful shutdown -------------------------------------------------
+  let shuttingDown = false;
+  async function shutdown(reason: string, code = 0): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] ${reason} — stopping feeds (open positions keep their exchange SL/TP orders)`);
+    try {
+      engine.stop();
+      scanner.stop();
+      accountService.stop();
+      marketStream.stop();
+      userStream.stop();
+      closeBroadcast();
+      for (const t of engineTimers) clearInterval(t);
+      if (offlineTicker) clearInterval(offlineTicker);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    } catch (e: any) {
+      console.error('[shutdown]', e?.message || e);
+    }
+    console.log(`[shutdown] done — ${openTrades().length} bot position(s) left protected on the exchange`);
+    process.exit(code);
+  }
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
 void main();
