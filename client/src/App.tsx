@@ -15,7 +15,7 @@ import { subscribe } from './ws';
 import { useGlassSheen, useLocalState, useMediaQuery, useReveal, useScrollProgress } from './hooks/motion';
 import { usePnlModel } from './pnl';
 import {
-  AccountView, Mtf, PositionsPayload, ScanResult, ScreenerData, Settings,
+  AccountView, PositionsPayload, ScanResult, ScreenerData, Settings,
   SignalRecord, Stats, Status, Trade,
 } from './types';
 
@@ -40,7 +40,6 @@ export default function App() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [signals, setSignals] = useState<SignalRecord[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [mtf, setMtf] = useState<Mtf | null>(null);
   const [screener, setScreener] = useState<ScreenerData | null>(null);
   const [scan, setScan] = useState<ScanResult | null>(null);
   const [account, setAccount] = useState<AccountView | null>(null);
@@ -209,7 +208,6 @@ export default function App() {
     void refreshAll();
     void loadSignals();
     void loadScanner();
-    void apiGet<Mtf>('/mtf').then(setMtf).catch(() => {});
 
     const un = subscribe((e) => {
       if (e.type === '_open') {
@@ -279,7 +277,6 @@ export default function App() {
     const slow = window.setInterval(() => {
       void loadStats();
       void loadTrades();
-      void apiGet<Mtf>('/mtf').then(setMtf).catch(() => {});
     }, 60000);
 
     return () => {
@@ -391,7 +388,6 @@ export default function App() {
                 <Overview
                   status={status}
                   stats={stats}
-                  mtf={mtf}
                   screener={screener}
                   scan={scan}
                   account={account}
