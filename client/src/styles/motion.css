@@ -1,0 +1,379 @@
+/* ============================================================================
+   Motion — keyframe vocabulary + scroll-reveal engine
+   ---------------------------------------------------------------------------
+   The motion language is "liquid spring": everything enters with a soft
+   overshoot and settles, loops breathe slowly, and highlights travel like a
+   wave across a surface. Timings are tuned so the UI feels alive but never
+   busy.  Scroll reveals are opt-in via [data-reveal] and toggled by
+   useReveal(); the global motion switch flattens everything.
+   ========================================================================== */
+
+/* ---------- primitives ---------------------------------------------------- */
+@keyframes liquid-slide {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+@keyframes spin-angle {
+  to {
+    --vx-angle: 360deg;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+@keyframes chip-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(62, 240, 255, 0);
+  }
+  50% {
+    box-shadow: 0 0 22px -6px rgba(62, 240, 255, 0.55);
+  }
+}
+
+@keyframes ripple-out {
+  0% {
+    transform: translate(-50%, -50%) scale(0);
+    opacity: 0.7;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0;
+  }
+}
+
+@keyframes float-y {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -8px, 0);
+  }
+}
+
+@keyframes blob-morph {
+  0%,
+  100% {
+    border-radius: 42% 58% 63% 37% / 45% 42% 58% 55%;
+    transform: rotate(0deg) scale(1);
+  }
+  33% {
+    border-radius: 63% 37% 42% 58% / 58% 63% 37% 42%;
+    transform: rotate(120deg) scale(1.06);
+  }
+  66% {
+    border-radius: 37% 63% 55% 45% / 37% 55% 45% 63%;
+    transform: rotate(240deg) scale(0.96);
+  }
+}
+
+@keyframes aurora-drift {
+  0% {
+    background-position: 0% 50%, 100% 50%, 50% 100%;
+    transform: scale(1.05) rotate(0deg);
+  }
+  50% {
+    background-position: 100% 50%, 0% 50%, 50% 0%;
+    transform: scale(1.16) rotate(2deg);
+  }
+  100% {
+    background-position: 0% 50%, 100% 50%, 50% 100%;
+    transform: scale(1.05) rotate(0deg);
+  }
+}
+
+@keyframes marquee {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+@keyframes flash-up {
+  0% {
+    background-color: rgba(35, 221, 138, 0.28);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes flash-down {
+  0% {
+    background-color: rgba(255, 79, 116, 0.28);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes pop-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.9) translateY(6px);
+    filter: blur(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+@keyframes drop-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-14px) scale(0.96);
+    filter: blur(8px);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(3px) scale(1.01);
+    filter: blur(0);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes rise-in {
+  0% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.985);
+    filter: blur(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+@keyframes slide-in-right {
+  0% {
+    opacity: 0;
+    transform: translateX(28px) scale(0.97);
+    filter: blur(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+@keyframes log-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-14px);
+    background-color: rgba(62, 240, 255, 0.14);
+  }
+  60% {
+    opacity: 1;
+    background-color: rgba(62, 240, 255, 0.06);
+  }
+  100% {
+    transform: none;
+    background-color: transparent;
+  }
+}
+
+@keyframes ring-sweep {
+  from {
+    stroke-dashoffset: var(--ring-len);
+  }
+}
+
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes dot-ping {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.9;
+  }
+  70% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes candle-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+@keyframes sheen-sweep {
+  0% {
+    transform: translateX(-120%) skewX(-16deg);
+  }
+  100% {
+    transform: translateX(240%) skewX(-16deg);
+  }
+}
+
+@keyframes hue-drift {
+  0%,
+  100% {
+    filter: blur(46px) saturate(150%) hue-rotate(0deg);
+  }
+  50% {
+    filter: blur(52px) saturate(175%) hue-rotate(28deg);
+  }
+}
+
+@keyframes grid-fade {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* ---------- scroll reveal ------------------------------------------------- */
+[data-reveal] {
+  opacity: 0;
+  transform: translateY(22px) scale(0.99);
+  filter: blur(10px);
+  transition: opacity var(--t-lazy) var(--ease-liquid), transform var(--t-lazy) var(--ease-liquid),
+    filter var(--t-lazy) var(--ease-liquid);
+  will-change: opacity, transform;
+}
+
+[data-reveal].is-in {
+  opacity: 1;
+  transform: none;
+  filter: blur(0);
+}
+
+[data-reveal].is-in {
+  will-change: auto;
+}
+
+/* stagger children of a revealed group */
+[data-reveal-group] > * {
+  animation: rise-in var(--t-lazy) var(--ease-liquid) both;
+}
+
+[data-reveal-group] > *:nth-child(1) { animation-delay: 40ms; }
+[data-reveal-group] > *:nth-child(2) { animation-delay: 110ms; }
+[data-reveal-group] > *:nth-child(3) { animation-delay: 180ms; }
+[data-reveal-group] > *:nth-child(4) { animation-delay: 250ms; }
+[data-reveal-group] > *:nth-child(5) { animation-delay: 320ms; }
+[data-reveal-group] > *:nth-child(6) { animation-delay: 390ms; }
+[data-reveal-group] > *:nth-child(7) { animation-delay: 460ms; }
+[data-reveal-group] > *:nth-child(8) { animation-delay: 530ms; }
+[data-reveal-group] > *:nth-child(n + 9) { animation-delay: 600ms; }
+
+/* only run the stagger once the group is on screen */
+[data-reveal-group]:not(.is-in) > * {
+  animation-play-state: paused;
+}
+
+/* ---------- utility animations ------------------------------------------- */
+.anim-pop { animation: pop-in var(--t-slow) var(--ease-spring) both; }
+.anim-drop { animation: drop-in var(--t-slow) var(--ease-spring) both; }
+.anim-rise { animation: rise-in var(--t-lazy) var(--ease-liquid) both; }
+.anim-slide-right { animation: slide-in-right var(--t-slow) var(--ease-liquid) both; }
+.anim-float { animation: float-y 5.5s var(--ease-inout) infinite; }
+.anim-spin-slow { animation: spin-angle 9s linear infinite; }
+.d1 { animation-delay: 80ms; }
+.d2 { animation-delay: 160ms; }
+.d3 { animation-delay: 240ms; }
+.d4 { animation-delay: 320ms; }
+.d5 { animation-delay: 400ms; }
+.d6 { animation-delay: 480ms; }
+
+.shimmer-line {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.shimmer-line::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+  animation: sheen-sweep 3.6s var(--ease-inout) infinite;
+}
+
+/* ---------- reduced motion / motion switch ------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  [data-reveal] {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+html[data-motion='off'] *,
+html[data-motion='off'] *::before,
+html[data-motion='off'] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
+html[data-motion='off'] [data-reveal] {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+html[data-motion='off'] .aurora,
+html[data-motion='off'] .liquid-canvas {
+  animation: none !important;
+}

@@ -108,16 +108,44 @@ server/src/
   store.ts        trade/signal persistence (server/data/*.json)
   stats.ts        weekly stats table (indicator formulas)
 client/src/
-  App.tsx                 layout, live state, WS integration
+  App.tsx                 shell: sticky header, view routing, pinned P&L rail, toasts
+  styles/                 liquid-glass design system (tokens, glass, motion, layout, views)
+  hooks/motion.ts         reveal, count-up, tweens, media queries, glass sheen, tilt
+  motion/                 LiquidBackground, chart maths, reusable primitives, icon set
+  pnl.ts                  equity-curve model derived from the trade log
+  components/PnlDock      pinned/responsive P&L chart (hand-written animated SVG)
   components/ChartPanel   lightweight-charts + EMA ribbon + signal markers + TP/SL lines
   components/...          position card, stats, MTF, screener, settings, history, log
 ```
+
+The dashboard UI is documented in **[DESIGN.md](DESIGN.md)** — tokens, glass layers, motion vocabulary and the responsive P&L dock contract.
 
 ### API surface
 
 `GET /api/status` · `/api/chart` · `/api/settings` · `/api/trades` · `/api/signals` · `/api/stats` · `/api/mtf` · `/api/screener`
 `POST /api/settings` · `/api/autotrade` · `/api/kill` · `/api/paper/reset`
 `WS /ws` — price ticks, signals, trade events, activity log.
+
+---
+
+## Dashboard (liquid glass edition)
+
+Four views behind one sticky, frosted header:
+
+| View | Contents |
+|---|---|
+| **Dashboard** | Metrics only — **no candlestick chart**: hero summary + equity sparkline, net P&L / win rate / expectancy / signal KPIs, open position with the live risk ladder, weekly statistics (rings + hit-rate bars), MTF trend gauge, screener, engine health, activity feed. |
+| **Chart** | Candlestick stage with the EMA 5→34 ribbon + EMA 200, signal markers, entry/SL/TP price lines, candle-count selector and per-layer toggles. |
+| **Trades** | Journal summary, full trade table, signal log, activity feed. |
+| **Settings** | Connection / trading / indicator tabs, execution guardrails, motion switch. |
+
+**The P&L chart is pinned, at every size:** a cumulative equity curve (realised ladder + live unrealised tail) with a per-trade P&L histogram, crosshair tooltip, running max-drawdown and a 24H / 7D / 30D / ALL range selector.
+
+* desktop — sticky rail beside the content, permanently on screen while you scroll;
+* tablet/phone — docked bottom sheet with a live mini-readout that expands to the full chart;
+* empty log — the panel explains itself instead of drawing a flat line.
+
+Motion is first-class: liquid flowing background, staggered section reveals, animated counters, draw-in sparklines, sliding segmented thumb, ripples — all native CSS/rAF, all switchable from the header (**Motion**) and respecting `prefers-reduced-motion`. Details: [DESIGN.md](DESIGN.md).
 
 ---
 
