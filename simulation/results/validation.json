@@ -1,0 +1,76 @@
+{
+  "bars": 105120,
+  "years": 1,
+  "signalRate": {
+    "rw_vol_40pct": {
+      "signalsPerSymbolPerDay": 9.221917808219178,
+      "signalsPerSymbolPerMonth": 280.5
+    },
+    "rw_vol_100pct": {
+      "signalsPerSymbolPerDay": 9.232876712328768,
+      "signalsPerSymbolPerMonth": 280.8333333333333
+    },
+    "rw_vol_200pct": {
+      "signalsPerSymbolPerDay": 9.238356164383562,
+      "signalsPerSymbolPerMonth": 281
+    },
+    "generatedWorldsMean": 9.198021308980215
+  },
+  "calibration": [
+    {
+      "class": "major",
+      "annVolPct": 64.53373501656648,
+      "kurtosis": 22.53288021814064,
+      "absRetAc1": 0.28805260158830787,
+      "med24hRangePct": 4.051957816659591,
+      "turnoverM": 2971.003896184312
+    },
+    {
+      "class": "alt",
+      "annVolPct": 132.03144537284547,
+      "kurtosis": 31.390579685313213,
+      "absRetAc1": 0.28677470054286264,
+      "med24hRangePct": 8.229734800470315,
+      "turnoverM": 748.7643823119524
+    },
+    {
+      "class": "wild",
+      "annVolPct": 220.01309946606224,
+      "kurtosis": 34.05046348790148,
+      "absRetAc1": 0.2909360114672191,
+      "med24hRangePct": 13.713764930859513,
+      "turnoverM": 210.13120450378588
+    },
+    {
+      "class": "pegged",
+      "annVolPct": 2.3271015942156907,
+      "kurtosis": 25.524637854246368,
+      "absRetAc1": 0.281147938200684,
+      "med24hRangePct": 0.2024224690909123,
+      "turnoverM": 1056.3769671549514
+    },
+    {
+      "class": "illiquid",
+      "annVolPct": 159.45580869635992,
+      "kurtosis": 26.04015409474981,
+      "absRetAc1": 0.29222819503646996,
+      "med24hRangePct": 9.739378235955252,
+      "turnoverM": 12.203607468682433
+    },
+    {
+      "class": "quiet",
+      "annVolPct": 31.238762334881688,
+      "kurtosis": 29.14464263213115,
+      "absRetAc1": 0.2887180823769144,
+      "med24hRangePct": 1.9185089844843735,
+      "turnoverM": 213.4690298501548
+    }
+  ],
+  "reference": {
+    "note": "Stylised facts for crypto perpetuals used as the calibration target",
+    "annVolPct": "40–250 % (majors ~45–70 %, alts 80–170 %, meme 170–250 %)",
+    "kurtosis": "10–60 at 5-minute frequency",
+    "absRetAc1": "0.20–0.45 (volatility clustering; long memory decays slowly)",
+    "turnover": "majors 1–5 B USDT/day, alts 20 M–1 B, traps < 20 M"
+  }
+}

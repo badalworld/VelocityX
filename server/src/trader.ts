@@ -18,7 +18,7 @@ import { api, floorToStep, roundToTick, fmtQty } from './binance';
 import { SignalSide } from './indicators';
 import {
   adjustPaperBalance, getPaperBalance, markSignalActed, openTradeOn, openTrades,
-  remainingQtyOf, saveTrade, setPaperBalance, SignalRecord, Trade, allTrades,
+  remainingQtyOf, saveTrade, setPaperBalance, SignalRecord, Trade,
 } from './store';
 import { getSettings, MAX_POSITIONS_CAP, PAPER_START_BALANCE } from './settings';
 import { priceOf, setPrice } from './prices';
@@ -212,8 +212,15 @@ class Trader {
 
       if (s.mode === 'paper') {
         const bal = getPaperBalance(PAPER_START_BALANCE);
-        const realized = allTrades().reduce((a, t) => a + (t.status === 'CLOSED' ? t.realizedPnl : 0), 0);
-        equity = bal + realized;
+        // `bal` already contains every booked fill (entry fees, TP slices,
+        // closes) — adding the realised PnL of closed trades on top would count
+        // it twice and mis-size every paper entry. Only unrealised PnL is added,
+        // matching account.ts and the Binance equity definition.
+        const unrealized = openTrades().reduce(
+          (a, t) => a + (this.priceOf(t.symbol) - t.entryPrice) * (t.side === 'LONG' ? 1 : -1) * remainingQtyOf(t),
+          0,
+        );
+        equity = bal + unrealized;
         available = Math.max(0, equity - marginUsed);
       } else {
         const bal = await api.accountSnapshot();
