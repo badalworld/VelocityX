@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-motion="on">
+<html lang="en" data-motion="off">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -7,7 +7,7 @@
     <meta name="color-scheme" content="dark" />
     <meta
       name="description"
-      content="VelocityX — liquid-glass dashboard for the SUPER INDIBOT Binance USD-M futures bot: live equity curve, MTF trend engine, screener and risk ladder telemetry."
+      content="VelocityX — liquid-glass dashboard for the SUPER INDIBOT Binance USD-M futures bot: stable realtime metrics, MTF trend engine, screener and risk ladder telemetry."
     />
     <title>VelocityX — Liquid Glass Trading Desk</title>
     <link
@@ -45,18 +45,7 @@
         border-radius: 50%;
         background: #3ef0ff;
         box-shadow: 0 0 12px #3ef0ff;
-        animation: boot-pulse 1.4s ease-in-out infinite;
-      }
-      @keyframes boot-pulse {
-        0%,
-        100% {
-          transform: scale(0.8);
-          opacity: 0.5;
-        }
-        50% {
-          transform: scale(1.15);
-          opacity: 1;
-        }
+        opacity: 0.85;
       }
       @media (prefers-reduced-motion: reduce) {
         #boot .pulse {
@@ -66,8 +55,8 @@
     </style>
     <script>
       try {
-        var m = localStorage.getItem('vx.motion');
-        document.documentElement.dataset.motion = m === 'false' ? 'off' : 'on';
+        var m = localStorage.getItem('vx.motion.v2');
+        document.documentElement.dataset.motion = m === 'true' ? 'on' : 'off';
       } catch (e) {
         /* private mode */
       }

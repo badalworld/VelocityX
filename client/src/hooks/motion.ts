@@ -246,17 +246,3 @@ export function useLocalState<T>(key: string, initial: T): [T, (v: T) => void] {
   };
   return [value, set];
 }
-
-export function useFlash(value: number, ms = 900): 'up' | 'down' | null {
-  const prev = useRef(value);
-  const [flash, setFlash] = useState<'up' | 'down' | null>(null);
-  useEffect(() => {
-    const p = prev.current;
-    prev.current = value;
-    if (!Number.isFinite(p) || !Number.isFinite(value) || p === value) return;
-    setFlash(value > p ? 'up' : 'down');
-    const id = window.setTimeout(() => setFlash(null), ms);
-    return () => window.clearTimeout(id);
-  }, [value, ms]);
-  return flash;
-}

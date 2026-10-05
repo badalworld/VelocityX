@@ -1,17 +1,15 @@
 import { ReactNode } from 'react';
 import { Status } from '../types';
 import { fmt } from '../api';
-import { useFlash } from '../hooks/motion';
-import { BrandMark, IconBolt, IconCandles, IconChart, IconGauge, IconHistory, IconKill, IconRadar, IconSettings, IconTarget, IconWaves } from '../motion/Icons';
+import { BrandMark, IconBolt, IconChart, IconGauge, IconHistory, IconKill, IconRadar, IconSettings, IconTarget, IconWaves } from '../motion/Icons';
 import { AnimatedNumber, Btn, Segmented } from '../motion/primitives';
 
-export type ViewKey = 'dash' | 'scanner' | 'positions' | 'chart' | 'trades' | 'settings';
+export type ViewKey = 'dash' | 'scanner' | 'positions' | 'trades' | 'settings';
 
 const NAV: { value: ViewKey; label: string; icon: ReactNode }[] = [
   { value: 'dash', label: 'Dashboard', icon: <IconGauge /> },
   { value: 'scanner', label: 'Scanner', icon: <IconRadar /> },
   { value: 'positions', label: 'Positions', icon: <IconTarget /> },
-  { value: 'chart', label: 'Chart', icon: <IconCandles /> },
   { value: 'trades', label: 'Trades', icon: <IconHistory /> },
   { value: 'settings', label: 'Settings', icon: <IconSettings /> },
 ];
@@ -21,14 +19,12 @@ const NAV: { value: ViewKey; label: string; icon: ReactNode }[] = [
    ------------------------------------------------------------------------- */
 export function Topbar({
   status,
-  wsUp,
   onKill,
-  onOpenSheet,
+  onOpenPnl,
 }: {
   status: Status | null;
-  wsUp: boolean;
   onKill: () => void;
-  onOpenSheet?: () => void;
+  onOpenPnl?: () => void;
 }) {
   const mode = status?.mode ?? 'paper';
   const price = status?.price ?? 0;
@@ -36,7 +32,6 @@ export function Topbar({
   const positions = status?.openTrades ?? [];
   const openCount = status?.slots?.used ?? positions.length;
   const maxPos = status?.slots?.max ?? status?.maxPositions ?? 8;
-  const flash = useFlash(price, 850);
   const unPnl = account?.bot.unrealizedPnl ?? positions.reduce((a, t) => a + (t.unrealized ?? 0), 0);
   const feed = status?.feedInfo?.feed ?? status?.feed ?? 'binance';
   const feedLabel = feed === 'binance' ? 'Binance' : feed === 'offline-demo' ? 'Demo feed' : 'Offline';
@@ -79,13 +74,13 @@ export function Topbar({
 
       <div className="spacer" />
 
-      <div className={`stat-pod ${flash ? `is-${flash}` : ''}`} title={`${status?.symbol ?? ''} last price (Binance)`}>
+      <div className="stat-pod" title={`${status?.symbol ?? ''} last price (Binance)`}>
         <span className="pod-ico">
           <IconChart />
         </span>
         <span className="pod-body">
           <span className="pod-k">{status?.symbol ?? 'Symbol'}</span>
-          <span className={`pod-v value-flash-${flash ?? 'none'}`}>{priceNode}</span>
+          <span className="pod-v">{priceNode}</span>
         </span>
       </div>
 
@@ -130,8 +125,8 @@ export function Topbar({
         </span>
       </button>
 
-      {onOpenSheet && (
-        <Btn className="only-mobile" size="sm" onClick={onOpenSheet} title="Show P&L chart">
+      {onOpenPnl && (
+        <Btn className="only-mobile" size="sm" onClick={onOpenPnl} title="Show P&L chart">
           P&amp;L
         </Btn>
       )}

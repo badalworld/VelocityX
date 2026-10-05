@@ -253,28 +253,6 @@ export interface Status {
   now: number;
 }
 
-export interface ChartPoint { time: number; value: number | null }
-export interface ChartData {
-  symbol?: string;
-  candles: { time: number; open: number; high: number; low: number; close: number }[];
-  emas: ChartPoint[][];
-  emaExtra: ChartPoint[];
-  signals: { time: number; side: 'LONG' | 'SHORT'; price: number; id: string; acted: boolean }[];
-  trade: {
-    side: 'LONG' | 'SHORT';
-    entry: number;
-    sl: number;
-    slStage: number;
-    tp1: number;
-    tp2: number;
-    tp3: number;
-    status: string;
-    tp1Filled: boolean;
-    tp2Filled: boolean;
-    tp3Filled: boolean;
-  } | null;
-}
-
 export interface Stats {
   windowDays: number;
   totalSignals: number;

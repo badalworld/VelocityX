@@ -24,6 +24,11 @@ const BLOBS = [
 export default function LiquidBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const visible = useDocumentVisible();
+  const visibleRef = useRef(visible);
+
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -64,15 +69,24 @@ export default function LiquidBackground() {
       ctx.globalCompositeOperation = 'source-over';
     };
 
-    if (motionOff()) {
-      draw(12000);
-      return;
-    }
+    // Paint immediately so mounting/resizing never exposes an empty canvas.
+    let staticFrame = motionOff();
+    draw(staticFrame ? 12000 : performance.now());
 
     let last = 0;
     const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
-      if (!visible) return;
+      const off = motionOff();
+      if (off) {
+        if (!staticFrame) draw(12000);
+        staticFrame = true;
+        return;
+      }
+      if (staticFrame) {
+        staticFrame = false;
+        last = 0;
+      }
+      if (!visibleRef.current) return;
       if (now - last < 33) return; // ~30fps is plenty for a blurred field
       last = now;
       draw(now);
@@ -81,7 +95,7 @@ export default function LiquidBackground() {
 
     const onResize = () => {
       resize();
-      draw(performance.now());
+      draw(staticFrame ? 12000 : performance.now());
     };
     window.addEventListener('resize', onResize);
 
@@ -89,7 +103,7 @@ export default function LiquidBackground() {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
     };
-  }, [visible]);
+  }, []);
 
   return (
     <div className="bg-stack" aria-hidden="true">

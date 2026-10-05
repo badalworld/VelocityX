@@ -19,7 +19,7 @@ Web dashboard + signal engine + trade executor. It computes the indicator *itsel
 │   REST API + WS  ◄───────┘   request budget = 95% of Binance's limit  │
 │        │                                                              │
 │   React dashboard: dashboard deck, scanner, positions + Binance       │
-│   account ledger, chart+ribbon, journal, settings                     │
+│   account ledger, P&L rail, scanner, journal, settings                │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -128,17 +128,16 @@ server/src/
   store.ts        trade/signal persistence (server/data/*.json)
   stats.ts        weekly stats table (indicator formulas)
 client/src/
-  App.tsx                 shell: sticky header, view routing, pinned P&L rail, toasts
+  App.tsx                 shell: sticky header, stable data polling, P&L rail, routing, toasts
   styles/                 liquid-glass design system (tokens, glass, motion, layout, views)
-  hooks/motion.ts         reveal, count-up, tweens, media queries, glass sheen, tilt
-  motion/                 LiquidBackground, chart maths, reusable primitives, icon set
-  pnl.ts                  equity-curve model derived from the trade log
-  components/PnlDock      pinned/responsive P&L chart (hand-written animated SVG)
-  components/ChartPanel   lightweight-charts + EMA ribbon + signal markers + TP/SL lines
+  hooks/motion.ts         reveal, count-up, media queries and glass sheen
+  motion/                 calm-by-default background, SVG maths, primitives and icons
+  pnl.ts                  equity-curve model derived from bot trades + account data
+  components/PnlDock      responsive P&L chart and performance statistics
   components/...          position card, stats, MTF, screener, settings, history, log
 ```
 
-The dashboard UI is documented in **[DESIGN.md](DESIGN.md)** — tokens, glass layers, motion vocabulary and the responsive P&L dock contract.
+The dashboard UI is documented in **[DESIGN.md](DESIGN.md)** — tokens, glass layers, motion vocabulary and responsive behaviour.
 
 ### API surface
 
@@ -153,24 +152,19 @@ The dashboard UI is documented in **[DESIGN.md](DESIGN.md)** — tokens, glass l
 
 ## Dashboard (liquid glass edition)
 
-Six views behind one sticky, frosted header:
+Five views behind one sticky, frosted header:
 
 | View | Contents |
 |---|---|
-| **Dashboard** | Metrics only — **no candlestick chart, no manual asset tiles**: hero summary + equity sparkline, net P&L / win rate / expectancy / signal KPIs, open positions with the live risk ladder, weekly statistics (rings + hit-rate bars), MTF trend gauge, scanner summary, engine health, activity feed. |
-| **Scanner** | The volatility ranking table (24h range, ATR%, ADX, trend, funding, score), scan summary + score distribution, the trade gates as configured, and the engine watchlist. |
-| **Positions** | Binance account ledger (equity, available, margin, unrealised), bot positions with per-position margin/fees/funding/liquidation, **external positions listed read-only**, closed trades with Binance fees + funding, risk rules, executor feed. |
-| **Chart** | Candlestick stage with the EMA 5→34 ribbon + EMA 200, signal markers, entry/SL/TP price lines, candle-count selector and per-layer toggles. |
-| **Trades** | Journal summary, full trade table (market / fees / funding), signal log, activity feed. |
-| **Settings** | Connection / markets & sizing / scanner / indicator tabs, execution guardrails, motion switch. |
+| **Dashboard** | Metrics deck: hero summary, net P&L / win rate / expectancy / signal KPIs, open positions with the live risk ladder, weekly statistics, MTF trend, scanner summary, engine health and activity feed. |
+| **Scanner** | The volatility ranking table, scan summary, trade gates and engine watchlist. |
+| **Positions** | Binance account ledger, managed positions, **external positions listed read-only**, closed trades, fees, funding and risk rules. |
+| **Trades** | Journal summary, full trade table, signal log and activity feed. |
+| **Settings** | Connection / markets & sizing / scanner / indicator tabs, execution guardrails and motion switch. |
 
-**The P&L chart is pinned, at every size:** a cumulative equity curve (realised ladder + live unrealised tail) with a per-trade P&L histogram, crosshair tooltip, running max-drawdown and a 24H / 7D / 30D / ALL range selector.
+The large **BTCUSDT candlestick/EMA chart has been removed from the client**, including its navigation tab and chart-library dependency. The separate cumulative **P&L chart remains**: a sticky side rail on desktop and a collapsible bottom sheet on tablet/phone.
 
-* desktop — sticky rail beside the content, permanently on screen while you scroll;
-* tablet/phone — docked bottom sheet with a live mini-readout that expands to the full chart;
-* empty log — the panel explains itself instead of drawing a flat line.
-
-Motion is first-class: liquid flowing background, staggered section reveals, animated counters, draw-in sparklines, sliding segmented thumb, ripples — all native CSS/rAF, all switchable from the header (**Motion**) and respecting `prefers-reduced-motion`. Details: [DESIGN.md](DESIGN.md).
+The dashboard starts with **Motion off** so it does not blink or pulse. Motion can be enabled explicitly from the header and remains subject to `prefers-reduced-motion`. Live values never trigger colour-flash animations; timestamp-aware state merging also prevents stale poll responses from painting over newer WebSocket/account data. Details: [DESIGN.md](DESIGN.md).
 
 ---
 

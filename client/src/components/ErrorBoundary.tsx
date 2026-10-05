@@ -3,14 +3,13 @@ import { IconAlert } from '../motion/Icons';
 
 /* ============================================================================
    ErrorBoundary — one failing panel must never blank the trading desk.
-   Chart libraries, canvas contexts and exotic browser APIs can all throw; the
-   boundary keeps the rest of the dashboard alive and offers a retry.
+   Data panels, canvas contexts and browser APIs can all throw; the boundary
+   keeps the rest of the dashboard alive and offers a retry.
    ========================================================================== */
 
 interface Props {
   children: ReactNode;
   label?: string;
-  compact?: boolean;
 }
 
 interface State {

@@ -313,13 +313,6 @@
   border-color: rgba(255, 79, 116, 0.3);
 }
 
-/* price flash animation on change */
-.value-flash-up {
-  animation: flash-up 900ms var(--ease-liquid) 1;
-}
-.value-flash-down {
-  animation: flash-down 900ms var(--ease-liquid) 1;
-}
 
 /* ---------------------------------------------------------------------------
    Ticker (marquee)

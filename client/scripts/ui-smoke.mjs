@@ -4,9 +4,9 @@
  * ---------------------------------------------------------------------------
  * Bundles the real App with esbuild, mounts it inside jsdom with stubbed
  * browser APIs (canvas, ResizeObserver targets, matchMedia, WebSocket) and
- * asserts that every surface of the liquid-glass UI actually renders —
- * dashboard deck, pinned P&L chart, position ladder, stats rings, screener,
- * activity feed, then clicks through Chart / Trades / Settings.
+ * asserts that every dashboard surface renders — including the retained P&L
+ * dock — while the removed BTCUSDT candlestick/EMA chart stays absent. It then
+ * clicks through Scanner, Positions, Trades and Settings.
  *
  *   npm run smoke:ui            # fixture-fed (offline, deterministic)
  *   npm run smoke:ui -- --live  # against a running server on :4000
@@ -31,18 +31,10 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const symbol = 'BTCUSDT';
 
-const candles = Array.from({ length: 160 }, (_, i) => {
-  const time = Math.floor((now - (159 - i) * 5 * MIN) / 1000) * 1000;
-  const base = 62000 + Math.sin(i / 9) * 900 + i * 3;
-  const open = base;
-  const close = base + Math.sin(i / 3) * 120;
-  return { time, open, high: Math.max(open, close) + 60, low: Math.min(open, close) - 60, close };
-});
-const emas = Array.from({ length: 8 }, (_, k) => candles.map((c) => ({ time: c.time, value: c.close + Math.sin(k) * 40 })));
 const signals = [
-  { time: candles[40].time, side: 'LONG', price: 62100, id: 's1', acted: true },
-  { time: candles[90].time, side: 'SHORT', price: 62300, id: 's2', acted: true },
-  { time: candles[130].time, side: 'LONG', price: 62000, id: 's3', acted: false },
+  { time: now - 10 * HOUR, side: 'LONG', price: 62100, id: 's1', acted: true },
+  { time: now - 6 * HOUR, side: 'SHORT', price: 62300, id: 's2', acted: true },
+  { time: now - HOUR, side: 'LONG', price: 62000, id: 's3', acted: false },
 ];
 
 const openTrade = {
@@ -157,7 +149,7 @@ const routes = {
     mode: 'paper',
     feed: 'binance',
     startedAt: now - 9 * HOUR,
-    engine: { lastSignal: signals[2], emas, atr: 210, ribbonBull: true, lastClosedCandleTime: candles[candles.length - 1].time, startedAt: now - 9 * HOUR },
+    engine: { lastSignal: signals[2], emas: [], atr: 210, ribbonBull: true, lastClosedCandleTime: now - 5 * MIN, startedAt: now - 9 * HOUR },
     openTrades: [openTrade],
     openTrade: openTrade,
     slots: { used: 1, max: 8 },
@@ -176,7 +168,6 @@ const routes = {
     pnl: { total: 60.65, realized: 47.9, unrealized: 12.75, fees: 2.31, funding: -0.021, roiPct: 4.17 },
     stats: { totalSignals: 6, winCount: 1, lossCount: 0 },
   },
-  '/api/chart': { symbol, candles, emas, emaExtra: emas[7].map((e) => ({ time: e.time, value: e.value - 200 })), signals, trade: openTrade },
   '/api/trades': trades,
   '/api/signals': signals,
   '/api/stats': { totalSignals: 6, actedSignals: 4, totalClosedTrades: 1, winCount: 1, lossCount: 0, overallWinRate: 100, expectancy: 1.42, netPnl: 47.9, fees: 2.31, funding: -0.021, avgWin: 47.9, avgLoss: 0, profitFactor: 3.2, rrRatio: 1.5, breakevenRate: 40, tp1Count: 1, tp2Count: 1, tp3Count: 1, tp1Pct: 100, tp2Pct: 100, tp3Pct: 100, weekly: [ { label: 'W38', trades: 1, wins: 1, losses: 0, winRate: 100, netPnl: 47.9, expectancy: 1.42 } ], openTrades: 1, totalFunding: -0.021 },
@@ -231,6 +222,7 @@ async function bundle() {
 /* ------------------------------------------------------------------- runner */
 const errors = [];
 const checks = [];
+const requests = [];
 const check = (name, ok, extra) => checks.push({ name, ok: !!ok, extra });
 /** Live runs depend on what is actually open/traded right now: if the account
  *  has nothing open, the matching UI surface legitimately shows its empty
@@ -241,7 +233,7 @@ const checkSoft = (guard, name, ok, extra, why) => {
 };
 
 function boot(bundlePath) {
-  const dom = new JSDOM('<!doctype html><html data-motion="on"><body><div id="root"></div></body></html>', {
+  const dom = new JSDOM('<!doctype html><html data-motion="off"><body><div id="root"></div></body></html>', {
     runScripts: 'dangerously',
     pretendToBeVisual: true,
     url: 'http://localhost:5173/',
@@ -257,9 +249,13 @@ function boot(bundlePath) {
 
   if (LIVE) {
     const nodeFetch = globalThis.fetch;
-    window.fetch = (url) => nodeFetch(API + String(url));
+    window.fetch = (url) => {
+      requests.push(String(url));
+      return nodeFetch(API + String(url));
+    };
   } else {
     window.fetch = (url) => {
+      requests.push(String(url));
       const key = String(url).split('?')[0];
       const data = routes[key];
       if (!data) return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: `no fixture for ${key}` }) });
@@ -321,6 +317,7 @@ let liveManaged = 0;
 let liveSignals = [];
 let liveClosed = 0;
 let liveExternal = 0;
+let liveScannerRows = 0;
 if (LIVE) {
   const jget = async (p) => {
     try {
@@ -337,16 +334,26 @@ if (LIVE) {
   liveSignals = Array.isArray(sigs) ? sigs : Array.isArray(sigs?.signals) ? sigs.signals : [];
   const trades = await jget('/api/trades?limit=200');
   liveClosed = (Array.isArray(trades) ? trades : []).filter((t) => t.status === 'CLOSED').length;
-  console.log(`live account: ${liveManaged} managed position(s), ${liveSignals.length} signal(s), ${liveClosed} closed trade(s) — data-dependent checks adapt`);
+  const scanner = await jget('/api/scanner');
+  liveScannerRows = Array.isArray(scanner?.rows) ? scanner.rows.length : 0;
+  console.log(
+    `live account: ${liveManaged} managed position(s), ${liveSignals.length} signal(s), ${liveClosed} closed trade(s), ${liveScannerRows} scanned market(s) — data-dependent checks adapt`,
+  );
 }
 
 /* ---- dashboard ---- */
 check('app shell mounted', !!doc.querySelector('.app'));
 check('liquid background layers', !!doc.querySelector('.bg-stack .aurora') && !!doc.querySelector('.grain') && !!doc.querySelector('.goo-layer'));
 check('brand + wordmark', /velocity/i.test(text('.brand-name') ?? ''));
-check('six nav tabs', doc.querySelectorAll('.navrow .seg-item').length === 6);
+check('five nav tabs (BTCUSDT Chart tab removed)', doc.querySelectorAll('.navrow .seg-item').length === 5);
 check('binance feed banner', /binance live feed/i.test(doc.body.textContent));
-check('scanner marquee', doc.querySelectorAll('.ticker-item').length >= 6);
+checkSoft(
+  !LIVE || liveScannerRows > 0,
+  'scanner marquee',
+  doc.querySelectorAll('.ticker-item').length >= 6,
+  undefined,
+  'the scanner is still warming up',
+);
 {
   const banner = text('.feed-banner') ?? '';
   check('feed banner is truthful', !!doc.querySelector('.feed-banner') && /binance/i.test(banner) && (LIVE ? /live|offline|unreachable|demo|stale|degraded/i.test(banner) : /live feed/i.test(banner)), banner.slice(0, 60));
@@ -361,34 +368,76 @@ check('four KPI pods', doc.querySelectorAll('.kpi').length === 4);
 check('stats rings', doc.querySelectorAll('.ring').length === 3);
 check('hit-rate bars', doc.querySelectorAll('.bar-row').length >= 5);
 check('MTF gauge', !!doc.querySelector('.gauge-svg .gauge-fill'));
-check('scanner top picks', doc.querySelectorAll('.scr-item').length >= 3);
-check('scanner ranking table', doc.querySelectorAll('.scr-tbl tbody tr').length >= 5);
+checkSoft(
+  !LIVE || liveScannerRows > 0,
+  'scanner top picks',
+  doc.querySelectorAll('.scr-item').length >= Math.min(3, liveScannerRows || 3),
+  undefined,
+  'the scanner is still warming up',
+);
+checkSoft(
+  !LIVE || liveScannerRows > 0,
+  'scanner ranking table',
+  doc.querySelectorAll('.scr-tbl tbody tr').length >= Math.min(5, liveScannerRows || 5),
+  undefined,
+  'the scanner is still warming up',
+);
 checkSoft(!LIVE || liveManaged > 0, 'managed position card', doc.querySelectorAll('.pos-item').length >= 1);
 check('no manual asset input', !/paper balance/i.test(doc.body.textContent) && !/enter .*(equity|assets)/i.test(doc.body.textContent));
 check('activity feed', doc.querySelectorAll('.feed-line').length >= 3);
-check('no candlestick chart on dashboard', !doc.querySelector('.chart-canvas') && !doc.querySelector('.tv-lightweight-charts'));
+check(
+  'BTCUSDT candlestick chart removed',
+  !doc.querySelector('.chart-canvas') &&
+    !doc.querySelector('.tv-lightweight-charts') &&
+    ![...doc.querySelectorAll('.navrow .seg-item')].some((node) => /^chart$/i.test(node.textContent?.trim() ?? '')) &&
+    !requests.some((url) => /\/api\/chart(?:\?|$)/.test(url)),
+);
+check('P&L rail retained', doc.querySelector('.rail')?.getAttribute('data-open') === 'true');
+check('P&L chart retained', !!doc.querySelector('.pnl-chart svg'));
+check(
+  'P&L curve or valid empty state renders',
+  (!!doc.querySelector('.pnl-chart svg path[stroke^="url"]')?.getAttribute('d') &&
+    doc.querySelectorAll('.pnl-chart svg rect').length >= 1) ||
+    !!doc.querySelector('.pnl-empty'),
+);
+check('P&L range selector retained', doc.querySelectorAll('.pnl-dock .seg-item').length === 4);
+check('P&L stat tiles retained', doc.querySelectorAll('.pnl-stat').length === 5);
+check('dashboard starts with motion off', doc.documentElement.dataset.motion === 'off');
+check('live values do not flash', !doc.querySelector('.value-flash-up, .value-flash-down'));
 check('no NaN / Infinity in output', !/NaN|Infinity/.test(doc.getElementById('root').textContent));
 check('segmented thumb sane (never 0-width)', !doc.querySelector('.navrow .seg-thumb') || parseFloat(doc.querySelector('.navrow .seg-thumb').style.width || '0') > 2);
 
-/* ---- pinned P&L dock ---- */
-const rail = doc.querySelector('.rail');
-check('rail pinned (data-open=true)', !!rail && rail.getAttribute('data-open') === 'true');
-check('pnl chart svg', !!doc.querySelector('.pnl-chart svg'));
-check('pnl curve drawn', !!doc.querySelector('.pnl-chart svg path[stroke^="url"]')?.getAttribute('d'));
-check('pnl histogram bars', doc.querySelectorAll('.pnl-chart svg rect').length >= 1);
-check('pnl range selector (4)', doc.querySelectorAll('.pnl-dock .seg-item').length === 4);
-check('pnl stat tiles', doc.querySelectorAll('.pnl-stat').length === 5);
+/* ---- slow stability check: cross both the 5s status and 10s account polls ---- */
+const stableHero = doc.querySelector('.hero');
+const stablePnl = doc.querySelector('.pnl-chart');
+const statusRequestsBefore = requests.filter((url) => /\/api\/status(?:\?|$)/.test(url)).length;
+const accountRequestsBefore = requests.filter((url) => /\/api\/account(?:\?|$)/.test(url)).length;
+await sleep(10_600);
+const statusRequestsAfter = requests.filter((url) => /\/api\/status(?:\?|$)/.test(url)).length;
+const accountRequestsAfter = requests.filter((url) => /\/api\/account(?:\?|$)/.test(url)).length;
+check(
+  'dashboard remains mounted through repeated polls',
+  stableHero === doc.querySelector('.hero') && stablePnl === doc.querySelector('.pnl-chart'),
+);
+check('status poll ran twice during stability check', statusRequestsAfter >= statusRequestsBefore + 2);
+check('account poll ran during stability check', accountRequestsAfter >= accountRequestsBefore + 1);
+check(
+  'dashboard stays calm after polling',
+  doc.documentElement.dataset.motion === 'off' &&
+    !doc.querySelector('.value-flash-up, .value-flash-down') &&
+    !requests.some((url) => /\/api\/chart(?:\?|$)/.test(url)),
+);
 
 /* ---- view switching ---- */
-check('chart tab clickable', clickTab('chart'));
-await sleep(900);
-check('chart stage + toolbar + legend', !!doc.querySelector('.chart-canvas') && !!doc.querySelector('.chart-toolbar') && !!doc.querySelector('.chart-legend'));
-checkSoft(!LIVE || liveManaged > 0, 'position card persists across views', !!doc.querySelector('.side-badge'));
-check('signal log renders table or empty state', !!doc.querySelector('.tbl') || /no signals detected yet/i.test(doc.body.textContent));
-
 check('scanner tab clickable', clickTab('scanner'));
 await sleep(800);
-check('scanner view ranking + gates', doc.querySelectorAll('.scr-tbl tbody tr').length >= 5 && /trade gates/i.test(doc.body.textContent));
+checkSoft(
+  !LIVE || liveScannerRows > 0,
+  'scanner view ranking + gates',
+  doc.querySelectorAll('.scr-tbl tbody tr').length >= Math.min(5, liveScannerRows || 5) && /trade gates/i.test(doc.body.textContent),
+  undefined,
+  'the scanner is still warming up',
+);
 
 check('positions tab clickable', clickTab('positions'));
 await sleep(800);
@@ -406,6 +455,7 @@ checkSoft(
 
 check('trades tab clickable', clickTab('trades'));
 await sleep(800);
+check('signal log renders table or empty state', !!doc.querySelector('.tbl') || /no signals detected yet/i.test(doc.body.textContent));
 {
   const want = LIVE ? Math.min(3, Math.max(1, liveClosed)) : 3;
   checkSoft(!LIVE || liveClosed > 0, `journal rows (≥${want})`, doc.querySelectorAll('.tbl tbody tr').length >= want);
