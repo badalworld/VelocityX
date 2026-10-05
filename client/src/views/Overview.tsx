@@ -1,17 +1,16 @@
 import { useMemo } from 'react';
-import { AccountView, Mtf, PositionsPayload, ScanResult, ScreenerData, Stats, Status, Trade } from '../types';
+import { AccountView, PositionsPayload, ScanResult, ScreenerData, Stats, Status, Trade } from '../types';
 import { fmt, timeAgo } from '../api';
 import { AnimatedNumber, Panel, Sparkline } from '../motion/primitives';
 import { ManagedPositions } from '../components/Positions';
 import StatsPanel from '../components/StatsPanel';
-import { ActivityPanel, TrendPanel } from '../components/Panels';
+import { ActivityPanel } from '../components/Panels';
 import { ScannerPanel, TopPicks } from '../components/ScannerPanel';
 import { IconAlert, IconBolt, IconCoins, IconPulse, IconShield, IconSparkles, IconTarget, IconTrend } from '../motion/Icons';
 
 interface Props {
   status: Status | null;
   stats: Stats | null;
-  mtf: Mtf | null;
   screener: ScreenerData | null;
   scan: ScanResult | null;
   account: AccountView | null;
@@ -82,7 +81,6 @@ export function FeedBanner({ status }: { status: Status | null }) {
 export default function Overview({
   status,
   stats,
-  mtf,
   scan,
   account,
   positions,
@@ -293,11 +291,8 @@ export default function Overview({
         </Panel>
       </div>
 
-      {/* ---------------- stats + trend ---------------- */}
-      <div className="grid-2">
-        <StatsPanel stats={stats} />
-        <TrendPanel mtf={mtf} status={status} />
-      </div>
+      {/* ---------------- stats ---------------- */}
+      <StatsPanel stats={stats} />
 
       {/* ---------------- health + activity ---------------- */}
       <div className="grid-2">
