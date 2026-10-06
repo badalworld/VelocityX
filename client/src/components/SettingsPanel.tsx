@@ -120,14 +120,14 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                     set({ mode: next });
                   }}
                 >
-                  <option value="testnet">Binance Futures Testnet — real exchange, test funds</option>
+                  <option value="testnet">Binance Futures Demo (testnet) — real exchange, test funds</option>
                   <option value="live">🔴 LIVE Mainnet — real money</option>
                 </select>
               </label>
             </div>
             <div className="hint">
-              Free testnet keys: <b>testnet.binancefuture.com</b> → API Management. Live keys: Binance → Account → API
-              Management (enable Futures, restrict by IP).
+              Free demo (testnet) keys: <b>demo.binance.com</b> → Demo Trading → API Management. Live keys: Binance →
+              Account → API Management (enable Futures only, no withdrawals, restrict by IP).
             </div>
           </div>
 

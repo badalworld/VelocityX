@@ -35,7 +35,7 @@ export function LiveTradingBanner({ status }: { status: Status | null }) {
       <b>{armed ? 'LIVE MONEY — AUTO-TRADING ARMED' : 'LIVE MONEY MODE'}</b>
       <span>
         {armed
-          ? 'The engine is placing real orders on Binance mainnet. The Kill switch closes every bot position at market.'
+          ? 'The engine is placing real orders on Binance mainnet. The Kill switch disarms auto-trade and closes every bot position at market.'
           : 'Real mainnet account connected; signals are logged but no order is sent until auto-trade is enabled.'}
       </span>
       <span className="chip">{status?.maxPositions ?? 8} max positions</span>
