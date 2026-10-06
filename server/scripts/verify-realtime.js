@@ -19,7 +19,7 @@ process.env.VX_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'vx-verify-'));
 
 const {
   limiter, WEIGHT_BUDGET_1M, EXCHANGE_WEIGHT_LIMIT_1M, UTILIZATION,
-  ORDER_BUDGET_1M, ORDER_BUDGET_10S, AREA_DISTRIBUTION, klineWeight, ENDPOINT_WEIGHT,
+  ORDER_BUDGET_1M, ORDER_BUDGET_10S, AREA_SHARE, klineWeight, ENDPOINT_WEIGHT,
 } = require('../dist/ratelimit');
 const { __scanInternals } = require('../dist/scanner');
 const { trader } = require('../dist/trader');
@@ -48,10 +48,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   assert(st0.plannedLimitPerMin === 2280, 'limiter reports the 95% plan');
   assert(st0.utilizationPct === 95, `limiter utilisation = ${st0.utilizationPct}%`);
 
-  const shares = Object.values(AREA_DISTRIBUTION);
+  const shares = Object.values(AREA_SHARE);
   const sum = shares.reduce((a, b) => a + b, 0);
   assert(Math.abs(sum - 1) < 1e-9, 'area shares sum to 100% of the budget', shares.map((x) => `${(x * 100).toFixed(0)}%`).join(' / '));
-  assert(Object.keys(AREA_DISTRIBUTION).length === 5, 'five independent work areas (scanner, market, account, orders, stream)');
+  assert(Object.keys(AREA_SHARE).length === 5, 'five independent work areas (scanner, market, account, orders, stream)');
   assert(st0.areas.length === 5 && st0.areas.every((a) => a.weightCap > 0), 'every area has a reserved floor');
 
   assert(klineWeight(50) === 1 && klineWeight(120) === 2 && klineWeight(499) === 2 && klineWeight(500) === 5 && klineWeight(1200) === 10,
@@ -243,9 +243,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   };
   // stub the exchange: one bot symbol (BTCUSDT) plus a manual DOGEUSDT position
   binance.api.marketOrder = record('market');
-  binance.api.stopMarket = record('stopMarket');
-  binance.api.takeProfitMarket = record('takeProfitMarket');
-  binance.api.cancelOrder = record('cancel');
+  // Stops / take-profits are Algo Service orders. Stubbing the HTTP boundary (not
+  // the shaping functions) means the REAL protectiveStop / takeProfitMarket /
+  // cancelAlgoOrder code decides what is recorded here.
+  binance.api.signed = async (method, path, params = {}) => {
+    if (method === 'POST' && path === '/fapi/v1/algoOrder') {
+      orders.push({
+        kind: params.type === 'STOP_MARKET' ? 'stopMarket' : 'takeProfitMarket',
+        symbol: params.symbol,
+        nums: [], qty: null, leverage: null,
+        optsQty: Number(params.quantity),
+        reduceOnly: params.reduceOnly === 'true',
+        closePosition: params.closePosition === 'true' || params.closePosition === true,
+        cid: params.clientAlgoId ?? null,
+      });
+      return { algoId: orders.length, clientAlgoId: params.clientAlgoId, algoStatus: 'NEW', code: '200', msg: 'success' };
+    }
+    if (method === 'DELETE' && path === '/fapi/v1/algoOrder') {
+      orders.push({ kind: 'cancel', symbol: params.symbol, nums: [], qty: null, optsQty: null, leverage: null, reduceOnly: false, cid: params.clientAlgoId ?? null });
+      return { clientAlgoId: params.clientAlgoId, code: '200', msg: 'success' };
+    }
+    if (method === 'GET' && path === '/fapi/v1/openAlgoOrders') return [];
+    if (method === 'GET' && path === '/fapi/v1/algoOrder') throw new Error('Binance /fapi/v1/algoOrder HTTP 400: {"code":-2013,"msg":"Order does not exist."}');
+    throw new Error(`verify-realtime: unexpected ${method} ${path}`);
+  };
   binance.api.setLeverage = async () => ({});
   binance.api.setIsolated = async () => ({});
   binance.api.isDualSide = async () => false;
@@ -264,7 +285,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ];
   binance.api.exchangeInfo = async () => ({ symbol: 'BTCUSDT', stepSize: 0.001, tickSize: 0.1, minQty: 0.001, minNotional: 5 });
   binance.api.allOrders = async () => [];
-  binance.api.openOrders = async () => [];
   binance.api.userTrades = async () => [];
   binance.api.incomeHistory = async () => [];
 
@@ -281,7 +301,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(120);
   assert(orders.some((o) => o.kind === 'market' && o.symbol === 'BTCUSDT'), 'entry order went to the exchange for the bot symbol');
   assert(orders.filter((o) => o.kind === 'market').every((o) => !o.reduceOnly), 'entry orders are not reduceOnly');
-  assert(orders.some((o) => o.kind === 'stopMarket' && o.reduceOnly && /^VX/.test(o.cid || '')), 'protective stop is reduceOnly and tagged VX<tradeId>');
+  assert(orders.some((o) => o.kind === 'stopMarket' && o.reduceOnly && /^VX/.test(o.cid || '')), 'protective stop is a reduceOnly algo order tagged VX<tradeId>');
   const stops = orders.filter((o) => o.kind === 'stopMarket');
   assert(stops.length > 0 && stops.every((o) => (o.optsQty ?? 0) > 0), 'protective stop carries an explicit quantity (never close-all)');
   assert(!orders.some((o) => o.closePosition === true), 'no order ever uses closePosition (close-all would leak onto external positions)');

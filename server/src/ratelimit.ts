@@ -67,7 +67,7 @@ export const ORDER_BUDGET_10S = Math.floor(EXCHANGE_ORDER_LIMIT_10S * UTILIZATIO
  * are the *floor* each area can always use; areas may borrow up to 2× their
  * share while the global pool is lightly loaded.
  */
-const AREA_SHARE: Record<Area, number> = {
+export const AREA_SHARE: Record<Area, number> = {
   scanner: 0.4, // 912/min — volatility scan over the whole perp universe
   market: 0.25, // 570/min — candles/prices for the dashboard + engine seeds
   account: 0.2, // 456/min — equity, positions, income (fees & funding), PnL
@@ -212,7 +212,6 @@ class BinanceLimiter {
       }
     }
     this.totals.throttled += 1;
-    this.perArea.get(area)!.calls += 0;
     return new Promise<void>((resolve) => {
       this.waiters.push({ area, weight: w, priority, queuedAt: Date.now(), resolve });
       this.ensureTimer();
@@ -360,7 +359,6 @@ export function klineWeight(limit: number): number {
 export const ENDPOINT_WEIGHT = {
   time: 1, // /fapi/v1/time
   exchangeInfo: 1, // /fapi/v1/exchangeInfo
-  klines: klineWeight, // /fapi/v1/klines (by limit)
   ticker24All: 40, // all symbols — scanner workhorse
   premiumIndexAll: 10,
   account: 5, // /fapi/v2/account
@@ -369,10 +367,14 @@ export const ENDPOINT_WEIGHT = {
   income: 30, // /fapi/v1/income (fees, funding, realised PnL)
   userTrades: 5, // /fapi/v1/userTrades
   allOrders: 5, // /fapi/v1/allOrders
-  openOrders: 1, // single symbol
-  order: 1, // POST/DELETE /fapi/v1/order
+  order: 1, // POST/GET /fapi/v1/order
+  // Algo Service (STOP_MARKET / TAKE_PROFIT_MARKET). POST /fapi/v1/algoOrder has
+  // IP weight 0 but still counts against the 10 s / 1 min ORDER limits (which the
+  // order-slot gate enforces); a weight of 1 is the conservative budget.
+  algoOrder: 1,
+  algoCancel: 1, // DELETE /fapi/v1/algoOrder
+  algoQuery: 1, // GET /fapi/v1/algoOrder
+  openAlgoOrders: 1, // GET /fapi/v1/openAlgoOrders (single symbol)
   leverage: 1,
   listenKey: 1,
 } as const;
-
-export const AREA_DISTRIBUTION = AREA_SHARE;

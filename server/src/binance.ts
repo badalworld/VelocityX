@@ -17,17 +17,74 @@ import { getSettings, Mode } from './settings';
 import { emit } from './broadcast';
 import { Area, ENDPOINT_WEIGHT, klineWeight, limiter } from './ratelimit';
 
-export const MAINNET_REST = 'https://fapi.binance.com';
-export const TESTNET_REST = 'https://testnet.binancefuture.com';
-export const MAINNET_WS = 'wss://fstream.binance.com';
-export const TESTNET_WS = 'wss://stream.testnet.binancefuture.com';
+const MAINNET_REST = 'https://fapi.binance.com';
+const MAINNET_WS = 'wss://fstream.binance.com';
+/**
+ * Binance replaced the old futures testnet with "demo trading". The REST host
+ * is documented consistently (demo-fapi.binance.com). For the WebSocket, two
+ * documents disagree — the USDⓈ-M docs list wss://demo-fstream.binance.com,
+ * the demo-trading announcement says the old wss://fstream.binancefuture.com
+ * is unchanged — so the user-data stream tries both. Either can be pinned
+ * without a code change: BINANCE_TESTNET_REST / BINANCE_TESTNET_WS (read
+ * lazily, after dotenv).
+ */
+const DEFAULT_TESTNET_REST = 'https://demo-fapi.binance.com';
+const DEFAULT_TESTNET_WS = 'wss://demo-fstream.binance.com';
+const LEGACY_TESTNET_WS = 'wss://fstream.binancefuture.com';
+
+const trimSlash = (u: string) => u.replace(/\/+$/, '');
 
 export function restBase(mode: Mode): string {
-  return mode === 'testnet' ? TESTNET_REST : MAINNET_REST;
+  if (mode !== 'testnet') return MAINNET_REST;
+  return trimSlash(process.env.BINANCE_TESTNET_REST || DEFAULT_TESTNET_REST);
 }
-export function wsBase(mode: Mode): string {
-  return mode === 'testnet' ? TESTNET_WS : MAINNET_WS;
+
+/**
+ * Binance split the USDⓈ-M WebSocket into /public (bookTicker, depth),
+ * /market (kline, markPrice, aggTrade…) and /private (user data). The legacy
+ * `/ws` and `/stream` roots were decommissioned on 2026-04-23.
+ * Market data always comes from mainnet, so these never depend on the mode.
+ */
+export type MarketChannel = 'public' | 'market';
+export function marketStreamUrl(channel: MarketChannel, symbols: string[], interval = '5m'): string {
+  const streams = symbols.map((s) =>
+    channel === 'public' ? `${s.toLowerCase()}@bookTicker` : `${s.toLowerCase()}@kline_${interval}`,
+  );
+  return `${MAINNET_WS}/${channel}/stream?streams=${streams.join('/')}`;
 }
+
+/**
+ * Candidate user-data stream URLs, best first. The official "User Data Streams
+ * Connect" page documents `<base>/private/ws/<listenKey>`; the 2026 change
+ * notice documents the `?listenKey=&events=` form. The stream tries them in
+ * turn when one is refused, so a wording difference in the docs can never
+ * leave the bot without its execution feed. (`scripts/preflight.js` probes the
+ * same list with a real listenKey and reports which form the host accepts.)
+ */
+export function userStreamUrls(mode: Mode, listenKey: string): string[] {
+  const events = 'ORDER_TRADE_UPDATE/ACCOUNT_UPDATE/ALGO_UPDATE/MARGIN_CALL/listenKeyExpired';
+  const forms = (base: string) => ({
+    priv: `${base}/private/ws/${listenKey}`,
+    privEvents: `${base}/private/ws?listenKey=${listenKey}&events=${events}`,
+    privStream: `${base}/private/stream?listenKey=${listenKey}&events=${events}`,
+    legacy: `${base}/ws/${listenKey}`, // decommissioned on mainnet, last resort
+  });
+  if (mode !== 'testnet') {
+    const f = forms(MAINNET_WS);
+    return [f.priv, f.privEvents, f.privStream, f.legacy];
+  }
+  const pinned = process.env.BINANCE_TESTNET_WS;
+  if (pinned) {
+    const f = forms(trimSlash(pinned));
+    return [f.priv, f.privEvents, f.privStream, f.legacy];
+  }
+  const demo = forms(DEFAULT_TESTNET_WS);
+  const old = forms(LEGACY_TESTNET_WS);
+  return [demo.priv, demo.privEvents, old.legacy, old.priv, demo.privStream, demo.legacy, old.privEvents];
+}
+
+/** Order types Binance only accepts through the Algo Service (POST /fapi/v1/algoOrder). */
+const CONDITIONAL_TYPES = new Set(['STOP', 'STOP_MARKET', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET', 'TRAILING_STOP_MARKET']);
 
 export interface SymbolInfo {
   symbol: string;
@@ -50,7 +107,6 @@ export interface ExchangeSymbol {
   stepSize: number;
   tickSize: number;
   minQty: number;
-  minNotional: number;
 }
 
 export interface AccountSnapshot {
@@ -61,8 +117,6 @@ export interface AccountSnapshot {
   availableBalance: number;
   initialMargin: number;
   maintMargin: number;
-  crossWalletBalance: number;
-  openOrderInitialMargin: number;
   /** unrealised PnL ÷ margin in use */
   roiPct: number;
   /** unrealised PnL ÷ wallet balance */
@@ -106,6 +160,24 @@ function fixDec(step: string): number {
 function num(v: unknown, fallback = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** Outcome of one conditional leg — see BinanceApi.algoLegState(). */
+export interface AlgoLegState {
+  state: 'alive' | 'filled' | 'gone' | 'unknown';
+  avgPrice?: number;
+  executedQty?: number;
+  orderId?: string;
+}
+
+/**
+ * Binance's "this order does not exist" family (-2011 unknown order, -2013 order
+ * does not exist). Deliberately NOT a generic "not found": an HTTP 404 from a
+ * proxy, or from an environment without the Algo endpoints, says nothing about
+ * the order and must stay "unknown" (never acted upon).
+ */
+function isUnknownOrder(e: unknown): boolean {
+  return /-2011|-2013|unknown order|order does not exist/i.test(String((e as any)?.message ?? e));
 }
 
 export class BinanceApi {
@@ -257,8 +329,6 @@ export class BinanceApi {
       availableBalance: num(a.availableBalance),
       initialMargin,
       maintMargin: num(a.totalMaintMargin),
-      crossWalletBalance: num(a.crossWalletBalance),
-      openOrderInitialMargin: num(a.totalOpenOrderInitialMargin),
       roiPct: initialMargin > 0 ? (unrealizedPnl / initialMargin) * 100 : 0,
       roiOnWalletPct: walletBalance > 0 ? (unrealizedPnl / walletBalance) * 100 : 0,
       canTrade: !!a.canTrade,
@@ -393,14 +463,13 @@ export class BinanceApi {
     const list: ExchangeSymbol[] = (info.symbols || [])
       .filter((s: any) => s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
       .map((s: any) => {
-        let stepSize = 0.001, tickSize = 0.01, minQty = 0.001, minNotional = 5;
+        let stepSize = 0.001, tickSize = 0.01, minQty = 0.001;
         for (const f of s.filters || []) {
           if (f.filterType === 'LOT_SIZE') {
             stepSize = num(f.stepSize, stepSize);
             minQty = num(f.minQty, minQty);
           }
           if (f.filterType === 'PRICE_FILTER') tickSize = num(f.tickSize, tickSize);
-          if (f.filterType === 'MIN_NOTIONAL') minNotional = num(f.minNotional, minNotional);
         }
         return {
           symbol: String(s.symbol),
@@ -413,7 +482,6 @@ export class BinanceApi {
           stepSize,
           tickSize,
           minQty,
-          minNotional,
         };
       });
     this.exchangeCache = { list, at: Date.now() };
@@ -498,8 +566,8 @@ export class BinanceApi {
     if (signedReq) {
       const { key, secret } = this.keys();
       if (!key || !secret) throw new Error(`No API keys configured for ${this.orderMode()} mode`);
-      // Keep signed requests aligned with Binance time. A -1021 GET recovery
-      // updates this offset via ping(); POSTs are never blindly retried.
+      // Keep signed requests aligned with Binance time: ping() (at boot, every few
+      // minutes, and after any -1021) maintains this offset. POSTs are never blindly retried.
       q.append('timestamp', String(Date.now() + this.telemetry.serverTimeOffsetMs));
       q.append('recvWindow', '5000');
       const query = q.toString();
@@ -543,10 +611,13 @@ export class BinanceApi {
       this.telemetry.errors += 1;
       this.telemetry.lastRestError = `HTTP ${r.status}: ${body.slice(0, 200)}`;
       this.telemetry.lastRestErrorAt = Date.now();
-      // -1021 = timestamp out of recvWindow — resync the clock and retry once.
-      if (/-1021/.test(body) && retries > 0) {
+      // -1021 = timestamp out of recvWindow. Always resync the clock so the NEXT
+      // request is signed with Binance time; only requests that are safe to
+      // repeat (retries > 0: GETs) are retried right away. A rejected POST is
+      // never replayed blindly.
+      if (/-1021/.test(body)) {
         const ping = await this.ping().catch(() => null);
-        if (ping?.ok) {
+        if (ping?.ok && retries > 0) {
           await new Promise((res) => setTimeout(res, 250));
           return this.request({ ...opts, retries: retries - 1 });
         }
@@ -567,9 +638,15 @@ export class BinanceApi {
     } catch {
       throw new Error(`Binance ${path} bad response: ${body.slice(0, 300)}`);
     }
-    if (json && json.code) {
-      const msg = json.msg || body;
-      throw new Error(`Binance ${path} error ${json.code}: ${msg}`);
+    // Binance reports failures with a negative `code`. Some SUCCESS replies carry
+    // a code too — marginType → {"code":200,"msg":"success"}, DELETE algoOrder →
+    // {"code":"200",…} — so a bare truthiness test would turn a confirmed change
+    // into a thrown error (and abort the entry that triggered it).
+    if (json && typeof json === 'object' && !Array.isArray(json) && json.code !== undefined) {
+      const code = Number(json.code);
+      if (Number.isFinite(code) && code !== 200 && code !== 0) {
+        throw new Error(`Binance ${path} error ${json.code}: ${json.msg || body}`);
+      }
     }
     return json;
   }
@@ -630,37 +707,35 @@ export class BinanceApi {
     return value;
   }
 
+  /**
+   * Regular order: MARKET entries and reduceOnly MARKET exits.
+   *
+   * Conditional types (STOP_MARKET, TAKE_PROFIT_MARKET, …) are refused here on
+   * purpose — since 2025-12-09 Binance rejects them on this endpoint with
+   * -4120 STOP_ORDER_SWITCH_ALGO. They go through newAlgoOrder().
+   */
   async newOrder(order: Record<string, any>): Promise<any> {
+    if (CONDITIONAL_TYPES.has(String(order.type))) {
+      throw new Error(`${order.type} is a conditional order — it must be placed with newAlgoOrder() (Binance Algo Service)`);
+    }
     const dual = await this.isDualSide();
     const params: Record<string, any> = { ...order };
     if (dual && !params.positionSide) {
-      const isClose = !!(order.closePosition || order.reduceOnly || order.closePosition === 'true');
-      params.positionSide = isClose
+      params.positionSide = order.reduceOnly
         ? order.side === 'SELL' ? 'LONG' : 'SHORT'
         : order.side === 'BUY' ? 'LONG' : 'SHORT';
     }
     return this.signed('POST', '/fapi/v1/order', params, 'orders', ENDPOINT_WEIGHT.order);
   }
 
-  async cancelOrder(symbol: string, orderId?: string, origClientOrderId?: string): Promise<any> {
-    const p: any = { symbol };
-    if (orderId) p.orderId = orderId;
-    if (origClientOrderId) p.origClientOrderId = origClientOrderId;
-    try {
-      return await this.signed('DELETE', '/fapi/v1/order', p, 'orders', ENDPOINT_WEIGHT.order);
-    } catch (e: any) {
-      if (/Unknown order|-2011/.test(String(e?.message))) return null;
-      throw e;
-    }
-  }
-
-  async openOrders(symbol: string): Promise<any[]> {
-    return (await this.signed('GET', '/fapi/v1/openOrders', { symbol }, 'account', ENDPOINT_WEIGHT.openOrders)) as any[];
-  }
-
   /** Resolve an uncertain POST by the idempotent client order id. */
   async queryOrder(symbol: string, origClientOrderId: string): Promise<any> {
     return this.signed('GET', '/fapi/v1/order', { symbol, origClientOrderId }, 'orders', ENDPOINT_WEIGHT.order);
+  }
+
+  /** A matching-engine order by its numeric id (e.g. the order an algo trigger produced). */
+  async orderById(symbol: string, orderId: string | number): Promise<any> {
+    return this.signed('GET', '/fapi/v1/order', { symbol, orderId }, 'account', ENDPOINT_WEIGHT.order);
   }
 
   async marketOrder(
@@ -678,74 +753,141 @@ export class BinanceApi {
     return this.newOrder(p);
   }
 
-  /**
-   * STOP_MARKET protective order.
-   *
-   * The executor always sends an explicit `quantity` with `reduceOnly` (one-way
-   * mode) so the stop can only ever shrink OUR position — it can never exceed
-   * the bot's own size and therefore can never touch a manual/external
-   * position that happens to live on the same symbol. Hedge mode uses
-   * `positionSide` for the same guarantee (Binance forbids reduceOnly there).
-   */
-  async stopMarket(
-    symbol: string,
-    side: 'BUY' | 'SELL',
-    stopPrice: number,
-    opts: { closePosition?: boolean; qty?: number; reduceOnly?: boolean; newClientOrderId?: string; positionSide?: string } = {},
-  ): Promise<any> {
-    const p: any = { symbol, side, type: 'STOP_MARKET', stopPrice: fmtPrice(stopPrice) };
-    if (opts.closePosition) p.closePosition = 'true';
-    if (opts.reduceOnly && !opts.closePosition) p.reduceOnly = 'true';
-    if (opts.qty && opts.qty > 0) p.quantity = fmtQty(opts.qty);
-    if (opts.newClientOrderId) p.newClientOrderId = opts.newClientOrderId;
-    if (opts.positionSide) p.positionSide = opts.positionSide;
-    return this.newOrder(p);
+  // ---------------- conditional (Algo Service) orders ----------------
+  //
+  // Stops and take-profits live in Binance's Algo Service: POST/DELETE/GET
+  // /fapi/v1/algoOrder, GET /fapi/v1/openAlgoOrders, and ALGO_UPDATE on the
+  // user stream. Differences from the old /fapi/v1/order path: `triggerPrice`
+  // (not stopPrice), `clientAlgoId` (not newClientOrderId), `algoId` in the
+  // reply, and a separate matching-engine order once the trigger fires.
+
+  async newAlgoOrder(params: Record<string, any>): Promise<any> {
+    const body: Record<string, any> = {
+      algoType: 'CONDITIONAL',
+      workingType: 'CONTRACT_PRICE',
+      newOrderRespType: 'ACK',
+      ...params,
+    };
+    try {
+      return await this.signed('POST', '/fapi/v1/algoOrder', body, 'orders', ENDPOINT_WEIGHT.algoOrder);
+    } catch (e) {
+      // A POST that failed in transit may still have been accepted. Resolve it
+      // by its unique client id so a lost response is never treated as a
+      // missing protective leg (and POSTs are still never blindly repeated).
+      const cid = body.clientAlgoId;
+      if (cid) {
+        try {
+          const found = await this.queryAlgoOrder(String(cid), 'orders');
+          const status = String(found?.algoStatus || '').toUpperCase();
+          if (found && status && !['CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED'].includes(status)) return found;
+        } catch { /* not found — the original error stands */ }
+      }
+      throw e;
+    }
   }
 
-  /** Protective STOP_MARKET for `qty` of the bot position — never close-all. */
+  async queryAlgoOrder(clientAlgoId: string, area: Area = 'account'): Promise<any> {
+    return this.signed('GET', '/fapi/v1/algoOrder', { clientAlgoId }, area, ENDPOINT_WEIGHT.algoQuery);
+  }
+
+  /** Conditional orders that are still waiting for their trigger (status NEW). */
+  async openAlgoOrders(symbol: string): Promise<any[]> {
+    const rows = await this.signed('GET', '/fapi/v1/openAlgoOrders', { symbol }, 'account', ENDPOINT_WEIGHT.openAlgoOrders);
+    return Array.isArray(rows) ? rows : Array.isArray(rows?.orders) ? rows.orders : [];
+  }
+
+  /**
+   * Cancel ONE conditional order by its client id. Deliberately never uses
+   * DELETE /fapi/v1/algoOpenOrders — that cancels every algo order on the
+   * symbol, including a manual one the bot must not touch.
+   */
+  async cancelAlgoOrder(symbol: string, clientAlgoId: string): Promise<any | null> {
+    try {
+      return await this.signed('DELETE', '/fapi/v1/algoOrder', { symbol, clientAlgoId }, 'orders', ENDPOINT_WEIGHT.algoCancel);
+    } catch (e: any) {
+      if (isUnknownOrder(e)) return null;
+      throw e;
+    }
+  }
+
+  /**
+   * What became of one conditional leg? `alive` = still waiting for its
+   * trigger, `filled` = it fired and the resulting order executed, `gone` =
+   * cancelled / expired / rejected / never existed, `unknown` = the exchange
+   * could not tell us right now (never acted upon — the next pass retries).
+   */
+  async algoLegState(symbol: string, clientAlgoId: string): Promise<AlgoLegState> {
+    let a: any;
+    try {
+      a = await this.queryAlgoOrder(clientAlgoId);
+    } catch (e: any) {
+      return isUnknownOrder(e) ? { state: 'gone' } : { state: 'unknown' };
+    }
+    const status = String(a?.algoStatus || '').toUpperCase();
+    if (status === 'NEW') return { state: 'alive' };
+    if (['CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED'].includes(status)) return { state: 'gone' };
+    // TRIGGERING | TRIGGERED | FINISHED — the trigger fired. Confirm that the
+    // matching-engine order it produced really executed before calling it a fill.
+    const orderId = String(a?.actualOrderId || '');
+    if (!orderId) return { state: 'unknown' };
+    try {
+      const o = await this.orderById(symbol, orderId);
+      const executedQty = num(o?.executedQty);
+      const orderStatus = String(o?.status || '').toUpperCase();
+      const avgPrice = num(o?.avgPrice) || num(a?.actualPrice);
+      if (orderStatus === 'FILLED' || (['CANCELED', 'EXPIRED'].includes(orderStatus) && executedQty > 0)) {
+        return { state: 'filled', avgPrice, executedQty, orderId };
+      }
+      if (['CANCELED', 'EXPIRED', 'REJECTED'].includes(orderStatus)) return { state: 'gone' };
+      return { state: 'unknown' };
+    } catch {
+      return { state: 'unknown' };
+    }
+  }
+
+  /**
+   * One reduce-only conditional MARKET leg for the bot's OWN quantity — never
+   * close-all. One-way mode: `reduceOnly` + explicit quantity, so a leg can
+   * only shrink our position. Hedge mode: `positionSide` (Binance forbids
+   * reduceOnly there) scopes the leg to the bot's side.
+   */
+  private async conditionalLeg(
+    type: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET',
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    triggerPrice: number,
+    qty: number,
+    clientAlgoId?: string,
+    positionSide?: string,
+  ): Promise<any> {
+    const dual = await this.isDualSide();
+    const p: Record<string, any> = { symbol, side, type, triggerPrice: fmtPrice(triggerPrice), quantity: fmtQty(qty) };
+    if (dual) p.positionSide = positionSide ?? (side === 'SELL' ? 'LONG' : 'SHORT');
+    else p.reduceOnly = 'true';
+    if (clientAlgoId) p.clientAlgoId = clientAlgoId;
+    return this.newAlgoOrder(p);
+  }
+
+  /** Protective STOP_MARKET for `qty` of the bot position. */
   async protectiveStop(
     symbol: string,
     closeSide: 'BUY' | 'SELL',
     stopPrice: number,
     qty: number,
-    newClientOrderId: string,
+    clientAlgoId: string,
   ): Promise<any> {
-    const dual = await this.isDualSide();
-    return this.stopMarket(symbol, closeSide, stopPrice, {
-      qty,
-      // Hedge mode: positionSide (inferred in newOrder) scopes the stop to the
-      // bot's own side, which is the strongest guarantee Binance offers there.
-      reduceOnly: !dual,
-      positionSide: dual ? (closeSide === 'SELL' ? 'LONG' : 'SHORT') : undefined,
-      newClientOrderId,
-    });
+    return this.conditionalLeg('STOP_MARKET', symbol, closeSide, stopPrice, qty, clientAlgoId);
   }
 
-  /**
-   * Take-profit leg for the bot's own quantity. One-way mode uses `reduceOnly`
-   * (the leg can only shrink our position); hedge mode must use `positionSide`
-   * instead — Binance rejects reduceOnly there — and `positionSide` always
-   * scopes the order to the bot's own side.
-   */
+  /** Take-profit leg for the bot's own quantity. */
   async takeProfitMarket(
     symbol: string,
     side: 'BUY' | 'SELL',
-    stopPrice: number,
+    triggerPrice: number,
     qty: number,
-    opts: { newClientOrderId?: string; positionSide?: string } = {},
+    opts: { clientAlgoId?: string; positionSide?: string } = {},
   ): Promise<any> {
-    const dual = await this.isDualSide();
-    const p: any = {
-      symbol,
-      side,
-      type: 'TAKE_PROFIT_MARKET',
-      stopPrice: fmtPrice(stopPrice),
-      quantity: fmtQty(qty),
-    };
-    if (!dual) p.reduceOnly = 'true';
-    if (opts.newClientOrderId) p.newClientOrderId = opts.newClientOrderId;
-    if (opts.positionSide) p.positionSide = opts.positionSide;
-    return this.newOrder(p);
+    return this.conditionalLeg('TAKE_PROFIT_MARKET', symbol, side, triggerPrice, qty, opts.clientAlgoId, opts.positionSide);
   }
 
   // ---------------- user data stream ----------------
@@ -772,26 +914,27 @@ export class BinanceApi {
     if (!key) return;
     const base = restBase(this.orderMode());
     await limiter.acquire('stream', ENDPOINT_WEIGHT.listenKey, 2);
-    await fetch(`${base}/fapi/v1/listenKey`, {
+    const r = await fetch(`${base}/fapi/v1/listenKey`, {
       method: 'PUT',
       headers: { 'X-MBX-APIKEY': key },
       signal: AbortSignal.timeout(10_000),
     });
+    limiter.observeHeaders(r.headers);
+    // A rejected keep-alive (-1125 "this listenKey does not exist") means the
+    // key is dead and the execution feed has silently stopped: the caller must
+    // see it and rebuild the stream with a fresh key.
+    if (!r.ok) throw new Error(`listenKey keep-alive HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 200)}`);
   }
-
-  /** Combined market-data stream URL (bookTicker + kline per active symbol). */
-  marketStreamUrl(symbols: string[], interval = '5m'): string {
-    const streams = symbols.flatMap((s) => [`${s.toLowerCase()}@bookTicker`, `${s.toLowerCase()}@kline_${interval}`]);
-    return `${MAINNET_WS}/stream?streams=${streams.join('/')}`;
-  }
 }
 
-export function fmtQty(q: number): string {
-  return String(Number(q.toFixed(8)));
+/** Plain decimal string (never exponent form), trailing zeros trimmed, 8 dp max. */
+function plainDecimal(n: number): string {
+  if (!Number.isFinite(n)) throw new Error(`cannot format ${n} as an order number`);
+  const fixed = n.toFixed(8);
+  return fixed.includes('.') ? fixed.replace(/0+$/, '').replace(/\.$/, '') : fixed;
 }
-export function fmtPrice(p: number): string {
-  return String(Number(p.toFixed(8)));
-}
+export const fmtQty = plainDecimal;
+export const fmtPrice = plainDecimal;
 
 /** Round DOWN to a lot step (decimal-safe enough for exchange steps). */
 export function floorToStep(v: number, step: number): number {
