@@ -1,9 +1,9 @@
 /**
  * Signal engine — multi-symbol.
  *
- * Watches every symbol the market scanner selected (top high-volatility
- * trending markets, ≤ maxPositions) plus the primary chart symbol, and fires
- * signals from the indicator's non-repaint rule (EMA11/EMA34 confirmed cross)
+ * Watches every retained Opportunity Zone plus the primary symbol and every
+ * bot-managed position, and fires signals from the indicator's non-repaint
+ * rule (EMA11/EMA34 confirmed cross)
  * on closed 5m candles.
  *
  * Only candles that CLOSE AFTER a symbol was first watched are acted on — no
@@ -42,6 +42,9 @@ class Engine {
   private startedAt = Date.now();
   private lastProcessed = new Map<string, number>();
   private baselined = new Set<string>();
+  /** Current continuous watch session. Leaving and later re-entering a zone must
+   *  establish a new baseline, never replay a crossover that happened away. */
+  private watched = new Set<string>();
   private lastSignalRec: SignalRecord | null = null;
   private lastTickAt = 0;
   /** Throttle "candles fetch failed" per symbol so an exchange outage does not
@@ -80,6 +83,14 @@ class Engine {
     try {
       const s = getSettings();
       const symbols = this.activeSymbols();
+      const nextWatched = new Set(symbols);
+      for (const symbol of this.watched) {
+        if (!nextWatched.has(symbol)) {
+          this.baselined.delete(symbol);
+          this.lastProcessed.delete(symbol);
+        }
+      }
+      this.watched = nextWatched;
       this.lastTickAt = Date.now();
 
       for (const symbol of symbols) {
@@ -115,9 +126,20 @@ class Engine {
         if (closed.time <= prev) continue;
         this.lastProcessed.set(symbol, closed.time);
 
-        const sig: SignalSide | null = signalAt(snap.emas[1], snap.emas[7], idx);
+        const fastIndex = s.emaLengths.indexOf(11);
+        const slowIndex = s.emaLengths.indexOf(34);
+        if (fastIndex < 0 || slowIndex < 0) continue; // settings sanitizer normally guarantees both
+        const sig: SignalSide | null = signalAt(snap.emas[fastIndex], snap.emas[slowIndex], idx);
         const atrVal = snap.atrSeries[idx];
         if (!sig || !Number.isFinite(atrVal)) continue;
+        // In auto-scan mode, dashboard-only symbols do not create actionable
+        // noise. A signal is journalled only for a live zone or for an already
+        // managed trade (which still needs opposite-signal exit handling).
+        if (
+          s.autoScan &&
+          !scanner.isExecutionEligible(symbol, sig) &&
+          !trader.managedSymbols().includes(symbol)
+        ) continue;
 
         const record: SignalRecord = {
           id: rndId(),
@@ -139,7 +161,12 @@ class Engine {
           msg: `${symbol} signal ${sig} @ ${closed.close} — ATR ${atrVal.toFixed(4)}`,
         });
 
+        // Capture zone eligibility before execution. A handled signal consumes
+        // the zone (TRIGGERED when disarmed/failed, EXECUTED when a trade was
+        // opened), so it can never be replayed after auto-trade is enabled.
+        const zoneEligible = s.autoScan && scanner.isExecutionEligible(symbol, sig);
         await trader.onSignal({ record, side: sig, price: closed.close, atr: atrVal } as OpenSignal);
+        if (zoneEligible) scanner.markSignal(symbol, sig, record.id, record.tradeId);
       }
     } catch (e: any) {
       console.error('[engine]', e?.message || e);
@@ -159,7 +186,9 @@ class Engine {
     const i = candles.length - 1;
     const last = candles[i];
     const vals = snap.emas.map((a) => a[i]);
-    const bull = vals[7] < vals[1];
+    const fastIndex = s.emaLengths.indexOf(11);
+    const slowIndex = s.emaLengths.indexOf(34);
+    const bull = fastIndex >= 0 && slowIndex >= 0 && vals[slowIndex] < vals[fastIndex];
     return {
       symbol: sym,
       interval: s.interval,
@@ -214,8 +243,8 @@ export async function mtfDashboard(symbol?: string): Promise<any> {
     try {
       const ks = await api.klines(sym, tfToInterval(tf), 300, 30_000);
       const closes = ks.map((c) => c.close);
-      const f = ema(closes, s.emaLengths[1]);
-      const sl = ema(closes, s.emaLengths[7]);
+      const f = ema(closes, 11);
+      const sl = ema(closes, 34);
       const i = ks.length - 1;
       isBull = Number.isFinite(f[i]) && Number.isFinite(sl[i]) && sl[i] < f[i];
     } catch { isBull = false; }

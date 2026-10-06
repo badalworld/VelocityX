@@ -360,7 +360,7 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                 <input
                   className="input"
                   type="number"
-                  min={15}
+                  min={30}
                   max={600}
                   value={draft.scanner.intervalSec}
                   onChange={(e) => set({ scanner: { ...draft.scanner, intervalSec: Number(e.target.value) } })}
@@ -425,32 +425,72 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
             </div>
             <div className="frow two">
               <label className="field">
-                <span className="field-label">Candidates analysed per scan</span>
+                <span className="field-label">Assets analysed per scan (default 50)</span>
                 <input
                   className="input"
                   type="number"
-                  min={8}
+                  min={10}
                   max={80}
                   value={draft.scanner.candidates}
                   onChange={(e) => set({ scanner: { ...draft.scanner, candidates: Number(e.target.value) } })}
                 />
               </label>
               <label className="field">
-                <span className="field-label">Symbols handed to the engine</span>
+                <span className="field-label">Maximum retained opportunity zones</span>
                 <input
                   className="input"
                   type="number"
                   min={1}
-                  max={8}
+                  max={24}
                   value={draft.scanner.topN}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, topN: Math.min(8, Number(e.target.value)) } })}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, topN: Math.min(24, Number(e.target.value)) } })}
                 />
               </label>
+            </div>
+            <div className="frow three">
+              <label className="field">
+                <span className="field-label">Min setup quality (0–100)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={draft.scanner.minOpportunityScore}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minOpportunityScore: Number(e.target.value) } })}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Max EMA gap (5m ATR)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={0.05}
+                  max={3}
+                  step={0.05}
+                  value={draft.scanner.maxEmaGapAtr}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, maxEmaGapAtr: Number(e.target.value) } })}
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Zone retention (minutes)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={5}
+                  max={240}
+                  value={draft.scanner.zoneRetentionMin}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, zoneRetentionMin: Number(e.target.value) } })}
+                />
+              </label>
+            </div>
+            <div className="hint">
+              The setup score is a deterministic quality ranking, not a promised probability. Zones are retained while
+              the next batch continues, but stale zones expire and a missed signal is never replayed.
             </div>
             <div className="hint warn" style={{ display: 'flex', gap: 7 }}>
               <IconAlert style={{ width: 14, height: 14, flex: 'none', marginTop: 2 }} />
               Stable / pegged / staked / wrapped / index markets (USDC, FDUSD, BNSOL, WBETH, BTCDOM…) are rejected
-              automatically — the bot only trades trending, volatile directional markets.
+              automatically — only a retained opportunity zone may reach auto-execution.
             </div>
           </div>
         </>
@@ -461,7 +501,7 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
           <h4>Indicator parameters (SUPER INDIBOT defaults)</h4>
           <div className="frow three">
             <label className="field">
-              <span className="field-label">EMA lengths (8)</span>
+              <span className="field-label">EMA ribbon (8+, include 11 & 34)</span>
               <input
                 className="input"
                 value={draft.emaLengths.join(',')}
@@ -470,7 +510,7 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                     .split(',')
                     .map((x) => parseInt(x.trim(), 10))
                     .filter((x) => Number.isFinite(x) && x > 0);
-                  if (arr.length >= 2) set({ emaLengths: arr });
+                  if (arr.length >= 8) set({ emaLengths: arr });
                 }}
               />
             </label>
@@ -516,8 +556,9 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
             </label>
           </div>
           <div className="hint">
-            Signals: <b>confirmed crossover of EMA{draft.emaLengths[1]}/EMA{draft.emaLengths[7]}</b> on a closed 5m bar
-            (entry = signal candle close). Values match the TradingView script — non-repaint.
+            Signals: <b>confirmed EMA11/EMA34 crossover</b> on a closed 5m bar (entry = signal candle close).
+            The ribbon may include additional lengths, but 11 and 34 are required so scanner qualification and execution
+            always use the same non-repainting rule.
           </div>
         </div>
       )}

@@ -166,14 +166,25 @@ export class BinanceApi {
 
   // ---------------- market data (mainnet public) ----------------
 
-  async klines(symbol: string, interval: string, limit = 500, cacheMs = 2500): Promise<Candle[]> {
+  async klines(
+    symbol: string,
+    interval: string,
+    limit = 500,
+    cacheMs = 2500,
+    area: Area = 'market',
+  ): Promise<Candle[]> {
     const ck = `${symbol}|${interval}|${limit}`;
     const hit = this.klineCache.get(ck);
     if (hit && Date.now() - hit.at < cacheMs) return hit.data;
 
     try {
       const p = this.throttle(ck, () =>
-        this.publicGet('/fapi/v1/klines', { symbol, interval, limit: Math.min(limit, 1500) }, 'market', klineWeight(Math.min(limit, 1500))),
+        this.publicGet(
+          '/fapi/v1/klines',
+          { symbol, interval, limit: Math.min(limit, 1500) },
+          area,
+          klineWeight(Math.min(limit, 1500)),
+        ),
       );
       const raw = (await p) as any[];
       const data: Candle[] = raw.map((k) => ({
@@ -314,8 +325,9 @@ export class BinanceApi {
     const t0 = Date.now();
     try {
       const j = (await this.publicGet('/fapi/v1/time', {}, 'market', ENDPOINT_WEIGHT.time)) as any;
-      const latencyMs = Date.now() - t0;
-      const serverTimeOffsetMs = num(j.serverTime) - Date.now();
+      const receivedAt = Date.now();
+      const latencyMs = receivedAt - t0;
+      const serverTimeOffsetMs = num(j.serverTime) - Math.round((t0 + receivedAt) / 2);
       this.telemetry.lastLatencyMs = latencyMs;
       this.telemetry.avgLatencyMs = this.telemetry.avgLatencyMs
         ? Math.round(this.telemetry.avgLatencyMs * 0.7 + latencyMs * 0.3)
@@ -327,10 +339,20 @@ export class BinanceApi {
     }
   }
 
-  async positionAmount(symbol: string): Promise<number> {
+  async positionAmount(symbol: string, positionSide?: 'LONG' | 'SHORT'): Promise<number> {
     const rows = (await this.signed('GET', '/fapi/v2/positionRisk', { symbol }, 'account', ENDPOINT_WEIGHT.positionRisk)) as any[];
-    const r = rows.find((x) => x.symbol === symbol);
-    return r ? num(r.positionAmt) : 0;
+    const matches = (rows || []).filter((x) => x.symbol === symbol);
+    if (positionSide) {
+      const exact = matches.find((x) => String(x.positionSide || 'BOTH') === positionSide);
+      const oneWay = matches.find((x) => String(x.positionSide || 'BOTH') === 'BOTH');
+      return num((exact || oneWay)?.positionAmt);
+    }
+    // Ownership checks must notice either hedge-mode leg. A net sum could hide
+    // equal LONG/SHORT positions, so return the largest absolute leg instead.
+    return matches.reduce((largest, r) => {
+      const amount = num(r.positionAmt);
+      return Math.abs(amount) > Math.abs(largest) ? amount : largest;
+    }, 0);
   }
 
   /**
@@ -338,9 +360,14 @@ export class BinanceApi {
    * Cached for 1h. Used to clamp the configured leverage BEFORE the entry so a
    * 10× setting on a 5× market is downgraded instead of failing the trade.
    */
-  private bracketCache: { at: number; list: Map<string, number> } | null = null;
+  private bracketCache: { at: number; accountKey: string; list: Map<string, number> } | null = null;
   async maxLeverage(symbol: string): Promise<number> {
-    if (this.bracketCache && Date.now() - this.bracketCache.at < 3600_000) {
+    const { key } = this.keys();
+    const accountKey = `${this.orderMode()}:${key}`;
+    if (
+      this.bracketCache?.accountKey === accountKey &&
+      Date.now() - this.bracketCache.at < 3600_000
+    ) {
       return this.bracketCache.list.get(symbol) ?? 0;
     }
     try {
@@ -350,7 +377,7 @@ export class BinanceApi {
         const max = Math.max(1, ...(r?.brackets || []).map((b: any) => num(b?.initialLeverage)));
         if (r?.symbol) list.set(String(r.symbol), max);
       }
-      this.bracketCache = { at: Date.now(), list };
+      this.bracketCache = { at: Date.now(), accountKey, list };
       return list.get(symbol) ?? 0;
     } catch {
       // Bracket lookup is best-effort: without it we keep the operator's value
@@ -394,27 +421,49 @@ export class BinanceApi {
   }
 
   async exchangeInfo(symbol: string): Promise<SymbolInfo> {
-    const hit = this.symbolCache.get(symbol);
+    // Order filters must come from the environment that will receive the order.
+    // Testnet and mainnet do not necessarily list the same symbols/lot steps;
+    // the scanner intentionally uses mainnet public data, but execution cannot.
+    const mode = this.orderMode();
+    const cacheKey = `${mode}:${symbol}`;
+    const hit = this.symbolCache.get(cacheKey);
     if (hit && Date.now() - hit.at < 3600_000) return hit.info;
-    let list: ExchangeSymbol[];
+    let raw: any;
     try {
-      list = await this.exchangeInfoAll();
+      raw = await this.request({
+        method: 'GET',
+        base: restBase(mode),
+        path: '/fapi/v1/exchangeInfo',
+        params: { symbol },
+        area: 'market',
+        weight: ENDPOINT_WEIGHT.exchangeInfo,
+        signedReq: false,
+      });
     } catch (e) {
       this.markUnreachable();
       throw e;
     }
-    const s = list.find((x) => x.symbol === symbol);
-    if (!s) throw new Error(`Symbol ${symbol} not found on Binance Futures`);
+    const s = (raw?.symbols || []).find((x: any) => String(x.symbol) === symbol);
+    if (!s) throw new Error(`Symbol ${symbol} not found on Binance Futures ${mode}`);
+    let stepSize = 0.001, tickSize = 0.01, minQty = 0.001, minNotional = 5;
+    for (const f of s.filters || []) {
+      if (f.filterType === 'LOT_SIZE') {
+        stepSize = num(f.stepSize, stepSize);
+        minQty = num(f.minQty, minQty);
+      }
+      if (f.filterType === 'PRICE_FILTER') tickSize = num(f.tickSize, tickSize);
+      if (f.filterType === 'MIN_NOTIONAL') minNotional = num(f.notional ?? f.minNotional, minNotional);
+    }
     const info2: SymbolInfo = {
       symbol,
-      stepSize: s.stepSize,
-      tickSize: s.tickSize,
-      minQty: s.minQty,
-      minNotional: s.minNotional,
-      stepDecimals: fixDec(String(s.stepSize)),
-      tickDecimals: fixDec(String(s.tickSize)),
+      stepSize,
+      tickSize,
+      minQty,
+      minNotional,
+      stepDecimals: fixDec(String(stepSize)),
+      tickDecimals: fixDec(String(tickSize)),
     };
-    this.symbolCache.set(symbol, { info: info2, at: Date.now() });
+    this.symbolCache.set(cacheKey, { info: info2, at: Date.now() });
     return info2;
   }
 
@@ -449,7 +498,9 @@ export class BinanceApi {
     if (signedReq) {
       const { key, secret } = this.keys();
       if (!key || !secret) throw new Error(`No API keys configured for ${this.orderMode()} mode`);
-      q.append('timestamp', String(Date.now()));
+      // Keep signed requests aligned with Binance time. A -1021 GET recovery
+      // updates this offset via ping(); POSTs are never blindly retried.
+      q.append('timestamp', String(Date.now() + this.telemetry.serverTimeOffsetMs));
       q.append('recvWindow', '5000');
       const query = q.toString();
       const sig = crypto.createHmac('sha256', secret).update(query).digest('hex');
@@ -558,23 +609,25 @@ export class BinanceApi {
     try {
       await this.signed('POST', '/fapi/v1/marginType', { symbol, marginType: 'ISOLATED' }, 'orders', 1);
     } catch (e: any) {
-      if (!/No need to change|already/i.test(String(e?.message))) {
-        console.warn('[binance] marginType:', e?.message);
-      }
+      if (/No need to change|already/i.test(String(e?.message))) return;
+      // Entry sizing assumes isolated margin. Do not silently place a cross-
+      // margin trade when this precondition could not be confirmed.
+      throw e;
     }
   }
 
-  /** Hedge-mode detection (positionSide). Cached per process. */
-  private dualSide: boolean | null = null;
+  /** Hedge-mode detection, scoped to the active environment + API account. */
+  private dualSide: { accountKey: string; value: boolean } | null = null;
   async isDualSide(): Promise<boolean> {
-    if (this.dualSide !== null) return this.dualSide;
-    try {
-      const d = await this.signed('GET', '/fapi/v1/positionSide/dual', {}, 'account', 1);
-      this.dualSide = !!d.dualSidePosition;
-    } catch {
-      this.dualSide = false;
-    }
-    return this.dualSide;
+    const { key } = this.keys();
+    const accountKey = `${this.orderMode()}:${key}`;
+    if (this.dualSide?.accountKey === accountKey) return this.dualSide.value;
+    // Fail closed: guessing one-way mode on a transient error can make Binance
+    // reject every protective hedge-mode order after an entry.
+    const d = await this.signed('GET', '/fapi/v1/positionSide/dual', {}, 'account', 1);
+    const value = !!d.dualSidePosition;
+    this.dualSide = { accountKey, value };
+    return value;
   }
 
   async newOrder(order: Record<string, any>): Promise<any> {
@@ -605,13 +658,20 @@ export class BinanceApi {
     return (await this.signed('GET', '/fapi/v1/openOrders', { symbol }, 'account', ENDPOINT_WEIGHT.openOrders)) as any[];
   }
 
+  /** Resolve an uncertain POST by the idempotent client order id. */
+  async queryOrder(symbol: string, origClientOrderId: string): Promise<any> {
+    return this.signed('GET', '/fapi/v1/order', { symbol, origClientOrderId }, 'orders', ENDPOINT_WEIGHT.order);
+  }
+
   async marketOrder(
     symbol: string,
     side: 'BUY' | 'SELL',
     qty: number,
     opts: { reduceOnly?: boolean; positionSide?: string; newClientOrderId?: string } = {},
   ): Promise<any> {
-    const p: any = { symbol, side, type: 'MARKET', quantity: fmtQty(qty) };
+    // RESULT returns the actual terminal MARKET status/fill instead of an ACK
+    // that merely says Binance accepted the request.
+    const p: any = { symbol, side, type: 'MARKET', quantity: fmtQty(qty), newOrderRespType: 'RESULT' };
     if (opts.reduceOnly) p.reduceOnly = 'true';
     if (opts.newClientOrderId) p.newClientOrderId = opts.newClientOrderId;
     if (opts.positionSide) p.positionSide = opts.positionSide;

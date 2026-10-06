@@ -41,7 +41,15 @@ export interface Trade {
   mode: Mode;
   result: 'WIN' | 'LOSS' | null;
   botOwned: true;
-  scan?: { volatility: number; adx: number; atrPct: number; rank: number } | null;
+  scan?: {
+    volatility: number;
+    adx: number;
+    atrPct: number;
+    rank: number;
+    setupScore?: number;
+    emaGapAtr?: number;
+    opportunity?: boolean;
+  } | null;
   unrealized?: number;
 }
 
@@ -142,6 +150,41 @@ export interface PositionsPayload {
   at: number;
 }
 
+export type OpportunityState = 'MONITORING' | 'TRIGGERED' | 'EXECUTED';
+
+export interface OpportunityZone {
+  symbol: string;
+  base: string;
+  side: 'LONG' | 'SHORT';
+  state: OpportunityState;
+  score: number;
+  rank: number;
+  price: number;
+  adx: number;
+  atrPct: number;
+  atrPct5m: number;
+  emaGapPct: number;
+  emaGapAtr: number;
+  enteredAt: number;
+  lastQualifiedAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  signalId: string | null;
+  signalAt: number | null;
+  tradeId: string | null;
+  reason: string;
+}
+
+export interface ScanProgress {
+  id: string;
+  running: boolean;
+  target: number;
+  completed: number;
+  failed: number;
+  startedAt: number;
+  updatedAt: number;
+}
+
 export interface ScannerRow {
   symbol: string;
   base: string;
@@ -154,6 +197,8 @@ export interface ScannerRow {
   adx: number;
   emaFast: number;
   emaSlow: number;
+  emaFast5m: number;
+  emaSlow5m: number;
   trend: 'UP' | 'DOWN';
   alignment: number;
   fundingRate: number;
@@ -162,9 +207,17 @@ export interface ScannerRow {
   trendScore: number;
   liquidityScore: number;
   score: number;
+  setupScore: number;
+  emaGapPct: number;
+  emaGapAtr: number;
+  approachAtr: number;
+  opportunity: boolean;
+  inOpportunityZone: boolean;
+  opportunitySide: 'LONG' | 'SHORT';
   marketType: 'TRENDING' | 'RANGING' | 'QUIET' | 'PEGGED';
   tradable: boolean;
   reason: string;
+  opportunityReason: string;
   updatedAt: number;
 }
 
@@ -172,15 +225,22 @@ export interface ScanResult {
   at: number;
   durationMs?: number;
   universe: number;
+  target: number;
   analysed: number;
   rows: ScannerRow[];
   selected: string[];
+  opportunities: OpportunityZone[];
+  progress: ScanProgress;
   warming?: boolean;
   gate: {
     minQuoteVolume24h: number;
     minRange24hPct: number;
     minAtrPct: number;
     minAdx: number;
+    minOpportunityScore: number;
+    maxEmaGapAtr: number;
+    zoneRetentionMin: number;
+    maxOpportunityZones: number;
     maxPositions: number;
   } | null;
 }
@@ -224,6 +284,17 @@ export interface LimitStatus {
   totals: { calls: number; avgWaitMs: number; maxWaitMs: number; throttled: number; rejected429: number };
 }
 
+export interface ExecutionReadiness {
+  ready: boolean;
+  infrastructureReady: boolean;
+  state: 'READY' | 'DISARMED' | 'BLOCKED';
+  reasons: string[];
+  mode: Mode;
+  armed: boolean;
+  checks: Record<string, boolean>;
+  at: number;
+}
+
 export interface Status {
   mode: Mode;
   autoTrade: boolean;
@@ -238,7 +309,17 @@ export interface Status {
   openTrades: Trade[];
   openTrade: Trade | null;
   slots: { used: number; max: number };
-  scanner: { at: number; universe: number; analysed: number; selected: string[]; top: ScannerRow[] } | null;
+  scanner: {
+    at: number;
+    universe: number;
+    target: number;
+    analysed: number;
+    selected: string[];
+    opportunities: OpportunityZone[];
+    progress: ScanProgress;
+    top: ScannerRow[];
+  } | null;
+  execution?: ExecutionReadiness;
   engine: {
     atr: number;
     ribbonBull: boolean;
@@ -295,6 +376,9 @@ export interface ScannerSettings {
   minAtrPct: number;
   minAdx: number;
   topN: number;
+  minOpportunityScore: number;
+  maxEmaGapAtr: number;
+  zoneRetentionMin: number;
 }
 
 export interface Settings {

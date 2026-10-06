@@ -1337,3 +1337,146 @@
     display: none;
   }
 }
+
+/* ---------- continuous scanner opportunity zone --------------------------- */
+.opp-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scan-progress {
+  display: grid;
+  grid-template-columns: minmax(170px, auto) minmax(120px, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(62, 240, 255, 0.22);
+  border-radius: var(--r-s);
+  background: rgba(62, 240, 255, 0.05);
+}
+
+.scan-progress-copy {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scan-progress-copy b {
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+.opp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
+  gap: 10px;
+}
+
+.opp-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+  padding: 13px;
+  border-radius: var(--r-m);
+  border: 1px solid var(--stroke-1);
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018));
+  overflow: hidden;
+}
+
+.opp-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--cyan);
+  box-shadow: 0 0 15px rgba(62, 240, 255, 0.7);
+}
+
+.opp-card.long::before { background: var(--green); box-shadow: 0 0 15px var(--green); }
+.opp-card.short::before { background: var(--red); box-shadow: 0 0 15px var(--red); }
+.opp-card.triggered::before { background: var(--amber); box-shadow: 0 0 15px var(--amber); }
+.opp-card.executed::before { background: var(--violet); box-shadow: 0 0 15px var(--violet); }
+
+.opp-head,
+.opp-score {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.opp-head {
+  justify-content: space-between;
+}
+
+.opp-head b {
+  font-size: 14px;
+  letter-spacing: .4px;
+}
+
+.opp-head small,
+.opp-score small {
+  margin-left: 3px;
+  color: var(--dim);
+  font-size: 9px;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+
+.opp-side {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.opp-score .bar-track {
+  flex: 1 1 auto;
+  height: 6px;
+}
+
+.opp-score b {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.opp-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+
+.opp-meta div {
+  padding: 7px 8px;
+  border-radius: var(--r-xs);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.opp-meta dt {
+  color: var(--dim);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+
+.opp-meta dd {
+  margin: 2px 0 0;
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.opp-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .scan-progress { grid-template-columns: 1fr; }
+  .opp-grid { grid-template-columns: 1fr; }
+}

@@ -1,28 +1,36 @@
 /**
- * Market Scanner — ranks the complete Binance USD-M perpetual universe by
- * volatility, highest to lowest, and keeps only markets that are *trending*.
+ * Continuous 50-asset market scanner + opportunity-zone queue.
  *
- *   Step 1 (1 call,  weight 40): /fapi/v1/ticker/24hr  → whole universe
- *   Step 1b (1 call, weight 10): /fapi/v1/premiumIndex → funding rates
- *   Step 2 (per symbol, weight 2-6): klines for 15m + 1h (+5m for the leaders)
+ * A scan cycle does two jobs without mixing their lifetimes:
+ *   1. rank the USD-M universe and analyse the leading `candidates` markets
+ *      (50 by default) in a bounded parallel batch; and
+ *   2. promote only high-quality, pre-signal EMA11/EMA34 setups into a retained
+ *      opportunity zone which the 5m engine monitors every two seconds.
  *
- * Every request goes through the shared 95% weight scheduler in its own
- * 'scanner' area, so scanning never starves the engine, the account poller or
- * the executor — and the scanner never breaks the exchange limit.
- *
- * Market-type gates (your rules):
- *   • NEVER trade pegged / stable / staked / wrapped / index markets
- *     ("copy or stack markets" are rejected by name and by behaviour: a pair
- *     whose 24h range collapses is treated as pegged regardless of ticker).
- *   • ONLY trending markets: EMA structure + ADX(14) must agree on 15m & 1h.
- *   • High volatility: 24h range, ATR% and |24h move| are the ranking keys.
+ * Retained zones do not consume places in the next scan batch. The scanner can
+ * therefore keep moving through fifty assets while the engine continues to
+ * watch earlier opportunities for a confirmed, non-repainting candle signal.
+ * Every request still goes through the shared 95% Binance weight scheduler.
  */
 import { api, ExchangeSymbol } from './binance';
-import { adx, atr, ema, lastFinite } from './indicators';
+import { adx, atr, Candle, ema, lastFinite } from './indicators';
 import { getSettings, MAX_POSITIONS_CAP } from './settings';
 import { emit } from './broadcast';
+import { candleStore } from './candles';
 
 export type MarketType = 'TRENDING' | 'RANGING' | 'QUIET' | 'PEGGED';
+export type OpportunityState = 'MONITORING' | 'TRIGGERED' | 'EXECUTED';
+export type OpportunitySide = 'LONG' | 'SHORT';
+
+export interface ScanProgress {
+  id: string;
+  running: boolean;
+  target: number;
+  completed: number;
+  failed: number;
+  startedAt: number;
+  updatedAt: number;
+}
 
 export interface ScanRow {
   symbol: string;
@@ -36,6 +44,8 @@ export interface ScanRow {
   adx: number; // ADX(14) on 15m
   emaFast: number;
   emaSlow: number;
+  emaFast5m: number;
+  emaSlow5m: number;
   trend: 'UP' | 'DOWN';
   alignment: number; // 1.0 = 15m trend agrees with 1h trend
   fundingRate: number;
@@ -43,91 +53,264 @@ export interface ScanRow {
   volatility: number; // 0..100 — primary ranking key (descending)
   trendScore: number; // 0..100
   liquidityScore: number; // 0..100
-  score: number; // combined rank score
+  score: number; // combined market rank score
+  setupScore: number; // deterministic setup quality, not a win probability
+  emaGapPct: number;
+  emaGapAtr: number;
+  approachAtr: number;
+  opportunity: boolean; // passed the pre-signal opportunity rules this cycle
+  inOpportunityZone: boolean; // retained by the dedicated monitor
+  opportunitySide: OpportunitySide;
   marketType: MarketType;
   tradable: boolean;
-  reason: string; // why it is / is not tradable
+  reason: string;
+  opportunityReason: string;
   updatedAt: number;
+}
+
+export interface OpportunityZone {
+  symbol: string;
+  base: string;
+  side: OpportunitySide;
+  state: OpportunityState;
+  score: number;
+  rank: number;
+  price: number;
+  adx: number;
+  atrPct: number;
+  atrPct5m: number;
+  emaGapPct: number;
+  emaGapAtr: number;
+  enteredAt: number;
+  lastQualifiedAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  signalId: string | null;
+  signalAt: number | null;
+  tradeId: string | null;
+  reason: string;
 }
 
 export interface ScanResult {
   at: number;
   durationMs: number;
   universe: number;
+  target: number;
   analysed: number;
-  rows: ScanRow[]; // all analysed rows, volatility descending
-  selected: string[]; // symbols handed to the engine (≤ maxPositions)
+  rows: ScanRow[];
+  /** Symbols under the dedicated 5m opportunity monitor. */
+  selected: string[];
+  opportunities: OpportunityZone[];
+  progress: ScanProgress;
   gate: {
     minQuoteVolume24h: number;
     minRange24hPct: number;
     minAtrPct: number;
     minAdx: number;
+    minOpportunityScore: number;
+    maxEmaGapAtr: number;
+    zoneRetentionMin: number;
+    maxOpportunityZones: number;
     maxPositions: number;
   };
 }
 
-/**
- * Pegged / staked / wrapped / index bases. These are "copy or stack" style
- * markets: tracking another asset 1:1 means no directional edge, and they must
- * never be traded by the bot.
- */
+/** Pegged / staked / wrapped / index bases: never directional trade targets. */
 const PEGGED_BASES = new Set([
-  // stablecoins & cash-like
   'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDP', 'USDD', 'PYUSD', 'USDE', 'USDS', 'SUSDE', 'SUSDS',
   'USDF', 'USDG', 'USD1', 'XUSD', 'USTC', 'UST', 'BFUSD', 'LDUSDT', 'SUSD', 'GUSD', 'FRAX', 'MIM', 'EUR', 'EURI', 'AEUR',
   'USDY', 'USDR', 'USDB', 'DOLA', 'CRVUSD', 'GHO', 'USDX', 'VAI', 'ALUSD',
-  // fiat rails
   'BIDR', 'IDRT', 'TRY', 'BRL', 'ARS', 'JPY', 'GBP', 'AUD', 'RUB', 'NGN', 'ZAR', 'PLN', 'RON', 'CZK', 'UAH', 'MXN',
   'COP', 'PEN', 'PHP', 'INR',
-  // wrapped / liquid-staked ("stack") tokens
-  'WBTC', 'WBETH', 'WETH', 'BNSOL', 'BETH', 'CBBTC', 'SOLVBTC', 'WBETH', 'STETH', 'WSTETH', 'RETH', 'JITOSOL', 'MSOL',
+  'WBTC', 'WBETH', 'WETH', 'BNSOL', 'BETH', 'CBBTC', 'SOLVBTC', 'STETH', 'WSTETH', 'RETH', 'JITOSOL', 'MSOL',
   'SFRXETH', 'EZETH', 'RSETH', 'ANKRETH',
-  // metals & index trackers
   'PAXG', 'XAUT', 'BTCDOM', 'DEFI', 'ALT', '1000BTCDOM',
 ]);
 
 export function isPeggedSymbol(sym: ExchangeSymbol): boolean {
   const base = sym.baseAsset.toUpperCase();
   if (PEGGED_BASES.has(base)) return true;
-  // index / dominance trackers
   if (/DOM$/.test(sym.symbol) || /^DEFIUSDT$/.test(sym.symbol)) return true;
-  // base like "USDC" embedded in a synthetic ticker (e.g. 1000X-style pegs)
   if (/^USD|USD$/.test(base) && base !== 'USDE') return true;
   return false;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const round = (v: number, d = 2) => Number(v.toFixed(d));
+const newId = () => Math.random().toString(36).slice(2, 10);
+
+/** Bounded parallel map: concurrent enough for a 50-asset batch, never a 150-call burst. */
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<(R | undefined)[]> {
+  const out = new Array<R | undefined>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      try {
+        out[index] = await fn(items[index], index);
+      } catch {
+        out[index] = undefined;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+interface OpportunityAssessment {
+  setupScore: number;
+  emaFast5m: number;
+  emaSlow5m: number;
+  atrPct5m: number;
+  emaGapPct: number;
+  emaGapAtr: number;
+  approachAtr: number;
+  side: OpportunitySide;
+  opportunity: boolean;
+  reason: string;
+}
+
+/**
+ * A zone is deliberately pre-signal, not a historical buy/sell call:
+ *  • 15m + 1h direction and ADX/volatility gates already passed;
+ *  • 5m EMA11 is close to EMA34 in ATR-normalised terms; and
+ *  • the gap is moving toward the higher-timeframe direction (or has crossed
+ *    on the latest closed candle, which the engine confirms on the next bar).
+ */
+export function assessOpportunity(row: ScanRow, k5: Candle[], now = Date.now()): OpportunityAssessment {
+  const s = getSettings();
+  const side: OpportunitySide = row.trend === 'UP' ? 'LONG' : 'SHORT';
+  const closed = k5.filter((c) => c.closeTime <= now);
+  const bars = closed.length >= 40 ? closed : k5.slice(0, Math.max(0, k5.length - 1));
+  const fallback: OpportunityAssessment = {
+    setupScore: 0,
+    emaFast5m: 0,
+    emaSlow5m: 0,
+    atrPct5m: 0,
+    emaGapPct: 0,
+    emaGapAtr: 999,
+    approachAtr: 0,
+    side,
+    opportunity: false,
+    reason: 'not enough closed 5m history',
+  };
+  if (bars.length < 40) return fallback;
+
+  const closes = bars.map((c) => c.close);
+  // Opportunity qualification and execution share this exact EMA11/EMA34
+  // contract, independent of how the configurable display ribbon is ordered.
+  const fast = ema(closes, 11);
+  const slow = ema(closes, 34);
+  const atr5 = atr(bars, s.atrLength);
+  const i = bars.length - 1;
+  const f = fast[i], sl = slow[i], prevF = fast[i - 1], prevSl = slow[i - 1], a = atr5[i];
+  const price = bars[i]?.close || row.price;
+  if (![f, sl, prevF, prevSl, a, price].every(Number.isFinite) || a <= 0 || price <= 0) return fallback;
+
+  const direction = side === 'LONG' ? 1 : -1;
+  const signedGap = (f - sl) * direction;
+  const previousSignedGap = (prevF - prevSl) * direction;
+  const emaGapAtr = Math.abs(signedGap) / a;
+  const approachAtr = (signedGap - previousSignedGap) / a;
+  const emaGapPct = (Math.abs(f - sl) / price) * 100;
+  const atrPct5m = (a / price) * 100;
+  const maxGap = s.scanner.maxEmaGapAtr;
+  const proximity = clamp(1 - emaGapAtr / maxGap, 0, 1) * 100;
+  const approach = clamp(approachAtr / 0.12, 0, 1) * 100;
+  const setupScore = clamp(
+    0.35 * row.score +
+      0.25 * row.trendScore +
+      0.15 * row.liquidityScore +
+      0.15 * proximity +
+      0.1 * approach,
+    0,
+    100,
+  );
+
+  const pending = signedGap <= 0;
+  const freshCross = signedGap > 0 && previousSignedGap <= 0;
+  const converging = approachAtr > 0 || emaGapAtr <= maxGap * 0.15;
+  const near = emaGapAtr <= maxGap;
+  const opportunity =
+    row.tradable &&
+    near &&
+    (freshCross || (pending && converging)) &&
+    setupScore >= s.scanner.minOpportunityScore;
+
+  let reason: string;
+  if (!row.tradable) reason = row.reason;
+  else if (!near) reason = `EMA gap ${emaGapAtr.toFixed(2)} ATR > ${maxGap.toFixed(2)} ATR`;
+  else if (!freshCross && !pending) reason = '5m EMA cross already passed — waiting for a fresh setup';
+  else if (!freshCross && !converging) reason = '5m EMA gap is moving away from the signal';
+  else if (setupScore < s.scanner.minOpportunityScore) {
+    reason = `setup quality ${setupScore.toFixed(0)} < ${s.scanner.minOpportunityScore}`;
+  } else {
+    reason = `${side} setup · 15m/1h aligned · EMA gap ${emaGapAtr.toFixed(2)} ATR`;
+  }
+
+  return {
+    setupScore: round(setupScore),
+    emaFast5m: f,
+    emaSlow5m: sl,
+    atrPct5m: round(atrPct5m, 4),
+    emaGapPct: round(emaGapPct, 4),
+    emaGapAtr: round(emaGapAtr, 4),
+    approachAtr: round(approachAtr, 4),
+    side,
+    opportunity,
+    reason,
+  };
+}
 
 class MarketScanner {
   private timer: NodeJS.Timeout | null = null;
-  private running = false;
+  private loopActive = false;
+  private loopVersion = 0;
+  private inflight: Promise<ScanResult | null> | null = null;
+  private rescanRequested = false;
   private last: ScanResult | null = null;
-  private selected = new Set<string>();
+  private zones = new Map<string, OpportunityZone>();
   private listeners = new Set<(r: ScanResult) => void>();
+  private scanProgress: ScanProgress = {
+    id: '', running: false, target: 0, completed: 0, failed: 0, startedAt: 0, updatedAt: 0,
+  };
 
   start(): void {
-    if (this.timer) return;
-    const s = getSettings();
-    if (!s.scanner.enabled) return;
-    // Self-scheduling loop: after a failed scan we retry sooner so the feed
-    // recovers quickly once Binance is reachable again.
+    if (this.loopActive) return;
+    if (!getSettings().scanner.enabled) return;
+    this.loopActive = true;
+    const version = ++this.loopVersion;
     const loop = async () => {
       await this.scan();
-      const ok = !!this.last;
-      const delay = ok ? Math.max(15, getSettings().scanner.intervalSec) * 1000 : 15_000;
-      this.timer = setTimeout(() => void loop(), delay);
+      if (version !== this.loopVersion || !getSettings().scanner.enabled) return;
+      const delay = Math.max(30, getSettings().scanner.intervalSec) * 1000;
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        void loop();
+      }, delay);
       if (typeof this.timer.unref === 'function') this.timer.unref();
     };
     void loop();
   }
 
   stop(): void {
+    this.loopVersion += 1;
+    this.loopActive = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
 
   restart(): void {
     this.stop();
+    // A settings update can arrive while a 50-asset batch is still running.
+    // Let that shared request finish, then immediately run one clean batch with
+    // the new thresholds instead of waiting a full scan interval.
+    if (this.inflight) this.rescanRequested = true;
     this.start();
   }
 
@@ -135,15 +318,62 @@ class MarketScanner {
     return this.last;
   }
 
-  /** Symbols the engine should watch / trade right now (≤ maxPositions). */
-  activeSymbols(): string[] {
-    if (!this.selected.size) return [];
-    return [...this.selected];
+  progress(): ScanProgress {
+    return { ...this.scanProgress };
   }
 
+  opportunities(): OpportunityZone[] {
+    this.pruneExpiredZones();
+    return [...this.zones.values()].sort((a, b) => {
+      const stateOrder = (x: OpportunityState) => (x === 'MONITORING' ? 0 : x === 'TRIGGERED' ? 1 : 2);
+      return stateOrder(a.state) - stateOrder(b.state) || b.score - a.score || a.enteredAt - b.enteredAt;
+    });
+  }
+
+  /** Symbols the signal engine monitors independently from the next 50-asset scan. */
+  activeSymbols(): string[] {
+    this.pruneExpiredZones();
+    return this.opportunities()
+      .filter((z) => z.state === 'MONITORING')
+      .map((z) => z.symbol);
+  }
+
+  /** Strict auto-scan entry gate: only a live zone and its intended side pass. */
+  isExecutionEligible(symbol: string, side?: OpportunitySide): boolean {
+    this.pruneExpiredZones();
+    const z = this.zones.get(symbol);
+    if (!z || z.state !== 'MONITORING' || z.expiresAt <= Date.now()) return false;
+    if (side && z.side !== side) return false;
+    const s = getSettings();
+    const maxScanAge = Math.max(180_000, s.scanner.intervalSec * 3_000);
+    return !!this.last && Date.now() - this.last.at <= maxScanAge;
+  }
+
+  /** Compatibility surface used by the engine dashboard. */
   isTradable(symbol: string): boolean {
-    if (!this.last) return true; // scanner still warming up — engine covers the primary symbol
-    return this.selected.has(symbol);
+    return this.isExecutionEligible(symbol);
+  }
+
+  clearOpportunities(): void {
+    if (!this.zones.size) return;
+    this.zones.clear();
+    this.syncLastAndNotify();
+  }
+
+  /** Move a monitored zone to TRIGGERED/EXECUTED after the engine handles its signal. */
+  markSignal(symbol: string, side: OpportunitySide, signalId: string, tradeId: string | null): void {
+    const z = this.zones.get(symbol);
+    if (!z || z.side !== side) return;
+    const now = Date.now();
+    z.state = tradeId ? 'EXECUTED' : 'TRIGGERED';
+    z.signalId = signalId;
+    z.signalAt = now;
+    z.tradeId = tradeId;
+    z.updatedAt = now;
+    // A missed/disarmed signal is never executed retroactively. Keep it in the
+    // UI briefly, while removing it from the active monitor until a fresh setup.
+    if (!tradeId) z.expiresAt = Math.min(z.expiresAt, now + 5 * 60_000);
+    this.syncLastAndNotify();
   }
 
   onChange(fn: (r: ScanResult) => void): () => void {
@@ -151,115 +381,277 @@ class MarketScanner {
     return () => this.listeners.delete(fn);
   }
 
-  async scan(): Promise<ScanResult | null> {
-    if (this.running) return this.last;
-    this.running = true;
+  /** Concurrent callers (scheduled + manual rescan) share one real scan. */
+  scan(): Promise<ScanResult | null> {
+    if (this.inflight) return this.inflight;
+    this.inflight = this.runScan().finally(() => {
+      this.inflight = null;
+      if (this.rescanRequested) {
+        this.rescanRequested = false;
+        if (getSettings().scanner.enabled) queueMicrotask(() => void this.scan());
+      }
+    });
+    return this.inflight;
+  }
+
+  private async runScan(): Promise<ScanResult | null> {
     const t0 = Date.now();
+    const s = getSettings();
+    const scanId = newId();
+    this.scanProgress = {
+      id: scanId, running: true, target: 0, completed: 0, failed: 0, startedAt: t0, updatedAt: t0,
+    };
+    this.emitProgress();
+
     try {
-      const s = getSettings();
-      const gate = {
+      const gate: ScanResult['gate'] = {
         minQuoteVolume24h: s.scanner.minQuoteVolume24h,
         minRange24hPct: s.scanner.minRange24hPct,
         minAtrPct: s.scanner.minAtrPct,
         minAdx: s.scanner.minAdx,
+        minOpportunityScore: s.scanner.minOpportunityScore,
+        maxEmaGapAtr: s.scanner.maxEmaGapAtr,
+        zoneRetentionMin: s.scanner.zoneRetentionMin,
+        maxOpportunityZones: s.scanner.topN,
         maxPositions: Math.min(s.maxPositions, MAX_POSITIONS_CAP),
       };
 
-      const info = await api.exchangeInfoAll();
+      const [info, tickers, premium] = await Promise.all([
+        api.exchangeInfoAll(),
+        api.ticker24hrAll(),
+        api.premiumIndexAll(),
+      ]);
       const universe = info.filter((x) => x.status === 'TRADING' && x.contractType === 'PERPETUAL');
-
-      const tickers = await api.ticker24hrAll();
       const tickerMap = new Map(tickers.map((t) => [t.symbol, t]));
-      const premium = await api.premiumIndexAll();
       const fundMap = new Map(premium.map((p) => [p.symbol, p]));
 
-      type Cand = { sym: ExchangeSymbol; t: (typeof tickers)[number]; rangePct: number; volScore: number };
-      const candidates: Cand[] = [];
+      type Candidate = { sym: ExchangeSymbol; t: (typeof tickers)[number]; rangePct: number; volScore: number };
+      const candidates: Candidate[] = [];
+      const liquidityFallback: Candidate[] = [];
       for (const sym of universe) {
         if (isPeggedSymbol(sym)) continue;
         const t = tickerMap.get(sym.symbol);
         if (!t || t.lastPrice <= 0 || t.highPrice <= 0 || t.lowPrice <= 0) continue;
         const rangePct = ((t.highPrice - t.lowPrice) / t.lastPrice) * 100;
-        if (t.quoteVolume < gate.minQuoteVolume24h) continue;
-        // Behavioural pegged check: a market that never moves cannot be traded
-        // directionally no matter what its ticker says.
         if (rangePct < Math.max(1.5, gate.minRange24hPct * 0.5)) continue;
         const volScore = 0.6 * clamp(rangePct / 25, 0, 1) + 0.4 * clamp(Math.abs(t.priceChangePercent) / 15, 0, 1);
-        candidates.push({ sym, t, rangePct, volScore });
+        const candidate = { sym, t, rangePct, volScore };
+        if (t.quoteVolume >= gate.minQuoteVolume24h) candidates.push(candidate);
+        else liquidityFallback.push(candidate);
       }
-
-      // Volatility descending — the scanner always reads the market top down.
       candidates.sort((a, b) => b.volScore - a.volScore);
-      const shortlist = candidates.slice(0, s.scanner.candidates);
+      liquidityFallback.sort((a, b) => b.volScore - a.volScore);
+      // Prefer liquid leaders, but backfill the batch when needed so "50 assets"
+      // remains a real analysis target; backfilled rows still fail the strict
+      // liquidity gate and can never enter an opportunity zone.
+      const shortlist = [
+        ...candidates.slice(0, s.scanner.candidates),
+        ...liquidityFallback.slice(0, Math.max(0, s.scanner.candidates - candidates.length)),
+      ].slice(0, s.scanner.candidates);
+      this.scanProgress.target = shortlist.length;
+      this.scanProgress.updatedAt = Date.now();
+      this.emitProgress();
 
-      const rows: ScanRow[] = [];
-      const leaders = new Set(shortlist.slice(0, Math.max(gate.maxPositions * 2, 12)).map((c) => c.sym.symbol));
-
-      for (const c of shortlist) {
+      const analysed = await mapConcurrent(shortlist, 8, async (c) => {
         try {
-          const k15 = await api.klines(c.sym.symbol, '15m', 120, 20_000);
-          const k1h = await api.klines(c.sym.symbol, '1h', 120, 60_000);
-          const row = analyse(c.sym, c.t, k15, k1h, fundMap.get(c.sym.symbol), gate);
-          if (leaders.has(c.sym.symbol)) {
-            try {
-              const k5 = await api.klines(c.sym.symbol, '5m', 120, 10_000);
-              const a5 = lastFinite(atr(k5, s.atrLength));
-              const p5 = k5[k5.length - 1]?.close ?? row.price;
-              row.atrPct5m = p5 > 0 && Number.isFinite(a5) ? (a5 / p5) * 100 : 0;
-            } catch {
-              /* keep 0 — 5m ATR is informational */
-            }
-          }
-          rows.push(row);
+          const [k15, k1h, k5] = await Promise.all([
+            api.klines(c.sym.symbol, '15m', 120, 20_000, 'scanner'),
+            api.klines(c.sym.symbol, '1h', 120, 60_000, 'scanner'),
+            api.klines(c.sym.symbol, '5m', 120, 10_000, 'scanner'),
+          ]);
+          // Reuse the already-paid 5m history when the symbol enters a zone.
+          candleStore.seed(c.sym.symbol, '5m', k5);
+          const now = Date.now();
+          const closed15 = k15.filter((bar) => bar.closeTime <= now);
+          const closed1h = k1h.filter((bar) => bar.closeTime <= now);
+          const row = analyse(
+            c.sym,
+            c.t,
+            closed15.length >= 60 ? closed15 : k15.slice(0, -1),
+            closed1h.length >= 60 ? closed1h : k1h.slice(0, -1),
+            fundMap.get(c.sym.symbol),
+            gate,
+          );
+          const setup = assessOpportunity(row, k5, now);
+          Object.assign(row, {
+            setupScore: setup.setupScore,
+            emaFast5m: setup.emaFast5m,
+            emaSlow5m: setup.emaSlow5m,
+            atrPct5m: setup.atrPct5m,
+            emaGapPct: setup.emaGapPct,
+            emaGapAtr: setup.emaGapAtr,
+            approachAtr: setup.approachAtr,
+            opportunity: setup.opportunity,
+            opportunitySide: setup.side,
+            opportunityReason: setup.reason,
+          });
+          this.bumpProgress(false);
+          return row;
         } catch {
-          /* symbol skipped this round (exchange hiccup) */
+          this.bumpProgress(true);
+          throw new Error('symbol analysis failed');
         }
-      }
+      });
 
-      // Final ranking: volatility first, then trend quality, then liquidity.
+      const rows = analysed.filter((r): r is ScanRow => !!r);
       rows.sort((a, b) => b.volatility - a.volatility || b.score - a.score);
+      const latestSettings = getSettings();
+      if (!this.rescanRequested && latestSettings.scanner.enabled && latestSettings.autoScan) {
+        this.reconcileZones(rows);
+      } else if (!latestSettings.scanner.enabled || !latestSettings.autoScan) {
+        this.zones.clear();
+      }
+      // A superseded batch may still update diagnostics/progress, but it can
+      // never grant execution eligibility under settings it did not analyse.
+      const monitored = new Set(this.activeSymbols());
+      for (const row of rows) row.inOpportunityZone = monitored.has(row.symbol);
 
-      const tradable = rows.filter((r) => r.tradable).slice(0, gate.maxPositions);
-      const selectedNext = new Set(tradable.map((r) => r.symbol));
-      // Keep watching a traded symbol even if it slips out of the ranking this
-      // round — the executor must never lose sight of an open position.
-      for (const sym of this.selected) if (!selectedNext.has(sym) && this.holdsPosition(sym)) selectedNext.add(sym);
-
-      const changed = selectedNext.size !== this.selected.size || [...selectedNext].some((x) => !this.selected.has(x));
-      this.selected = selectedNext;
-
+      this.scanProgress = { ...this.scanProgress, running: false, updatedAt: Date.now() };
       const result: ScanResult = {
         at: Date.now(),
         durationMs: Date.now() - t0,
         universe: universe.length,
+        target: shortlist.length,
         analysed: rows.length,
         rows,
-        selected: [...selectedNext],
+        selected: [...monitored],
+        opportunities: this.opportunities(),
+        progress: this.progress(),
         gate,
       };
+      const previousSelected = new Set(this.last?.selected ?? []);
+      const changed = result.selected.length !== previousSelected.size || result.selected.some((x) => !previousSelected.has(x));
       this.last = result;
+      this.emitProgress();
+      this.notify(result);
 
-      if (changed) {
+      if (changed || !previousSelected.size) {
         emit('log', {
           level: 'info',
-          msg: `Scanner: ${rows.length} markets analysed · trading ${result.selected.map((x) => x.replace('USDT', '')).join(', ') || '—'}`,
+          msg: `Scanner: ${rows.length}/${shortlist.length} assets analysed · ${result.selected.length} opportunity zone${result.selected.length === 1 ? '' : 's'} under dedicated monitor`,
         });
-      }
-      for (const fn of this.listeners) {
-        try {
-          fn(result);
-        } catch { /* listener errors must not kill the scan */ }
       }
       return result;
     } catch (e: any) {
+      this.scanProgress = { ...this.scanProgress, running: false, updatedAt: Date.now() };
+      this.emitProgress();
       emit('log', { level: 'error', msg: `Scanner error: ${e?.message || e}` });
       return this.last;
-    } finally {
-      this.running = false;
     }
   }
 
-  /** Late-bound hook so the scanner can ask the trader whether a symbol is held. */
+  private bumpProgress(failed: boolean): void {
+    this.scanProgress.completed += 1;
+    if (failed) this.scanProgress.failed += 1;
+    this.scanProgress.updatedAt = Date.now();
+    if (
+      this.scanProgress.completed === this.scanProgress.target ||
+      this.scanProgress.completed % 5 === 0
+    ) this.emitProgress();
+  }
+
+  private emitProgress(): void {
+    emit('scanner-progress', this.progress());
+  }
+
+  private reconcileZones(rows: ScanRow[]): void {
+    const now = Date.now();
+    const s = getSettings();
+    const ttl = s.scanner.zoneRetentionMin * 60_000;
+    const bySymbol = new Map(rows.map((r, i) => [r.symbol, { row: r, rank: i + 1 }]));
+
+    // Hard invalidation: a refreshed market that loses the trend/liquidity gate
+    // or flips direction must not remain eligible merely because its TTL lives.
+    for (const [symbol, zone] of this.zones) {
+      const hit = bySymbol.get(symbol);
+      if (this.holdsPosition(symbol)) {
+        zone.state = 'EXECUTED';
+        zone.updatedAt = now;
+        continue;
+      }
+      if (hit && (!hit.row.tradable || hit.row.opportunitySide !== zone.side)) {
+        this.zones.delete(symbol);
+        continue;
+      }
+      if (zone.expiresAt <= now) this.zones.delete(symbol);
+    }
+
+    const candidates = rows
+      .map((row, index) => ({ row, rank: index + 1 }))
+      .filter(({ row }) => row.opportunity)
+      .sort((a, b) => b.row.setupScore - a.row.setupScore || a.rank - b.rank);
+
+    for (const { row, rank } of candidates) {
+      const existing = this.zones.get(row.symbol);
+      // A just-triggered setup cannot be re-armed by the same scan snapshot.
+      if (existing?.signalAt && now - existing.signalAt < 5 * 60_000 && !this.holdsPosition(row.symbol)) continue;
+      const zone: OpportunityZone = {
+        symbol: row.symbol,
+        base: row.base,
+        side: row.opportunitySide,
+        state: this.holdsPosition(row.symbol) ? 'EXECUTED' : 'MONITORING',
+        score: row.setupScore,
+        rank,
+        price: row.price,
+        adx: row.adx,
+        atrPct: row.atrPct,
+        atrPct5m: row.atrPct5m,
+        emaGapPct: row.emaGapPct,
+        emaGapAtr: row.emaGapAtr,
+        enteredAt: existing?.enteredAt ?? now,
+        lastQualifiedAt: now,
+        updatedAt: now,
+        expiresAt: now + ttl,
+        signalId: existing?.signalId ?? null,
+        signalAt: existing?.signalAt ?? null,
+        tradeId: existing?.tradeId ?? null,
+        reason: row.opportunityReason,
+      };
+      this.zones.set(row.symbol, zone);
+    }
+
+    // The monitor cap applies to waiting zones only. Executed positions remain
+    // visible but are watched by the trader independently of this queue.
+    const waiting = [...this.zones.values()]
+      .filter((z) => z.state !== 'EXECUTED')
+      .sort((a, b) => b.score - a.score || b.lastQualifiedAt - a.lastQualifiedAt);
+    const allowed = new Set(waiting.slice(0, s.scanner.topN).map((z) => z.symbol));
+    for (const z of waiting) if (!allowed.has(z.symbol)) this.zones.delete(z.symbol);
+  }
+
+  private pruneExpiredZones(): void {
+    const now = Date.now();
+    for (const [symbol, z] of this.zones) {
+      if (this.holdsPosition(symbol)) continue;
+      if (z.expiresAt <= now) this.zones.delete(symbol);
+    }
+  }
+
+  private syncLastAndNotify(): void {
+    if (!this.last) return;
+    const selected = this.activeSymbols();
+    const monitored = new Set(selected);
+    for (const row of this.last.rows) row.inOpportunityZone = monitored.has(row.symbol);
+    this.last = {
+      ...this.last,
+      selected,
+      opportunities: this.opportunities(),
+      progress: this.progress(),
+    };
+    this.notify(this.last);
+  }
+
+  private notify(result: ScanResult): void {
+    for (const fn of this.listeners) {
+      try {
+        fn(result);
+      } catch {
+        /* listener errors must not kill the scan */
+      }
+    }
+  }
+
+  /** Late-bound hook so the scanner can keep bot-owned positions visible. */
   holdsPosition: (symbol: string) => boolean = () => false;
 }
 
@@ -270,33 +662,29 @@ function trendOf(emaFast: number, emaSlow: number, price: number): 'UP' | 'DOWN'
 export function analyse(
   sym: ExchangeSymbol,
   t: { lastPrice: number; priceChangePercent: number; highPrice: number; lowPrice: number; quoteVolume: number },
-  k15: { open: number; high: number; low: number; close: number; time: number; closeTime: number; volume: number }[],
-  k1h: { open: number; high: number; low: number; close: number; time: number; closeTime: number; volume: number }[],
+  k15: Candle[],
+  k1h: Candle[],
   fund: { lastFundingRate: number; nextFundingTime: number } | undefined,
-  gate: ScanResult['gate'],
+  gate: Pick<ScanResult['gate'], 'minQuoteVolume24h' | 'minRange24hPct' | 'minAtrPct' | 'minAdx'>,
 ): ScanRow {
   const s = getSettings();
   const price = k15[k15.length - 1]?.close ?? t.lastPrice;
   const range24hPct = ((t.highPrice - t.lowPrice) / t.lastPrice) * 100;
-
   const atr15 = lastFinite(atr(k15, s.atrLength));
   const atrPct = price > 0 && Number.isFinite(atr15) ? (atr15 / price) * 100 : 0;
-
   const adx15 = lastFinite(adx(k15, 14));
   const adxVal = Number.isFinite(adx15) ? adx15 : 0;
 
   const closes15 = k15.map((c) => c.close);
-  const f15 = lastFinite(ema(closes15, s.emaLengths[1]));
-  const s15 = lastFinite(ema(closes15, s.emaLengths[7]));
+  const f15 = lastFinite(ema(closes15, 11));
+  const s15 = lastFinite(ema(closes15, 34));
   const closes1h = k1h.map((c) => c.close);
-  const f1h = lastFinite(ema(closes1h, s.emaLengths[1]));
-  const s1h = lastFinite(ema(closes1h, s.emaLengths[7]));
+  const f1h = lastFinite(ema(closes1h, 11));
+  const s1h = lastFinite(ema(closes1h, 34));
 
   const trend = trendOf(f15, s15, price);
   const trend1h: 'UP' | 'DOWN' = s1h < f1h ? 'UP' : 'DOWN';
   const alignment = trend === trend1h ? 1 : 0.55;
-
-  // --- scores (0..100) -----------------------------------------------------
   const volatility =
     0.4 * clamp(range24hPct / 25, 0, 1) * 100 +
     0.35 * clamp(atrPct / 3, 0, 1) * 100 +
@@ -305,14 +693,12 @@ export function analyse(
   const liquidityScore = clamp(Math.log10(Math.max(1, t.quoteVolume) / 1e6) / 2.5, 0, 1) * 100;
   const score = 0.45 * volatility + 0.3 * trendScore + 0.25 * liquidityScore;
 
-  // --- classification ------------------------------------------------------
   let marketType: MarketType;
   if (range24hPct < 1.5 || atrPct < 0.15) marketType = 'PEGGED';
   else if (adxVal >= gate.minAdx && trendScore >= 18) marketType = 'TRENDING';
   else if (range24hPct >= gate.minRange24hPct && atrPct >= gate.minAtrPct) marketType = 'RANGING';
   else marketType = 'QUIET';
 
-  // --- tradability gates ---------------------------------------------------
   let tradable = true;
   let reason = 'high volatility + trending';
   if (isPeggedSymbol(sym)) {
@@ -350,22 +736,32 @@ export function analyse(
     adx: adxVal,
     emaFast: f15,
     emaSlow: s15,
+    emaFast5m: 0,
+    emaSlow5m: 0,
     trend,
     alignment,
     fundingRate: fund?.lastFundingRate ?? 0,
     nextFundingTime: fund?.nextFundingTime ?? 0,
-    volatility: Number(volatility.toFixed(2)),
-    trendScore: Number(trendScore.toFixed(2)),
-    liquidityScore: Number(liquidityScore.toFixed(2)),
-    score: Number(score.toFixed(2)),
+    volatility: round(volatility),
+    trendScore: round(trendScore),
+    liquidityScore: round(liquidityScore),
+    score: round(score),
+    setupScore: 0,
+    emaGapPct: 0,
+    emaGapAtr: 999,
+    approachAtr: 0,
+    opportunity: false,
+    inOpportunityZone: false,
+    opportunitySide: trend === 'UP' ? 'LONG' : 'SHORT',
     marketType,
     tradable,
     reason,
+    opportunityReason: '5m setup not analysed',
     updatedAt: Date.now(),
   };
 }
 
 /** Test surface (unit checks in scripts/verify-realtime.js). */
-export const __scanInternals = { isPeggedSymbol, analyse };
+export const __scanInternals = { isPeggedSymbol, analyse, assessOpportunity, mapConcurrent };
 
 export const scanner = new MarketScanner();

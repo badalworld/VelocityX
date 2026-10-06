@@ -11,7 +11,7 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import path from 'path';
-import { apiRouter } from './api';
+import { apiRouter, currentExecutionReadiness } from './api';
 import { closeBroadcast, emit, initBroadcast } from './broadcast';
 import { authRequired } from './auth';
 import { engine } from './engine';
@@ -104,9 +104,18 @@ async function main(): Promise<void> {
 
   // --- scanner <-> executor wiring (the bot never loses sight of its positions) ---
   scanner.holdsPosition = (symbol: string) => !!openTradeOn(symbol);
+  trader.setRuntimeGate(() => {
+    const readiness = currentExecutionReadiness();
+    return { ready: readiness.ready, reasons: readiness.reasons };
+  });
   scanner.onChange(() => {
     marketStream.subscribe(engine.activeSymbols());
-    emit('scanner', { at: scanner.result()?.at, selected: scanner.result()?.selected ?? [] });
+    emit('scanner', {
+      at: scanner.result()?.at,
+      selected: scanner.activeSymbols(),
+      opportunities: scanner.opportunities(),
+      progress: scanner.progress(),
+    });
   });
 
   // Long-lived timers are tracked so shutdown can stop them deterministically.

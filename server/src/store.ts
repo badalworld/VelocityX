@@ -46,8 +46,16 @@ export interface Trade {
   result: 'WIN' | 'LOSS' | null;
   /** Always true: the bot NEVER adopts or manages trades it did not open. */
   botOwned: true;
-  /** Market-scanner snapshot at entry (volatility rank, ADX, ATR%). */
-  scan?: { volatility: number; adx: number; atrPct: number; rank: number } | null;
+  /** Opportunity-zone snapshot at entry for execution auditability. */
+  scan?: {
+    volatility: number;
+    adx: number;
+    atrPct: number;
+    rank: number;
+    setupScore?: number;
+    emaGapAtr?: number;
+    opportunity?: boolean;
+  } | null;
 }
 
 export interface SignalRecord {

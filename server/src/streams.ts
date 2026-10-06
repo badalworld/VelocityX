@@ -28,6 +28,8 @@ export class MarketStream {
   private stopped = false;
   private connected = false;
   private lastMessageAt = 0;
+  /** Reject delayed reconnect timers from an obsolete subscription set. */
+  private generation = 0;
   private prices = new Map<string, number>();
   private lastEmit = new Map<string, number>();
 
@@ -48,8 +50,10 @@ export class MarketStream {
     if (key === this.symbolsKey && this.ws) return;
     this.symbolsKey = key;
     this.stopped = false;
+    this.lastMessageAt = 0;
+    const generation = ++this.generation;
     this.close();
-    this.connect(symbols, interval);
+    this.connect(symbols, interval, generation);
   }
 
   /** Back-compat helper used by the boot path. */
@@ -59,6 +63,8 @@ export class MarketStream {
 
   stop(): void {
     this.stopped = true;
+    this.generation += 1;
+    this.lastMessageAt = 0;
     this.close();
   }
 
@@ -73,24 +79,28 @@ export class MarketStream {
     }
   }
 
-  private connect(symbols: string[], interval: string): void {
-    if (this.stopped || !symbols.length) return;
+  private connect(symbols: string[], interval: string, generation: number): void {
+    if (this.stopped || generation !== this.generation || !symbols.length) return;
     this.close();
     const url = api.marketStreamUrl(symbols, interval);
+    let ws: WebSocket;
     try {
-      this.ws = new WebSocket(url);
+      ws = new WebSocket(url);
+      this.ws = ws;
     } catch (e: any) {
       console.warn('[ws] market connect failed', e?.message);
-      setTimeout(() => this.connect(symbols, interval), this.backoff);
+      setTimeout(() => this.connect(symbols, interval, generation), this.backoff);
       return;
     }
-    this.ws.on('open', () => {
+    ws.on('open', () => {
+      if (generation !== this.generation) return ws.close();
       this.backoff = 1000;
       this.connected = true;
       console.log(`[ws] market stream connected: ${symbols.length} symbols`);
       emit('stream', { market: true, symbols });
     });
-    this.ws.on('message', (raw) => {
+    ws.on('message', (raw) => {
+      if (generation !== this.generation) return;
       try {
         const m = JSON.parse(String(raw));
         const d = m?.data ?? m;
@@ -115,13 +125,20 @@ export class MarketStream {
         }
       } catch { /* ignore malformed frame */ }
     });
-    this.ws.on('close', () => {
+    ws.on('close', () => {
+      if (generation !== this.generation) return;
+      if (this.ws === ws) this.ws = null;
       this.connected = false;
       emit('stream', { market: false });
-      if (!this.stopped) setTimeout(() => this.connect(symbols, interval), (this.backoff = Math.min(this.backoff * 2, 15000)));
+      if (!this.stopped) {
+        setTimeout(
+          () => this.connect(symbols, interval, generation),
+          (this.backoff = Math.min(this.backoff * 2, 15000)),
+        );
+      }
     });
-    this.ws.on('error', () => {
-      try { this.ws?.close(); } catch { /* ignore */ }
+    ws.on('error', () => {
+      try { ws.close(); } catch { /* ignore */ }
     });
   }
 }
@@ -134,6 +151,8 @@ export class UserDataStream {
   private mode: string = '';
   private connected = false;
   private lastMessageAt = 0;
+  /** Invalidates callbacks/retries belonging to old credentials or mode. */
+  private generation = 0;
 
   get isConnected(): boolean {
     return this.connected;
@@ -149,35 +168,43 @@ export class UserDataStream {
     this.stop();
     this.stopped = false;
     this.mode = s.mode;
-    void this.connect();
+    void this.connect(this.generation);
   }
 
   stop(): void {
     this.stopped = true;
+    this.generation += 1;
     this.connected = false;
+    this.lastMessageAt = 0;
     if (this.keepalive) clearInterval(this.keepalive);
     this.keepalive = null;
-    if (this.ws) { try { this.ws.close(); } catch { /* ignore */ } this.ws = null; }
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) { try { ws.close(); } catch { /* ignore */ } }
   }
 
-  private async connect(): Promise<void> {
-    if (this.stopped) return;
+  private async connect(generation: number): Promise<void> {
+    if (this.stopped || generation !== this.generation) return;
     try {
       const s = getSettings();
+      const mode = s.mode;
       const listenKey = await api.createListenKey();
-      const url = `${wsBase(s.mode)}/ws/${listenKey}`;
-      this.ws = new WebSocket(url);
-      this.ws.on('open', () => {
+      if (this.stopped || generation !== this.generation || mode !== getSettings().mode) return;
+      const ws = new WebSocket(`${wsBase(mode)}/ws/${listenKey}`);
+      this.ws = ws;
+      ws.on('open', () => {
+        if (this.stopped || generation !== this.generation) return ws.close();
         this.backoff = 2000;
         this.connected = true;
-        console.log(`[ws] user stream connected (${s.mode})`);
-        emit('stream', { user: true, mode: s.mode });
+        console.log(`[ws] user stream connected (${mode})`);
+        emit('stream', { user: true, mode });
         if (this.keepalive) clearInterval(this.keepalive);
         this.keepalive = setInterval(() => {
-          api.keepAliveListenKey().catch(() => {});
+          if (generation === this.generation) api.keepAliveListenKey().catch(() => {});
         }, 25 * 60 * 1000);
       });
-      this.ws.on('message', (raw) => {
+      ws.on('message', (raw) => {
+        if (this.stopped || generation !== this.generation) return;
         try {
           const m = JSON.parse(String(raw));
           this.lastMessageAt = Date.now();
@@ -192,8 +219,7 @@ export class UserDataStream {
             case 'listenKeyExpired':
               this.log('listenKey expired — reconnecting');
               this.stop();
-              this.stopped = false;
-              void this.connect();
+              this.start();
               break;
             case 'MARGIN_CALL':
               emit('log', { level: 'error', msg: 'MARGIN_CALL received — check your positions!' });
@@ -203,15 +229,30 @@ export class UserDataStream {
           }
         } catch { /* ignore */ }
       });
-      this.ws.on('close', () => {
+      ws.on('close', () => {
+        if (generation !== this.generation) return;
+        if (this.ws === ws) this.ws = null;
         this.connected = false;
+        if (this.keepalive) clearInterval(this.keepalive);
+        this.keepalive = null;
         emit('stream', { user: false });
-        if (!this.stopped) setTimeout(() => void this.connect(), (this.backoff = Math.min(this.backoff * 2, 30000)));
+        if (!this.stopped) {
+          setTimeout(
+            () => void this.connect(generation),
+            (this.backoff = Math.min(this.backoff * 2, 30000)),
+          );
+        }
       });
-      this.ws.on('error', () => { try { this.ws?.close(); } catch { /* ignore */ } });
+      ws.on('error', () => { try { ws.close(); } catch { /* ignore */ } });
     } catch (e: any) {
+      if (generation !== this.generation) return;
       console.warn('[ws] user stream failed:', e?.message);
-      if (!this.stopped) setTimeout(() => void this.connect(), (this.backoff = Math.min(this.backoff * 2, 30000)));
+      if (!this.stopped) {
+        setTimeout(
+          () => void this.connect(generation),
+          (this.backoff = Math.min(this.backoff * 2, 30000)),
+        );
+      }
     }
   }
 

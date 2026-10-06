@@ -28,8 +28,14 @@ export interface ScannerSettings {
   minAtrPct: number;
   /** Minimum ADX(14) on 15m — "trending, not chop" gate. */
   minAdx: number;
-  /** Max symbols handed to the engine/executor (hard-capped by maxPositions). */
+  /** Maximum high-quality opportunity zones monitored by the 5m signal engine. */
   topN: number;
+  /** Minimum deterministic setup-quality score (0..100) for an opportunity zone. */
+  minOpportunityScore: number;
+  /** Maximum EMA11/EMA34 distance measured in 5m ATR units. */
+  maxEmaGapAtr: number;
+  /** Keep a qualified zone under dedicated monitoring for this many minutes. */
+  zoneRetentionMin: number;
 }
 
 export interface Settings {
@@ -85,12 +91,18 @@ export const DEFAULT_SETTINGS: Settings = {
   scanner: {
     enabled: true,
     intervalSec: 60,
-    candidates: 30,
+    // Analyse fifty markets on every cycle. Opportunity zones are retained and
+    // monitored separately, so they never stop the scanner moving on to the
+    // rest of the batch.
+    candidates: 50,
     minQuoteVolume24h: 20_000_000,
     minRange24hPct: 3,
     minAtrPct: 0.6,
     minAdx: 18,
-    topN: MAX_POSITIONS_CAP,
+    topN: 16,
+    minOpportunityScore: 65,
+    maxEmaGapAtr: 0.45,
+    zoneRetentionMin: 30,
   },
 
   emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
@@ -171,6 +183,10 @@ export function loadSettings(): Settings {
 }
 
 function sanitize(s: Settings): Settings {
+  // Request-only confirmation flags must never become durable settings. If one
+  // were echoed back by a client, it could otherwise weaken the next LIVE-arm
+  // confirmation check.
+  delete (s as any).confirmLive;
   s.tradeSizePercent = clamp(num(s.tradeSizePercent, 5), 0.5, 100);
   s.leverage = Math.round(clamp(num(s.leverage, 10), 1, 125));
   s.maxPositions = Math.round(clamp(num(s.maxPositions, MAX_POSITIONS_CAP), 1, MAX_POSITIONS_CAP));
@@ -179,16 +195,19 @@ function sanitize(s: Settings): Settings {
   s.atrSlMultiplier = clamp(num(s.atrSlMultiplier, 2), 0.1, 100);
   s.tpRrFactor = clamp(num(s.tpRrFactor, 1.5), 0.1, 100);
   s.historyDays = Math.round(clamp(num(s.historyDays, 7), 1, 365));
-  if (!Array.isArray(s.emaLengths) || s.emaLengths.length < 2) s.emaLengths = [...DEFAULT_SETTINGS.emaLengths];
+  if (!Array.isArray(s.emaLengths)) s.emaLengths = [...DEFAULT_SETTINGS.emaLengths];
 
   const sc = (s.scanner = { ...DEFAULT_SETTINGS.scanner, ...(s.scanner || {}) });
-  sc.intervalSec = Math.round(clamp(num(sc.intervalSec, 60), 15, 600));
-  sc.candidates = Math.round(clamp(num(sc.candidates, 30), 8, 80));
+  sc.intervalSec = Math.round(clamp(num(sc.intervalSec, 60), 30, 600));
+  sc.candidates = Math.round(clamp(num(sc.candidates, 50), 10, 80));
   sc.minQuoteVolume24h = clamp(num(sc.minQuoteVolume24h, 20_000_000), 0, 1e12);
   sc.minRange24hPct = clamp(num(sc.minRange24hPct, 3), 0, 100);
   sc.minAtrPct = clamp(num(sc.minAtrPct, 0.6), 0, 50);
   sc.minAdx = clamp(num(sc.minAdx, 18), 0, 100);
-  sc.topN = Math.round(clamp(num(sc.topN, MAX_POSITIONS_CAP), 1, MAX_POSITIONS_CAP));
+  sc.topN = Math.round(clamp(num(sc.topN, 16), 1, 24));
+  sc.minOpportunityScore = clamp(num(sc.minOpportunityScore, 65), 0, 100);
+  sc.maxEmaGapAtr = clamp(num(sc.maxEmaGapAtr, 0.45), 0.05, 3);
+  sc.zoneRetentionMin = Math.round(clamp(num(sc.zoneRetentionMin, 30), 5, 240));
   sc.enabled = sc.enabled !== false;
 
   // Simulation was removed: paper configs (from env, file or API) migrate to
@@ -216,7 +235,9 @@ function sanitize(s: Settings): Settings {
     .map((x) => Math.round(Number(x)))
     .filter((x) => Number.isFinite(x) && x > 0 && x <= 1000)
     .slice(0, 12);
-  if (s.emaLengths.length < 2) s.emaLengths = [...DEFAULT_SETTINGS.emaLengths];
+  if (s.emaLengths.length < 8 || !s.emaLengths.includes(11) || !s.emaLengths.includes(34)) {
+    s.emaLengths = [...DEFAULT_SETTINGS.emaLengths];
+  }
 
   // ---- exchange keys: opaque strings only ----------------------------------
   for (const env of ['testnet', 'live'] as const) {
@@ -257,6 +278,7 @@ export function updateSettings(patch: any): Settings {
   delete patch.paperBalance;
   delete patch.feeRate;
   delete patch.screenerSymbols;
+  delete patch.confirmLive; // one-request proof, never a persistent capability
   current = sanitize(deepMerge(current, patch));
   persistSettings();
   return current;

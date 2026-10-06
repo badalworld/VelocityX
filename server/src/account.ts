@@ -115,6 +115,8 @@ class AccountService {
   private running = false;
   private incomeCache = new Map<number, { at: number; data: IncomeSummary }>();
   private lastUserEventAt = 0;
+  /** Invalidates in-flight reads when mode or active credentials change. */
+  private generation = 0;
 
   start(intervalMs = 12_000): void {
     if (this.timer) return;
@@ -129,6 +131,14 @@ class AccountService {
 
   get(): AccountView | null {
     return this.view;
+  }
+
+  /** Drop account-specific state before changing environment or credentials. */
+  invalidate(): void {
+    this.generation += 1;
+    this.view = null;
+    this.incomeCache.clear();
+    this.lastUserEventAt = 0;
   }
 
   /**
@@ -176,6 +186,7 @@ class AccountService {
   async refresh(): Promise<AccountView | null> {
     if (this.running) return this.view;
     this.running = true;
+    const generation = this.generation;
     const t0 = Date.now();
     const s = getSettings();
     const errors: string[] = [];
@@ -300,6 +311,12 @@ class AccountService {
         latencyMs: Date.now() - t0,
       };
 
+      // Never publish a snapshot that finished after its account credentials
+      // were replaced. The next scheduled refresh will use the new identity.
+      if (generation !== this.generation || getSettings().mode !== mode) {
+        this.incomeCache.clear();
+        return this.view;
+      }
       this.view = view;
       return view;
     } finally {
@@ -310,6 +327,7 @@ class AccountService {
 
   /** Binance income summary (fees, funding, realised PnL) over a day window. */
   async incomeSummary(days?: number): Promise<IncomeSummary> {
+    const generation = this.generation;
     const windowDays = clampDays(days ?? getSettings().historyDays);
     const cached = this.incomeCache.get(windowDays);
     if (cached && Date.now() - cached.at < 45_000) return cached.data;
@@ -375,7 +393,9 @@ class AccountService {
       records: rows.length,
       at: Date.now(),
     };
-    this.incomeCache.set(windowDays, { at: Date.now(), data });
+    if (generation === this.generation) {
+      this.incomeCache.set(windowDays, { at: Date.now(), data });
+    }
     return data;
   }
 
