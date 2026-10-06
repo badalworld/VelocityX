@@ -81,6 +81,14 @@ export interface MarketState {
   engineStartedAt: number;
 }
 
+export interface StrategyView {
+  name: string;
+  execution: 'paper-signal-only';
+  point: { time: number; fema: number; fsma: number; atr: number } | null;
+  signal: { time: number; fema: number; fsma: number; atr: number; signal: 'BUY' | 'SELL'; reason: string } | null;
+  settings: { overbought: number; oversold: number; atrMultiplier: number; atrLength: number; channelLength: number; averageLength: number; signalLength: number };
+}
+
 export interface Status {
   mode: Mode;
   symbol: string;
@@ -105,6 +113,7 @@ export interface Status {
     user: boolean;
     userLastMessageAt: number;
   };
+  strategy: StrategyView;
   engine: {
     activeSymbols: string[];
     lastTickAt: number;

@@ -1,13 +1,18 @@
-# Strategy handoff
+# CryptoVN WaveTrend strategy
 
-**No trading strategy is implemented in this repository.** The prior strategy, its signal rules, entry/exit logic, sizing policy, scanner, targets, stops, backtester and execution code were removed at the operator's request.
+VelocityX implements the public signal behavior described on the protected TradingView CryptoVN_WaveTrend page. The implementation is signal-only and never sends exchange orders.
 
-No replacement strategy has been invented. The next strategy will be supplied by the operator after this cleanup is complete.
+## Rules
 
-## Current behavior
+- Calculate WaveTrend FEMA from typical price with channel length 10 and average length 21. FSMA is a 4-period SMA of FEMA.
+- **BUY** when FEMA is in the oversold zone at or below -53, turns upward, and crosses above FSMA.
+- **SELL** when FEMA is in the overbought zone at or above +53, turns downward, and crosses below FSMA.
+- On entry, the stop is 3 × ATR(14): below entry for LONG and above entry for SHORT.
+- Close 100% at the next opposite zone: +53 for LONG or -53 for SHORT.
+- The strategy evaluates closed candles. If stop and opposite-zone exit occur within one OHLC candle, the backtest conservatively assumes the stop happened first.
 
-VelocityX is a read-only Binance USDⓈ-M market/account monitor. It fetches public market data and, when configured, private account snapshots. There is no code path for opening, modifying or closing an exchange order or position.
+## API
 
-## Existing positions
+`GET /api/strategy` returns the current indicator, latest signal, strategy parameters, and a closed-candle backtest. The dashboard status payload exposes the current point under `strategy`.
 
-This build does not manage positions or protective orders left by an earlier release. Existing exchange positions and orders are not changed; open legacy journal entries are preserved in a neutral archive and surfaced for manual review in Binance.
+This build intentionally remains paper-signal-only. Binance positions and orders are not opened, modified, or closed.

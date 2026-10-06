@@ -205,7 +205,7 @@ export default function App() {
           <div>
             <div className="eyebrow"><span className="eyebrow-line" /> VELOCITYX / READ-ONLY BASELINE</div>
             <h1>{pages.find((item) => item.id === page)?.label}</h1>
-            <p>Live Binance market and account data. Trading logic has been removed pending your new strategy.</p>
+            <p>WaveTrend reversal signals on live Binance market data. Execution stays paper-signal-only until you choose an order workflow.</p>
           </div>
           <div className="updated"><span className={`status-dot ${isFresh ? 'good' : ''}`} />
             {lastRefreshAt ? `Updated ${timeAgo(lastRefreshAt)}` : 'Waiting for data'}
@@ -213,9 +213,9 @@ export default function App() {
         </section>
 
         <section className="safety-banner" role="status">
-          <div className="safety-icon">Ⅱ</div>
-          <div><strong>Strategy-free mode</strong><p>No signals, automated entries, order placement, stop management or trade controls are available.</p></div>
-          <span className="readonly-pill">READ ONLY</span>
+          <div className="safety-icon">↗</div>
+          <div><strong>CryptoVN WaveTrend strategy active</strong><p>BUY when FEMA reverses up in oversold; SELL when it reverses down in overbought. Stop is 3× ATR and profit is booked at the next opposite zone.</p></div>
+          <span className="readonly-pill">SIGNALS ONLY</span>
         </section>
 
         {error && <div className="error-banner"><span>Connection notice</span><p>{error}</p><button onClick={() => void loadAll()}>Retry</button></div>}
@@ -289,12 +289,17 @@ function Overview({
           <div className="price-line"><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /><span /></div>
         </article>
         <article className="panel status-card">
-          <div className="panel-top"><div><span className="label">SYSTEM STATE</span><h2>Monitoring only</h2></div><div className="state-ring">Ⅱ</div></div>
-          <p className="muted">Strategy and order execution modules are not installed.</p>
+          <div className="panel-top"><div><span className="label">SYSTEM STATE</span><h2>Signals active</h2></div><div className="state-ring">Ⅱ</div></div>
+          <p className="muted">CryptoVN WaveTrend is calculated on closed candles. No exchange orders are sent.</p>
           <div className="status-rows">
             <StatusRow label="Exchange REST" value={status?.feed?.reachable === true ? 'Connected' : status?.feed?.reachable === false ? 'Unavailable' : 'Checking'} ok={status?.feed?.reachable === true} />
             <StatusRow label="Market stream" value={status?.streams.market ? 'Connected' : 'Reconnecting'} ok={!!status?.streams.market} />
             <StatusRow label="Account stream" value={status?.streams.user ? 'Connected' : 'Not connected'} ok={!!status?.streams.user} />
+          </div>
+          <div className="status-rows strategy-readout">
+            <StatusRow label="WaveTrend FEMA" value={status?.strategy?.point ? fmt(status.strategy.point.fema, 2) : 'Warming up'} ok={!!status?.strategy?.point} />
+            <StatusRow label="Latest signal" value={status?.strategy?.signal ? status.strategy.signal.signal : 'None'} ok={!!status?.strategy?.signal} />
+            <StatusRow label="Risk / exit" value="3× ATR / opposite zone" ok />
           </div>
         </article>
       </section>

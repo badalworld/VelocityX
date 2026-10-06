@@ -1,6 +1,6 @@
-# VelocityX — strategy-free exchange monitor
+# VelocityX — CryptoVN WaveTrend strategy monitor
 
-VelocityX is a read-only Binance USDⓈ-M market and account dashboard. The previous trading strategy and its connected execution rules have been removed. **This repository does not generate signals, place orders, manage positions, or substitute a new strategy.** The operator will provide the next strategy separately.
+VelocityX is a read-only Binance USDⓈ-M market and account dashboard. VelocityX now implements a signal-only CryptoVN WaveTrend strategy. It generates BUY/SELL signals from the FEMA reversal in the oversold/overbought zones, uses a 3× ATR protective stop in backtests, and exits at the next opposite zone. **It does not place, modify, or cancel Binance orders.**
 
 ## Important: existing exchange positions
 
@@ -14,7 +14,7 @@ This build does not close, cancel, monitor, reconcile, or restore orders for pos
 - Token-protected REST and WebSocket access through `VX_API_TOKEN`.
 - Settings and trade-journal migration that removes obsolete strategy parameters and target/stop/order metadata without deleting archived trade history or exchange orders.
 
-There is no scanner, signal engine, auto-trade switch, entry/exit algorithm, sizing rule, target/stop rule, backtester, order-placement API, close/kill API, or order-writing client in this build. Old strategy routes return JSON 404s.
+The strategy engine calculates WaveTrend FEMA/FSMA, ATR stops, opposite-zone exits, signals, and a candle backtest. Execution is deliberately paper-signal-only: there is no sizing, order-placement API, close/kill API, or order-writing client.
 
 ## Requirements and start
 
@@ -66,6 +66,7 @@ All routes except `/api/health` require `X-VX-Token` when `VX_API_TOKEN` is set.
 | GET | `/api/account` | Binance account snapshot and income summary |
 | GET | `/api/positions` | Exchange-reported open positions and legacy journal notices |
 | GET | `/api/trades` | Strategy-neutral trade archive |
+| GET | `/api/strategy` | Current WaveTrend signals and closed-candle backtest |
 | GET | `/api/logs` | Recent server activity |
 | GET | `/api/income` | Binance income history summary |
 | GET | `/api/limits` | Read-request budget and exchange telemetry |
@@ -85,6 +86,11 @@ npm run smoke:ui --prefix client
 
 The server tests use isolated data directories and local mocks; they do not require Binance credentials or submit orders. `verify:binance` is an optional live read-only connectivity check and requires network access. Never run old releases or old test scripts that still contain the removed order-writing code against a real account.
 
-## Strategy handoff
+## Implemented strategy
 
-The dashboard and service are intentionally left without a trading strategy. No new entry, exit, sizing, risk, or market-selection behavior has been designed. Provide the new strategy when ready; it can then be implemented against this clean read-only baseline.
+- WaveTrend uses typical price, EMA channel length 10, average length 21, and a 4-period signal SMA.
+- BUY: FEMA is at or below −53, turns upward, and crosses above FSMA.
+- SELL: FEMA is at or above +53, turns downward, and crosses below FSMA.
+- Stop: entry price ± 3 × ATR(14), depending on direction.
+- Take profit: close 100% when FEMA reaches the opposite zone (+53 for LONG, −53 for SHORT).
+- Signals are evaluated on closed candles only. `/api/strategy` provides the latest signal and a backtest. No live order execution is enabled.

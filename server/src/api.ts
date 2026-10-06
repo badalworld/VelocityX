@@ -16,6 +16,7 @@ import { candleStore } from './candles';
 import { emit, getLogs } from './broadcast';
 import { marketStream, userStream } from './streams';
 import { limiter } from './ratelimit';
+import { backtest, DEFAULT_STRATEGY } from './strategy';
 
 export function apiRouter(): express.Router {
   const r = express.Router();
@@ -74,6 +75,7 @@ export function apiRouter(): express.Router {
         lastClosedCandleTime: market?.lastClosedCandleTime ?? 0,
         startedAt: market?.engineStartedAt ?? 0,
       },
+      strategy: { name: 'CryptoVN WaveTrend reversal', execution: 'paper-signal-only', ...engine.strategy() },
       account: view,
       openTrades: openTrades(),
       tradeCount: allTrades().length,
@@ -127,6 +129,15 @@ export function apiRouter(): express.Router {
   r.get('/trades', (req, res) => {
     const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
     res.json(allTrades().slice(0, limit));
+  });
+
+  // Strategy analytics are intentionally read-only. This endpoint never
+  // creates, modifies, or closes a Binance position.
+  r.get('/strategy', (_req, res) => {
+    const s = getSettings();
+    const candles = candleStore.closed(s.symbol, s.interval);
+    const result = backtest(candles, DEFAULT_STRATEGY);
+    res.json({ name: 'CryptoVN WaveTrend reversal', execution: 'paper-signal-only', symbol: s.symbol, interval: s.interval, ...result });
   });
 
   r.get('/logs', (req, res) => {
