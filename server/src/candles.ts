@@ -44,16 +44,6 @@ class CandleStore {
     return last.closeTime <= now ? all : all.slice(0, -1);
   }
 
-  lastClosed(symbol: string, interval: string, now = Date.now()): Candle | null {
-    const arr = this.closed(symbol, interval, now);
-    return arr.length ? arr[arr.length - 1] : null;
-  }
-
-  isFresh(symbol: string, interval: string, maxAgeMs = 90_000): boolean {
-    const t = this.wsAt.get(CandleStore.key(symbol, interval)) ?? this.seededAt.get(CandleStore.key(symbol, interval)) ?? 0;
-    return Date.now() - t < maxAgeMs;
-  }
-
   /**
    * Seed history that another subsystem already fetched. The 50-asset scanner
    * uses this for its 5m batch, so promoting an opportunity never causes a

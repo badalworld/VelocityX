@@ -161,6 +161,7 @@ function envKeys(): Partial<Settings> {
 function deepMerge<T>(base: T, patch: any): T {
   const out: any = Array.isArray(base) ? [...base] : { ...base };
   for (const k of Object.keys(patch || {})) {
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue; // never merge into the prototype chain
     const v = patch[k];
     if (v === undefined || v === null) continue;
     if (typeof v === 'object' && !Array.isArray(v) && typeof (base as any)[k] === 'object' && (base as any)[k] !== null && !Array.isArray((base as any)[k])) {
@@ -178,6 +179,15 @@ export function loadSettings(): Settings {
   try {
     if (fs.existsSync(SETTINGS_FILE)) fileSettings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   } catch { /* corrupted -> defaults */ }
+  // An empty key in the file (saved before the key was provisioned) must never
+  // wipe a key the operator supplied through the environment.
+  for (const env of ['testnet', 'live'] as const) {
+    const k = fileSettings?.keys?.[env];
+    if (k && typeof k === 'object') {
+      if (!k.key) delete k.key;
+      if (!k.secret) delete k.secret;
+    }
+  }
   current = sanitize(deepMerge(deepMerge(DEFAULT_SETTINGS, envKeys()), fileSettings));
   return current;
 }
@@ -191,6 +201,8 @@ function sanitize(s: Settings): Settings {
   s.leverage = Math.round(clamp(num(s.leverage, 10), 1, 125));
   s.maxPositions = Math.round(clamp(num(s.maxPositions, MAX_POSITIONS_CAP), 1, MAX_POSITIONS_CAP));
   s.autoScan = s.autoScan !== false;
+  // Strictly boolean: a string such as "false" is truthy and would arm the bot.
+  s.autoTrade = s.autoTrade === true;
   s.atrLength = Math.round(clamp(num(s.atrLength, 14), 1, 500));
   s.atrSlMultiplier = clamp(num(s.atrSlMultiplier, 2), 0.1, 100);
   s.tpRrFactor = clamp(num(s.tpRrFactor, 1.5), 0.1, 100);
@@ -287,8 +299,17 @@ export function updateSettings(patch: any): Settings {
 export function persistSettings(): void {
   ensureDir();
   const tmp = SETTINGS_FILE + '.tmp';
+  // Keys that came from the environment stay in the environment: copying them
+  // into the file would freeze a stale copy that silently outlives a key
+  // rotation in .env. Only keys typed into the dashboard are persisted.
+  const toWrite: any = JSON.parse(JSON.stringify(current));
+  const fromEnv: any = envKeys().keys;
+  for (const env of ['testnet', 'live'] as const) {
+    if (fromEnv[env].key && toWrite.keys[env].key === fromEnv[env].key) toWrite.keys[env].key = '';
+    if (fromEnv[env].secret && toWrite.keys[env].secret === fromEnv[env].secret) toWrite.keys[env].secret = '';
+  }
   // 0600: this file holds exchange API secrets — never world-readable.
-  fs.writeFileSync(tmp, JSON.stringify(current, null, 2), { mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify(toWrite, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, SETTINGS_FILE);
   try {
     fs.chmodSync(SETTINGS_FILE, 0o600);

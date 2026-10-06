@@ -13,17 +13,23 @@
  *     quantity, and entries refuse a symbol that already carries a position —
  *     so a manual/external position can never be closed, reversed or adopted.
  *
+ * Stops and take-profits are Binance Algo Service orders (POST /fapi/v1/algoOrder,
+ * the only place STOP_MARKET / TAKE_PROFIT_MARKET are accepted since 2025-12-09).
+ * Their client ids are `clientAlgoId`s; a fired leg is reported by ALGO_UPDATE
+ * and double-checked by the REST reconcile loop, so a missed WebSocket frame can
+ * never leave the journal out of step with the exchange.
+ *
  * Every fill, commission, funding payment and realised PnL number is taken from
  * Binance (ORDER_TRADE_UPDATE, /fapi/v1/userTrades, /fapi/v1/income). Nothing is
  * simulated and nothing is estimated: if the exchange has not reported a
  * number, the trade simply does not have it yet.
  */
-import { api, floorToStep, roundToTick, fmtQty } from './binance';
+import { AlgoLegState, api, floorToStep, roundToTick, fmtQty } from './binance';
 import { SignalSide } from './indicators';
 import {
   markSignalActed, openTradeOn, openTrades, remainingQtyOf, saveTrade, SignalRecord, Trade,
 } from './store';
-import { getSettings, MAX_POSITIONS_CAP } from './settings';
+import { getSettings, MAX_POSITIONS_CAP, updateSettings } from './settings';
 import { priceOf, setPrice } from './prices';
 import { scanner } from './scanner';
 import { emit } from './broadcast';
@@ -39,6 +45,21 @@ export interface ExecutionGate {
   ready: boolean;
   reasons: string[];
 }
+
+/**
+ * The exchange minimum notional can force a bigger position than the configured
+ * margin. A small round-up is fine; beyond this multiple of the configured
+ * per-trade margin the entry is skipped rather than silently multiplying risk.
+ */
+const MIN_NOTIONAL_BUMP_LIMIT = 2;
+
+/**
+ * Circuit breaker: this many entries in a row whose protective ladder could not
+ * be placed (so each was flattened again, paying fees for nothing) disarm
+ * auto-trade. It is what stops a protocol change at the exchange from turning
+ * every signal into a guaranteed loss.
+ */
+const MAX_LADDER_FAILURES = 2;
 
 function rndId(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -72,6 +93,18 @@ class Trader {
   /** Symbols with an entry round-trip in flight — blocks duplicates and reserves slots. */
   private entering = new Set<string>();
   private slBusy = new Set<string>();
+  /** Trades whose market close is in flight — the recovery loop must not re-arm legs under it. */
+  private closing = new Set<string>();
+  /** Re-entrancy guard for the 10 s recovery loop (a slow pass must never overlap the next). */
+  private reconciling = false;
+  /** Trades with a recovery pass in flight (the loop and ALGO_UPDATE can both ask for one). */
+  private recovering = new Set<string>();
+  /** Consecutive recovery passes that saw a flat position but could not classify a fired leg. */
+  private unsureStrikes = new Map<string, number>();
+  /** Debounced Binance-ledger refreshes after a leg fills. */
+  private ledgerTimers = new Map<string, NodeJS.Timeout>();
+  /** Consecutive entries whose protective ladder failed (circuit breaker). */
+  private ladderFailures = 0;
   /** Production runtime gate (feed/account/stream freshness), wired at boot. */
   private runtimeGate: (() => ExecutionGate) | null = null;
 
@@ -101,16 +134,6 @@ class Trader {
   }
 
   // ---------------- price tick ----------------
-
-  /** Latest price for a symbol (0 when unknown). */
-  priceOf(symbol: string): number {
-    return priceOf(symbol);
-  }
-
-  /** Primary-symbol price, kept for the dashboard/topbar. */
-  lastPrice(): number {
-    return priceOf(getSettings().symbol);
-  }
 
   /** Called by the market stream on every bookTicker tick — feeds the UI/account layer. */
   onPrice(price: number, symbol?: string): void {
@@ -208,6 +231,12 @@ class Trader {
         );
       }
 
+      // ---- production guard 1b: no stale ladder of ours on this symbol ----
+      // A conditional leg left behind by an earlier trade (failed cancel,
+      // crash) could fire into THIS trade's position. Only orders tagged with
+      // the bot's VX prefix and no live trade are ever removed.
+      await this.sweepOrphanLegs(symbol);
+
       const bal = await api.accountSnapshot();
       const equity = bal.equity;
       const available = bal.availableBalance;
@@ -248,6 +277,14 @@ class Trader {
             `Not enough free margin for ${symbol}: need ~${needMargin.toFixed(2)} USDT (min notional ${info.minNotional}), available ${Math.max(0, available).toFixed(2)}`,
           );
         }
+        // The exchange minimum forces a bigger position than the configured
+        // size. Allow a small round-up, never a silent multiple of the risk.
+        if (needMargin > perTrade * MIN_NOTIONAL_BUMP_LIMIT) {
+          throw new Error(
+            `${symbol}: the exchange minimum notional (${info.minNotional} USDT) needs ~${needMargin.toFixed(2)} USDT margin — more than ${MIN_NOTIONAL_BUMP_LIMIT}× the configured ${perTrade.toFixed(2)} USDT (${s.tradeSizePercent}% of equity); skipping`,
+          );
+        }
+        this.log('info', `${symbol}: size raised to the exchange minimum ${fmtQty(needQty)} (margin ${needMargin.toFixed(2)} vs configured ${perTrade.toFixed(2)} USDT)`);
         qty = needQty;
       }
       if (qty <= 0) throw new Error('Computed quantity is zero — increase trade size or balance');
@@ -274,7 +311,6 @@ class Trader {
       const prefix = `VX${id}`;
       const entryCid = `${prefix}E`;
       const openSide: 'BUY' | 'SELL' = sig.side === 'LONG' ? 'BUY' : 'SELL';
-      const entryStartedAt = Date.now();
       let entryRes: any;
       try {
         entryRes = await api.marketOrder(symbol, openSide, qty, { newClientOrderId: entryCid });
@@ -317,7 +353,7 @@ class Trader {
       if (executedQty > 0) qty = floorToStep(executedQty, info.stepSize);
       if (qty <= 0) throw new Error('Binance reported zero executed quantity for the entry');
 
-      const filledAvg = await this.entryFillPrice(symbol, prefix, Number(entryRes?.avgPrice || 0), entryStartedAt);
+      const filledAvg = await this.entryFillPrice(symbol, entryCid, Number(entryRes?.avgPrice || 0));
       if (filledAvg > 0) entry = filledAvg;
 
       const slDist = sig.atr * s.atrSlMultiplier;
@@ -396,34 +432,39 @@ class Trader {
       try {
         // One-way: explicit size + reduceOnly. Hedge: positionSide — both
         // scope every exit order to the bot's own quantity.
-        const dual = await api.isDualSide();
-        const hedgeSide = trade.side;
+        // binance.ts adds `positionSide` itself in hedge mode (the position
+        // side of the trade being closed) and `reduceOnly` in one-way mode.
         await api.protectiveStop(symbol, closeSide(trade.side), trade.slInitial, qty, `${prefix}S0`);
         trade.orders.sl = `${prefix}S0`;
         saveTrade(trade);
         if (q1 > 0) {
-          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp1, q1, { newClientOrderId: `${prefix}1`, positionSide: dual ? hedgeSide : undefined });
+          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp1, q1, { clientAlgoId: `${prefix}1` });
           trade.orders.tp1 = `${prefix}1`;
           saveTrade(trade);
         }
         if (q2 > 0) {
-          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp2, q2, { newClientOrderId: `${prefix}2`, positionSide: dual ? hedgeSide : undefined });
+          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp2, q2, { clientAlgoId: `${prefix}2` });
           trade.orders.tp2 = `${prefix}2`;
           saveTrade(trade);
         }
-        await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp3, q3, { newClientOrderId: `${prefix}3`, positionSide: dual ? hedgeSide : undefined });
+        await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp3, q3, { clientAlgoId: `${prefix}3` });
         trade.orders.tp3 = `${prefix}3`;
         saveTrade(trade);
       } catch (err: any) {
         this.log('error', `Protective ladder failed (${err?.message}) — emergency flatten requested`);
         emit('error', { message: `${symbol}: protective ladder failed — emergency close requested` });
         const closed = await this.closeByMarket(trade, 'KILL');
+        this.ladderFailures += 1;
         if (!closed) {
           this.log('error', `${symbol}: CRITICAL — entry remains OPEN after emergency close failure; reconcile will keep trying to arm protection`);
           emit('error', { message: `${symbol}: CRITICAL open position needs attention — emergency close was not confirmed` });
+          this.disarm(`${symbol}: emergency close after a failed protective ladder was not confirmed`);
+        } else if (this.ladderFailures >= MAX_LADDER_FAILURES) {
+          this.disarm(`${this.ladderFailures} entries in a row could not be protected (last: ${err?.message || err})`);
         }
         return;
       }
+      this.ladderFailures = 0;
 
       this.log(
         'info',
@@ -442,30 +483,28 @@ class Trader {
 
   /**
    * Average fill price of OUR entry order, straight from Binance. Returns 0
-   * when the ledger is not available yet (the caller then keeps the signal
-   * price as a reference and the fill ledger corrects the PnL later).
+   * when nothing is available yet (the caller then keeps the signal price as a
+   * reference and the fill ledger corrects the PnL later).
+   *
+   * Fallbacks, in order: the order itself (its avgPrice) and then the position's
+   * entry price — the symbol was proven flat right before our entry, so the
+   * only position on it is this one.
    */
-  private async entryFillPrice(symbol: string, prefix: string, ackAvg: number, openedAt: number): Promise<number> {
+  private async entryFillPrice(symbol: string, entryCid: string, ackAvg: number): Promise<number> {
     if (Number.isFinite(ackAvg) && ackAvg > 0) return ackAvg;
     try {
-      const fills = await api.userTrades(symbol, { startTime: openedAt - 60_000, limit: 100 });
-      const mine = fills.filter((f) => String(f.clientOrderId || '') === `${prefix}E`);
-      if (!mine.length) return 0;
-      let qty = 0;
-      let cost = 0;
-      for (const f of mine) {
-        const q = Number(f.qty) || 0;
-        const p = Number(f.price) || 0;
-        if (q > 0 && p > 0) {
-          qty += q;
-          cost += q * p;
-        }
-      }
-      return qty > 0 ? cost / qty : 0;
+      const o = await api.queryOrder(symbol, entryCid);
+      const avg = Number(o?.avgPrice);
+      if (Number.isFinite(avg) && avg > 0) return avg;
+    } catch { /* fall through to the position snapshot */ }
+    try {
+      const rows = await api.positionRisk(symbol);
+      const own = rows.find((r) => r.symbol === symbol && Math.abs(r.positionAmt) > 0);
+      if (own && Number.isFinite(own.entryPrice) && own.entryPrice > 0) return own.entryPrice;
     } catch (e: any) {
       this.log('error', `${symbol}: entry fill lookup failed: ${e?.message} — using signal price`);
-      return 0;
     }
+    return 0;
   }
 
   // ---------------- TP / SL fills ----------------
@@ -485,6 +524,9 @@ class Trader {
 
   fillTP(t: Trade, n: 1 | 2 | 3, price: number, binance?: { rp?: number; commission?: number; commissionAsset?: string }): void {
     if (t.status !== 'OPEN') return;
+    // The same fill can arrive through ORDER_TRADE_UPDATE, ALGO_UPDATE and the
+    // REST reconcile — each leg is processed exactly once.
+    if ((n === 1 && t.tp1Filled) || (n === 2 && t.tp2Filled) || (n === 3 && t.tp3Filled)) return;
     const q = n === 1 ? t.q1 : n === 2 ? t.q2 : t.q3;
     if (q <= 0 && n !== 3) return;
 
@@ -518,6 +560,8 @@ class Trader {
       void this.finalize(t, 'TP3', price);
     } else {
       void this.moveSL(t);
+      // ALGO_UPDATE carries no commission / PnL — read them from the ledger.
+      this.scheduleLedger(t);
     }
   }
 
@@ -544,16 +588,47 @@ class Trader {
     void this.finalize(t, reason, fill);
   }
 
-  /** Pull Binance's own fill ledger for this trade (fees + realised PnL, idempotent). */
+  /** Re-read Binance's fill ledger shortly after a fill (debounced per trade). */
+  private scheduleLedger(t: Trade, delayMs = 2500): void {
+    const pending = this.ledgerTimers.get(t.id);
+    if (pending) clearTimeout(pending);
+    const timer = setTimeout(() => {
+      this.ledgerTimers.delete(t.id);
+      void this.reconcileBinanceNumbers(t);
+    }, delayMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.ledgerTimers.set(t.id, timer);
+  }
+
+  /**
+   * Pull Binance's own fill ledger for this trade (fees + realised PnL,
+   * idempotent — it overwrites the running totals with the exchange's figures).
+   *
+   * A stop-loss / take-profit is an algo order: when it fires Binance creates a
+   * separate matching-engine order whose id is only reachable through the algo
+   * order's `actualOrderId`, so those ids are collected alongside the orders
+   * that carry our VX<tradeId> client id (entry / market close).
+   */
   async reconcileBinanceNumbers(t: Trade): Promise<void> {
     try {
+      const prefix = `VX${t.id}`;
       const orders = await api.allOrders(t.symbol, { startTime: t.openedAt - 60_000, limit: 200 });
-      const mine = new Set(orders.filter((o) => String(o.clientOrderId || '').startsWith(`VX${t.id}`)).map((o) => o.orderId));
+      const mine = new Set<string>(
+        orders.filter((o) => String(o.clientOrderId || '').startsWith(prefix)).map((o) => String(o.orderId)),
+      );
+      for (const cid of [t.orders.sl, t.orders.tp1, t.orders.tp2, t.orders.tp3]) {
+        if (!cid) continue;
+        try {
+          const algo = await api.queryAlgoOrder(cid);
+          const actual = String(algo?.actualOrderId ?? '');
+          if (/^\d+$/.test(actual) && Number(actual) > 0) mine.add(actual);
+        } catch { /* never placed, or already purged by Binance — nothing to add */ }
+      }
       if (!mine.size) return;
       const fills = await api.userTrades(t.symbol, { startTime: t.openedAt - 60_000, limit: 500 });
       let rp = 0, fees = 0, other = 0;
       for (const f of fills) {
-        if (!mine.has(f.orderId)) continue;
+        if (!mine.has(String(f.orderId))) continue;
         rp += Number(f.realizedPnl) || 0;
         const c = Math.abs(Number(f.commission) || 0);
         if (/USDT|USDC|BUSD|FDUSD/i.test(String(f.commissionAsset || 'USDT'))) fees += c;
@@ -598,8 +673,22 @@ class Trader {
    */
   async closeByMarket(t: Trade, reason: 'REVERSE' | 'KILL'): Promise<boolean> {
     if (!t || t.status !== 'OPEN') return true;
+    if (this.closing.has(t.id)) {
+      this.log('info', `${t.symbol}: a close is already in flight — second request ignored`);
+      return false;
+    }
+    // While the close is in flight the recovery loop must not re-arm legs.
+    this.closing.add(t.id);
+    try {
+      return await this.closeByMarketLocked(t, reason);
+    } finally {
+      this.closing.delete(t.id);
+    }
+  }
+
+  private async closeByMarketLocked(t: Trade, reason: 'REVERSE' | 'KILL'): Promise<boolean> {
     const remaining = remainingQtyOf(t);
-    const price = this.priceOf(t.symbol) || t.entryPrice;
+    const price = priceOf(t.symbol) || t.entryPrice;
     if (remaining > 0) {
       try {
         const info = await api.exchangeInfo(t.symbol);
@@ -676,26 +765,65 @@ class Trader {
   private async finalize(t: Trade, reason: Trade['closeReason'], price: number): Promise<void> {
     if (t.status === 'CLOSED') return;
     t.status = 'CLOSED';
+    this.unsureStrikes.delete(t.id);
     t.closedAt = Date.now();
     t.closeReason = reason;
     t.result = reason === 'TP3' || reason === 'SL_PARTIAL' ? 'WIN' : reason === 'SL' ? 'LOSS' : null;
     await this.reconcileBinanceNumbers(t);
     await this.refreshFunding(t);
     saveTrade(t);
-    // Cancel what is left of OUR ladder (TPs, and the stop if the position was
-    // already flattened). Only client ids tagged VX<tradeId> are ever touched.
-    for (const key of ['sl', 'tp1', 'tp2', 'tp3'] as const) {
-      const cid = t.orders[key];
-      if (!cid) continue;
-      try {
-        await api.cancelOrder(t.symbol, undefined, cid);
-      } catch { /* already gone */ }
-    }
+    await this.cancelLadder(t);
     emit('trade', { event: 'closed', trade: t, price });
     emit('log', {
       level: t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'info',
       msg: `${t.symbol} trade closed (${reason}) — PnL ${t.realizedPnl >= 0 ? '+' : ''}${t.realizedPnl.toFixed(2)} USDT · fees ${t.fees.toFixed(3)} · funding ${t.funding.toFixed(3)}${t.result ? ` [${t.result}]` : ''}`,
     });
+    // The exchange may book the last fill a moment after the event — look once more.
+    this.scheduleLedger(t, 5000);
+  }
+
+  /**
+   * Cancel what is left of OUR ladder (take-profits, and the stop if the
+   * position was flattened some other way). Only client ids tagged with this
+   * trade's VX<tradeId> prefix are ever touched. Individual cancel errors are
+   * expected (a leg that already fired is no longer cancellable); the sweep
+   * afterwards asks Binance what is genuinely still resting and retries once.
+   */
+  private async cancelLadder(t: Trade): Promise<void> {
+    for (const key of ['sl', 'tp1', 'tp2', 'tp3'] as const) {
+      const cid = t.orders[key];
+      if (!cid) continue;
+      try {
+        await api.cancelAlgoOrder(t.symbol, cid);
+      } catch { /* verified by the sweep below */ }
+    }
+    const prefix = `VX${t.id}`;
+    try {
+      const left = (await api.openAlgoOrders(t.symbol))
+        .map((o) => String(o.clientAlgoId || ''))
+        .filter((cid) => cid.startsWith(prefix));
+      for (const cid of left) {
+        try {
+          await api.cancelAlgoOrder(t.symbol, cid);
+        } catch (e: any) {
+          this.log('error', `${t.symbol}: could not cancel leftover conditional order ${cid}: ${e?.message}`);
+          emit('error', { message: `${t.symbol}: conditional order ${cid} may still be resting on Binance — cancel it manually` });
+        }
+      }
+    } catch (e: any) {
+      this.log('error', `${t.symbol}: could not verify that the ladder was cancelled: ${e?.message}`);
+    }
+  }
+
+  /** Remove conditional orders of ours that no live trade owns (stale legs of an earlier trade). */
+  private async sweepOrphanLegs(symbol: string): Promise<void> {
+    const live = openTrades().filter((x) => x.symbol === symbol).map((x) => `VX${x.id}`);
+    for (const o of await api.openAlgoOrders(symbol)) {
+      const cid = String(o.clientAlgoId || '');
+      if (!cid.startsWith('VX') || live.some((prefix) => cid.startsWith(prefix))) continue;
+      this.log('error', `${symbol}: removing stale conditional order ${cid} left by an earlier trade`);
+      await api.cancelAlgoOrder(symbol, cid);
+    }
   }
 
   private async moveSL(t: Trade): Promise<void> {
@@ -708,9 +836,10 @@ class Trader {
       const oldCid = t.orders.sl;
       if (oldCid) {
         try {
-          await api.cancelOrder(t.symbol, undefined, oldCid);
+          await api.cancelAlgoOrder(t.symbol, oldCid);
         } catch (e: any) {
-          this.log('error', `${t.symbol}: SL cancel failed: ${e?.message} — will verify position`);
+          // The cleanup sweep in cancelLadder() removes a stop that survived.
+          this.log('error', `${t.symbol}: SL cancel failed: ${e?.message} — continuing, will verify position`);
         }
       }
       const newCid = `VX${t.id}S${t.slStage}`;
@@ -779,124 +908,222 @@ class Trader {
   }
 
   /**
+   * ALGO_UPDATE from the user data stream — the Algo Service's report on one
+   * of OUR conditional legs, routed by clientAlgoId (`caid`).
+   *
+   * Only a FINISHED order that really executed (`aq` > 0) moves the ladder.
+   * A leg that fired but executed nothing, or that expired / was rejected, is
+   * handed to the REST reconcile, which asks Binance instead of trusting one
+   * frame. Our own cancellations (moving the stop, closing the trade) are
+   * ignored on purpose.
+   */
+  onAlgoUpdate(ev: any): void {
+    const o = ev?.o ?? ev;
+    const caid = String(o?.caid || '');
+    if (!caid.startsWith('VX')) return;
+    const t = openTrades().find((x) => caid.startsWith(`VX${x.id}`)) || null;
+    if (!t || t.symbol !== o.s) return;
+    const status = String(o.X || '').toUpperCase();
+    if (status === 'FINISHED') {
+      const executed = Number(o.aq) || 0;
+      if (executed <= 0) {
+        this.log('error', `${t.symbol}: conditional order ${caid} fired but executed nothing (${o.rm || 'no reason given'}) — verifying with Binance`);
+        void this.reconcileGuarded(t);
+        return;
+      }
+      const price = Number(o.ap) || 0;
+      if (caid.startsWith(`VX${t.id}S`)) this.fillSL(t, Number(o.tp) || t.slCurrent, price || t.slCurrent);
+      else if (caid === t.orders.tp1) this.fillTP(t, 1, price || t.tp1);
+      else if (caid === t.orders.tp2) this.fillTP(t, 2, price || t.tp2);
+      else if (caid === t.orders.tp3) this.fillTP(t, 3, price || t.tp3);
+      return;
+    }
+    if (status === 'EXPIRED' || status === 'REJECTED') {
+      this.log('error', `${t.symbol}: conditional order ${caid} ${status.toLowerCase()} (${o.rm || 'no reason given'}) — re-checking protection`);
+      void this.reconcileGuarded(t);
+    }
+  }
+
+  /**
    * Periodic safety net — ONLY for bot-owned orders.
-   *  • catches missed fills from our own clientOrderIds
-   *  • re-arms a missing SL for our trade
+   *  • asks Binance what became of every conditional leg (resting, fired, gone)
+   *    and books fills the WebSocket missed
+   *  • re-arms a leg that is verifiably gone
    * It never closes, reverses or adopts anything the bot did not open.
    */
   async reconcile(): Promise<void> {
-    for (const t of openTrades()) {
-      // Entry + initial ladder placement is transactional under this symbol
-      // reservation. Do not race the recovery loop against orders still being
-      // submitted by placeEntry().
-      if (this.entering.has(t.symbol)) continue;
-      try {
-        await this.reconcileOne(t);
-      } catch (e: any) {
-        this.log('error', `${t.symbol}: reconcile error: ${e?.message}`);
+    if (this.reconciling) return;
+    this.reconciling = true;
+    try {
+      const mode = getSettings().mode;
+      for (const t of openTrades()) {
+        // A trade opened in the other environment cannot be checked with this
+        // environment's keys and endpoints — leave its journal untouched.
+        if (t.mode !== mode) continue;
+        await this.reconcileGuarded(t);
       }
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  /** One trade's recovery pass, skipped while its entry / close / another pass is in flight. */
+  private async reconcileGuarded(t: Trade): Promise<void> {
+    // Entry + initial ladder placement is transactional under the symbol
+    // reservation, and a market close owns the trade until it settles.
+    if (this.entering.has(t.symbol) || this.closing.has(t.id) || this.recovering.has(t.id)) return;
+    this.recovering.add(t.id);
+    try {
+      await this.reconcileOne(t);
+    } catch (e: any) {
+      this.log('error', `${t.symbol}: reconcile error: ${e?.message}`);
+    } finally {
+      this.recovering.delete(t.id);
     }
   }
 
   private async reconcileOne(t: Trade): Promise<void> {
     if (t.status !== 'OPEN') return;
     const info = await api.exchangeInfo(t.symbol);
-    const orders = await api.allOrders(t.symbol, { startTime: t.openedAt - 60_000, limit: 200 });
-    const mine = orders.filter((o) => String(o.clientOrderId || '').startsWith(`VX${t.id}`));
-    const byCid = (cid?: string) => cid ? mine.find((o) => String(o.clientOrderId) === cid) : undefined;
 
-    const filledStop = mine.find(
-      (o) => String(o.clientOrderId).startsWith(`VX${t.id}S`) && String(o.status) === 'FILLED',
-    );
-    if (filledStop && t.status === 'OPEN') {
-      this.fillSL(
-        t,
-        Number(filledStop.avgPrice || filledStop.stopPrice) || t.slCurrent,
-        Number(filledStop.avgPrice) || t.slCurrent,
-      );
-      return;
+    // ---- 1. what became of each conditional leg? ---------------------------
+    // The open list is the cheap path. A leg that is not on it is looked up by
+    // its client id, so "not on the list" is never mistaken for "gone".
+    const resting = new Set((await api.openAlgoOrders(t.symbol)).map((o) => String(o.clientAlgoId || '')));
+    const legs: { key: 'sl' | 'tp1' | 'tp2' | 'tp3'; skip: boolean }[] = [
+      { key: 'sl', skip: false },
+      { key: 'tp3', skip: t.tp3Filled },
+      { key: 'tp1', skip: t.tp1Filled || t.q1 <= 0 },
+      { key: 'tp2', skip: t.tp2Filled || t.q2 <= 0 },
+    ];
+    const state = new Map<string, AlgoLegState>();
+    for (const leg of legs) {
+      if (leg.skip) continue;
+      const cid = t.orders[leg.key];
+      const st: AlgoLegState = !cid
+        ? { state: 'gone' }
+        : resting.has(cid)
+          ? { state: 'alive' }
+          : await api.algoLegState(t.symbol, cid);
+      state.set(leg.key, st);
+      if (st.state !== 'filled') continue;
+      if (t.status !== 'OPEN') return;
+      if (leg.key === 'sl') {
+        this.fillSL(t, t.slCurrent, st.avgPrice || t.slCurrent);
+        this.scheduleLedger(t);
+        return;
+      }
+      const level = leg.key === 'tp1' ? 1 : leg.key === 'tp2' ? 2 : 3;
+      this.fillTP(t, level, st.avgPrice || t[leg.key]);
+      if (t.status !== 'OPEN') return;
     }
-    const tp3Order = byCid(t.orders.tp3);
-    if (!t.tp3Filled && tp3Order?.status === 'FILLED') this.fillTP(t, 3, Number(tp3Order.avgPrice) || t.tp3);
-    if (t.status !== 'OPEN') return;
-    const tp1Order = byCid(t.orders.tp1);
-    if (!t.tp1Filled && tp1Order?.status === 'FILLED') this.fillTP(t, 1, Number(tp1Order.avgPrice) || t.tp1);
-    if (t.status !== 'OPEN') return;
-    const tp2Order = byCid(t.orders.tp2);
-    if (!t.tp2Filled && tp2Order?.status === 'FILLED') this.fillTP(t, 2, Number(tp2Order.avgPrice) || t.tp2);
     if (t.status !== 'OPEN') return;
 
+    // ---- 2. is there still a bot position? ---------------------------------
     const pos = await api.positionAmount(t.symbol, t.side);
     const directionalPos = pos * dir(t.side);
     if (Math.abs(pos) < info.stepSize / 2) {
+      // Flat, yet a leg that fired could not be classified (Binance could not
+      // say right now): wait a few passes rather than losing the WIN/LOSS tag.
+      if (this.holdForUnknownLeg(t, state)) return;
       this.log('info', `${t.symbol}: position flat (external fill detected) — closing bot trade record`);
-      void this.finalize(t, 'EXTERNAL', Number(tp3Order?.avgPrice) || this.priceOf(t.symbol) || t.entryPrice);
+      void this.finalize(t, 'EXTERNAL', priceOf(t.symbol) || t.entryPrice);
       return;
     }
+    this.unsureStrikes.delete(t.id);
     if (directionalPos <= info.stepSize / 2) {
       this.log('error', `${t.symbol}: bot-side position is gone and an opposite external leg exists — dropping bot orders`);
-      void this.finalize(t, 'EXTERNAL', this.priceOf(t.symbol) || t.entryPrice);
+      void this.finalize(t, 'EXTERNAL', priceOf(t.symbol) || t.entryPrice);
       return;
     }
 
-    if (!this.slBusy.has(t.id)) {
-      const open = await api.openOrders(t.symbol);
-      const isAlive = (cid?: string) => !!cid && (
-        open.some((o) => String(o.clientOrderId) === cid) ||
-        ['NEW', 'PARTIALLY_FILLED'].includes(String(byCid(cid)?.status))
-      );
-      const protectedQty = floorToStep(Math.min(remainingQtyOf(t), directionalPos), info.stepSize);
-      if (protectedQty <= 0) {
-        void this.finalize(t, 'EXTERNAL', this.priceOf(t.symbol) || t.entryPrice);
-        return;
-      }
-
-      if (!isAlive(t.orders.sl) && !t.tp3Filled) {
-        this.log('error', `${t.symbol}: SL order missing while position open — re-arming SL`);
-        const cid = `VX${t.id}S${t.slStage}R${Date.now().toString(36).slice(-4)}`;
-        await api.protectiveStop(
-          t.symbol,
-          closeSide(t.side),
-          roundToTick(t.slCurrent, info.tickSize),
-          protectedQty,
-          cid,
-        );
-        t.orders.sl = cid;
-        saveTrade(t);
-        emit('trade', { event: 'sl-rearmed', trade: t });
-      }
-
-      // A crash can happen after the entry journal is written but before all
-      // TP legs are acknowledged. Rebuild only missing, unfilled bot legs and
-      // route future stream fills through their newly persisted client ids.
-      const dual = await api.isDualSide();
-      const hedgeSide = dual ? t.side : undefined;
-      let capacity = protectedQty;
-      const ensureTp = async (
-        key: 'tp1' | 'tp2' | 'tp3',
-        level: 1 | 2 | 3,
-        filled: boolean,
-        target: number,
-        plannedQty: number,
-      ): Promise<void> => {
-        if (filled || plannedQty <= 0 || capacity < info.stepSize / 2) return;
-        const qty = floorToStep(Math.min(plannedQty, capacity), info.stepSize);
-        capacity = Math.max(0, capacity - qty);
-        if (qty <= 0 || isAlive(t.orders[key])) return;
-        const cid = `VX${t.id}${level}R${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 4)}`;
-        this.log('error', `${t.symbol}: TP${level} order missing — re-arming ${fmtQty(qty)}`);
-        await api.takeProfitMarket(t.symbol, closeSide(t.side), target, qty, {
-          newClientOrderId: cid,
-          positionSide: hedgeSide,
-        });
-        t.orders[key] = cid;
-        saveTrade(t);
-        emit('trade', { event: 'tp-rearmed', level, trade: t });
-      };
-      await ensureTp('tp1', 1, t.tp1Filled, t.tp1, t.q1);
-      await ensureTp('tp2', 2, t.tp2Filled, t.tp2, t.q2);
-      await ensureTp('tp3', 3, t.tp3Filled, t.tp3, t.q3);
+    // ---- 3. re-arm what is verifiably gone ---------------------------------
+    // Only an explicit "gone" re-arms; "unknown" (Binance could not answer) is
+    // retried on the next pass, so a flaky reply can never double a leg.
+    if (this.slBusy.has(t.id) || this.closing.has(t.id)) return;
+    const protectedQty = floorToStep(Math.min(remainingQtyOf(t), directionalPos), info.stepSize);
+    if (protectedQty <= 0) {
+      void this.finalize(t, 'EXTERNAL', priceOf(t.symbol) || t.entryPrice);
+      return;
     }
+
+    // If the trade closed while a re-arm POST was in flight, take the new leg straight back off.
+    const retire = async (cid: string): Promise<void> => {
+      if (t.status !== 'OPEN') await api.cancelAlgoOrder(t.symbol, cid).catch(() => null);
+    };
+
+    if (state.get('sl')?.state === 'gone' && !t.tp3Filled) {
+      this.log('error', `${t.symbol}: SL order missing while position open — re-arming SL`);
+      const cid = `VX${t.id}S${t.slStage}R${Date.now().toString(36).slice(-4)}`;
+      try {
+        await api.protectiveStop(t.symbol, closeSide(t.side), roundToTick(t.slCurrent, info.tickSize), protectedQty, cid);
+      } catch (e: any) {
+        if (/-2021|immediately trigger/i.test(String(e?.message))) {
+          // The market is already beyond the stop price: a stop can no longer
+          // protect this position, and retrying would only fail again every
+          // pass. Get out now rather than hold it naked.
+          this.log('error', `${t.symbol}: stop ${t.slCurrent} is already breached while the position is open — closing at market`);
+          emit('error', { message: `${t.symbol}: stop-loss level already breached and no stop is resting — closing the bot position at market` });
+          await this.closeByMarket(t, 'KILL');
+          return;
+        }
+        throw e;
+      }
+      t.orders.sl = cid;
+      saveTrade(t);
+      emit('trade', { event: 'sl-rearmed', trade: t });
+      await retire(cid);
+    }
+
+    // A crash can happen after the entry journal is written but before all
+    // TP legs are acknowledged. Rebuild only missing, unfilled bot legs and
+    // route future fills through their newly persisted client ids.
+    let capacity = protectedQty;
+    const ensureTp = async (
+      key: 'tp1' | 'tp2' | 'tp3',
+      level: 1 | 2 | 3,
+      filled: boolean,
+      target: number,
+      plannedQty: number,
+    ): Promise<void> => {
+      if (filled || plannedQty <= 0 || capacity < info.stepSize / 2) return;
+      const qty = floorToStep(Math.min(plannedQty, capacity), info.stepSize);
+      capacity = Math.max(0, capacity - qty);
+      if (qty <= 0 || state.get(key)?.state !== 'gone') return;
+      const cid = `VX${t.id}${level}R${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 4)}`;
+      this.log('error', `${t.symbol}: TP${level} order missing — re-arming ${fmtQty(qty)}`);
+      await api.takeProfitMarket(t.symbol, closeSide(t.side), target, qty, { clientAlgoId: cid });
+      t.orders[key] = cid;
+      saveTrade(t);
+      emit('trade', { event: 'tp-rearmed', level, trade: t });
+      await retire(cid);
+    };
+    // Each leg is independent: one that cannot be re-armed (e.g. its price was
+    // already crossed, -2021) must not starve the others on every pass.
+    const ladder = [
+      ['tp1', 1, t.tp1Filled, t.tp1, t.q1],
+      ['tp2', 2, t.tp2Filled, t.tp2, t.q2],
+      ['tp3', 3, t.tp3Filled, t.tp3, t.q3],
+    ] as const;
+    for (const [key, level, filled, target, planned] of ladder) {
+      try {
+        await ensureTp(key, level, filled, target, planned);
+      } catch (e: any) {
+        this.log('error', `${t.symbol}: could not re-arm TP${level}: ${e?.message}`);
+      }
+    }
+  }
+
+  /** True while a flat position should wait for a fired-but-unclassified leg to resolve (max 3 passes). */
+  private holdForUnknownLeg(t: Trade, state: Map<string, AlgoLegState>): boolean {
+    if (![...state.values()].some((x) => x.state === 'unknown')) return false;
+    const strikes = (this.unsureStrikes.get(t.id) ?? 0) + 1;
+    if (strikes > 3) {
+      this.unsureStrikes.delete(t.id);
+      return false;
+    }
+    this.unsureStrikes.set(t.id, strikes);
+    return true;
   }
 
   // ---------------- kill switch ----------------
@@ -911,6 +1138,15 @@ class Trader {
     let closed = 0;
     for (const t of trades) if (await this.closeByMarket(t, 'KILL')) closed += 1;
     return closed;
+  }
+
+  /** Switch auto-trade off from inside the executor and tell the operator why. */
+  private disarm(reason: string): void {
+    if (!getSettings().autoTrade) return;
+    updateSettings({ autoTrade: false });
+    this.log('error', `AUTO-TRADE DISARMED — ${reason}`);
+    emit('error', { message: `Auto-trade disarmed: ${reason}` });
+    emit('status', { autoTrade: false });
   }
 
   private log(level: 'info' | 'error' | 'win' | 'loss', msg: string): void {

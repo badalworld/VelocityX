@@ -114,7 +114,6 @@ class AccountService {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private incomeCache = new Map<number, { at: number; data: IncomeSummary }>();
-  private lastUserEventAt = 0;
   /** Invalidates in-flight reads when mode or active credentials change. */
   private generation = 0;
 
@@ -138,7 +137,6 @@ class AccountService {
     this.generation += 1;
     this.view = null;
     this.incomeCache.clear();
-    this.lastUserEventAt = 0;
   }
 
   /**
@@ -151,7 +149,6 @@ class AccountService {
    * PnL, which made equity jump before the next REST poll corrected it.)
    */
   onUserStreamAccount(payload: any): void {
-    this.lastUserEventAt = Date.now();
     if (!this.view) return;
     try {
       const bal = (payload?.a?.B || []).find((b: any) => b.a === 'USDT');
@@ -448,22 +445,6 @@ class AccountService {
     return managed;
   }
 
-  /** Closed trades enriched with Binance fees/funding for the journal. */
-  closedStats(): { realizedPnl: number; fees: number; funding: number; count: number } {
-    const closed = allTrades().filter((t) => t.status === 'CLOSED');
-    return {
-      realizedPnl: closed.reduce((a, t) => a + t.realizedPnl, 0),
-      fees: closed.reduce((a, t) => a + t.fees, 0),
-      funding: closed.reduce((a, t) => a + (t.funding ?? 0), 0),
-      count: closed.length,
-    };
-  }
-
-  lastUserPushAt(): number {
-    return this.lastUserEventAt;
-  }
 }
-
-export { remainingQtyOf };
 
 export const accountService = new AccountService();

@@ -204,16 +204,6 @@ class Engine {
     };
   }
 
-  /** Indicator state for every watched symbol (dashboard + scanner). */
-  states(): Record<string, IndicatorState> {
-    const out: Record<string, IndicatorState> = {};
-    for (const sym of this.activeSymbols()) {
-      const st = this.state(sym);
-      if (st) out[sym] = st;
-    }
-    return out;
-  }
-
 }
 
 export const engine = new Engine();

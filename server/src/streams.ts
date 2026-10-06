@@ -1,43 +1,94 @@
 /**
  * WebSocket streams — the realtime backbone of the dashboard.
  *
- *  market : one combined Binance USD-M stream carrying
- *             <symbol>@bookTicker   → live prices (position PnL, dashboard)
- *             <symbol>@kline_5m     → candles straight into the candle store
+ *  market : Binance split its USD-M WebSocket in 2026, so market data arrives
+ *           over TWO sockets that are managed as one stream:
+ *             /public/stream  <symbol>@bookTicker → live prices (PnL, dashboard)
+ *             /market/stream  <symbol>@kline_5m   → candles into the candle store
  *           for every symbol the engine watches (scanner picks + open trades).
- *           Re-subscribed automatically when the watched set changes.
+ *           Re-subscribed automatically when the watched set changes. The
+ *           stream only counts as connected when BOTH sockets are up, and as
+ *           fresh when the quieter one is.
  *
  *  user   : listenKey user-data stream (testnet/live) →
- *             ORDER_TRADE_UPDATE → fills, Binance commission + realised PnL
+ *             ORDER_TRADE_UPDATE → market entry / exit fills, commission, PnL
+ *             ALGO_UPDATE        → stop-loss / take-profit trigger results
  *             ACCOUNT_UPDATE     → realtime equity / margin balance
  *             MARGIN_CALL / listenKey expiry handled with backoff + keepalive.
  */
 import WebSocket from 'ws';
-import { wsBase, api } from './binance';
+import { api, MarketChannel, marketStreamUrl, userStreamUrls } from './binance';
 import { getSettings } from './settings';
 import { trader } from './trader';
 import { accountService } from './account';
 import { candleStore } from './candles';
-import { engine } from './engine';
 import { emit } from './broadcast';
 
+/** A connected market socket that stays silent this long is rebuilt. */
+const MARKET_SILENCE_MS = 45_000;
+/** Binance pings user-data sockets every few minutes; ten silent minutes means a dead link. */
+const USER_SILENCE_MS = 10 * 60_000;
+const LISTEN_KEY_KEEPALIVE_MS = 25 * 60_000;
+
+/**
+ * Detach a socket for good. A no-op 'error' listener is attached on purpose:
+ * closing a socket that is still CONNECTING makes `ws` emit an 'error' on the
+ * next tick, and with no listener that is an uncaught exception — which this
+ * process turns into a shutdown.
+ */
+function discard(ws: WebSocket | null): void {
+  if (!ws) return;
+  try {
+    ws.removeAllListeners();
+    ws.on('error', () => {});
+    ws.close();
+  } catch { /* ignore */ }
+}
+
+interface Feed {
+  channel: MarketChannel;
+  ws: WebSocket | null;
+  connected: boolean;
+  openedAt: number;
+  lastMessageAt: number;
+  backoff: number;
+  retry: NodeJS.Timeout | null;
+  lastWarnAt: number;
+}
+
+const newFeed = (channel: MarketChannel): Feed => ({
+  channel,
+  ws: null,
+  connected: false,
+  openedAt: 0,
+  lastMessageAt: 0,
+  backoff: 1000,
+  retry: null,
+  lastWarnAt: 0,
+});
+
 export class MarketStream {
-  private ws: WebSocket | null = null;
   private symbolsKey = '';
-  private backoff = 1000;
+  private symbols: string[] = [];
+  private interval = '5m';
   private stopped = false;
-  private connected = false;
-  private lastMessageAt = 0;
-  /** Reject delayed reconnect timers from an obsolete subscription set. */
+  /** Rejects delayed reconnect timers from an obsolete subscription set. */
   private generation = 0;
+  private feeds: Record<MarketChannel, Feed> = { public: newFeed('public'), market: newFeed('market') };
+  private watchdog: NodeJS.Timeout | null = null;
+  private announced = false;
   private prices = new Map<string, number>();
   private lastEmit = new Map<string, number>();
 
+  /** Both sockets are up. */
   get isConnected(): boolean {
-    return this.connected;
+    return this.feeds.public.connected && this.feeds.market.connected;
   }
+  /** Last frame time of the QUIETER socket (0 until both have spoken). */
   lastMessage(): number {
-    return this.lastMessageAt;
+    const a = this.feeds.public.lastMessageAt;
+    const b = this.feeds.market.lastMessageAt;
+    return a && b ? Math.min(a, b) : 0;
   }
   price(symbol: string): number {
     return this.prices.get(symbol) ?? 0;
@@ -47,67 +98,106 @@ export class MarketStream {
   subscribe(symbols: string[]): void {
     const interval = getSettings().interval;
     const key = `${interval}:${[...symbols].sort().join(',')}`;
-    if (key === this.symbolsKey && this.ws) return;
+    if (key === this.symbolsKey && (this.feeds.public.ws || this.feeds.market.ws)) return;
     this.symbolsKey = key;
+    this.symbols = [...symbols];
+    this.interval = interval;
     this.stopped = false;
-    this.lastMessageAt = 0;
     const generation = ++this.generation;
-    this.close();
-    this.connect(symbols, interval, generation);
-  }
-
-  /** Back-compat helper used by the boot path. */
-  start(_symbol?: string): void {
-    this.subscribe(engine.activeSymbols());
+    for (const f of Object.values(this.feeds)) {
+      this.closeFeed(f);
+      f.lastMessageAt = 0;
+      f.backoff = 1000;
+    }
+    this.syncState();
+    this.startWatchdog();
+    for (const f of Object.values(this.feeds)) this.connect(f, generation);
   }
 
   stop(): void {
     this.stopped = true;
     this.generation += 1;
-    this.lastMessageAt = 0;
-    this.close();
-  }
-
-  private close(): void {
-    this.connected = false;
-    if (this.ws) {
-      try {
-        this.ws.removeAllListeners();
-        this.ws.close();
-      } catch { /* ignore */ }
-      this.ws = null;
+    for (const f of Object.values(this.feeds)) {
+      this.closeFeed(f);
+      f.lastMessageAt = 0;
     }
+    if (this.watchdog) clearInterval(this.watchdog);
+    this.watchdog = null;
+    this.syncState();
   }
 
-  private connect(symbols: string[], interval: string, generation: number): void {
-    if (this.stopped || generation !== this.generation || !symbols.length) return;
-    this.close();
-    const url = api.marketStreamUrl(symbols, interval);
+  private closeFeed(f: Feed): void {
+    if (f.retry) clearTimeout(f.retry);
+    f.retry = null;
+    f.connected = false;
+    const ws = f.ws;
+    f.ws = null;
+    discard(ws);
+  }
+
+  /** Tell the dashboard when the combined state flips (not once per socket). */
+  private syncState(): void {
+    const up = this.isConnected;
+    if (up === this.announced) return;
+    this.announced = up;
+    emit('stream', up ? { market: true, symbols: this.symbols } : { market: false });
+  }
+
+  private scheduleRetry(f: Feed, generation: number): void {
+    if (this.stopped || generation !== this.generation) return;
+    if (f.retry) clearTimeout(f.retry);
+    f.backoff = Math.min(f.backoff * 2, 15_000);
+    f.retry = setTimeout(() => {
+      f.retry = null;
+      this.connect(f, generation);
+    }, f.backoff);
+  }
+
+  /** A half-open TCP connection never errors by itself — rebuild silent sockets. */
+  private startWatchdog(): void {
+    if (this.watchdog) return;
+    this.watchdog = setInterval(() => {
+      const now = Date.now();
+      for (const f of Object.values(this.feeds)) {
+        if (!f.connected || !f.ws) continue;
+        const quietFor = now - (f.lastMessageAt || f.openedAt);
+        if (quietFor > MARKET_SILENCE_MS) {
+          console.warn(`[ws] market ${f.channel} socket silent for ${Math.round(quietFor / 1000)}s — reconnecting`);
+          try { f.ws.terminate(); } catch { /* ignore */ } // 'close' → backoff → reconnect
+        }
+      }
+    }, 15_000);
+    if (typeof this.watchdog.unref === 'function') this.watchdog.unref();
+  }
+
+  private connect(f: Feed, generation: number): void {
+    if (this.stopped || generation !== this.generation || !this.symbols.length) return;
+    this.closeFeed(f);
     let ws: WebSocket;
     try {
-      ws = new WebSocket(url);
-      this.ws = ws;
+      ws = new WebSocket(marketStreamUrl(f.channel, this.symbols, this.interval));
     } catch (e: any) {
-      console.warn('[ws] market connect failed', e?.message);
-      setTimeout(() => this.connect(symbols, interval, generation), this.backoff);
+      console.warn(`[ws] market ${f.channel} connect failed`, e?.message);
+      this.scheduleRetry(f, generation);
       return;
     }
+    f.ws = ws;
     ws.on('open', () => {
       if (generation !== this.generation) return ws.close();
-      this.backoff = 1000;
-      this.connected = true;
-      console.log(`[ws] market stream connected: ${symbols.length} symbols`);
-      emit('stream', { market: true, symbols });
+      f.backoff = 1000;
+      f.connected = true;
+      f.openedAt = Date.now();
+      console.log(`[ws] market ${f.channel} stream connected: ${this.symbols.length} symbols`);
+      this.syncState();
     });
     ws.on('message', (raw) => {
       if (generation !== this.generation) return;
       try {
         const m = JSON.parse(String(raw));
         const d = m?.data ?? m;
-        const ev = d?.e;
-        this.lastMessageAt = Date.now();
-        api.telemetry.wsLastMessageAt = this.lastMessageAt;
-        if (ev === 'bookTicker') {
+        f.lastMessageAt = Date.now();
+        api.telemetry.wsLastMessageAt = f.lastMessageAt;
+        if (d?.e === 'bookTicker') {
           const symbol = String(d.s);
           const price = Number(d.b) || Number(d.a);
           if (Number.isFinite(price) && price > 0) {
@@ -120,24 +210,25 @@ export class MarketStream {
             }
             emit('prices', { symbol, price, t: now });
           }
-        } else if (ev === 'kline') {
+        } else if (d?.e === 'kline') {
           candleStore.applyKline(d);
         }
       } catch { /* ignore malformed frame */ }
     });
     ws.on('close', () => {
       if (generation !== this.generation) return;
-      if (this.ws === ws) this.ws = null;
-      this.connected = false;
-      emit('stream', { market: false });
-      if (!this.stopped) {
-        setTimeout(
-          () => this.connect(symbols, interval, generation),
-          (this.backoff = Math.min(this.backoff * 2, 15000)),
-        );
-      }
+      if (f.ws === ws) f.ws = null;
+      f.connected = false;
+      this.syncState();
+      this.scheduleRetry(f, generation);
     });
-    ws.on('error', () => {
+    ws.on('error', (err: Error) => {
+      // Say WHY at most once a minute (e.g. "Unexpected server response: 404" means the
+      // endpoint moved) — the readiness gate alone only reports "disconnected".
+      if (Date.now() - f.lastWarnAt > 60_000) {
+        f.lastWarnAt = Date.now();
+        console.warn(`[ws] market ${f.channel} socket error: ${err?.message}`);
+      }
       try { ws.close(); } catch { /* ignore */ }
     });
   }
@@ -146,11 +237,19 @@ export class MarketStream {
 export class UserDataStream {
   private ws: WebSocket | null = null;
   private keepalive: NodeJS.Timeout | null = null;
+  private watchdog: NodeJS.Timeout | null = null;
+  private retry: NodeJS.Timeout | null = null;
   private stopped = true;
   private backoff = 2000;
-  private mode: string = '';
+  /** Environment + API key being streamed — a new key or mode needs a new stream. */
+  private identity = '';
+  /** Which candidate URL form of userStreamUrls() is currently being tried. */
+  private urlIndex = 0;
+  /** Connection attempts in a row that never reached 'open' (candidate discovery). */
+  private refusals = 0;
   private connected = false;
   private lastMessageAt = 0;
+  private lastActivityAt = 0;
   /** Invalidates callbacks/retries belonging to old credentials or mode. */
   private generation = 0;
 
@@ -163,54 +262,115 @@ export class UserDataStream {
 
   start(): void {
     const s = getSettings();
-    if (!s.keys[s.mode].key || !s.keys[s.mode].secret) { this.stop(); return; }
-    if (this.mode === s.mode && this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    const creds = s.keys[s.mode];
+    if (!creds.key || !creds.secret) { this.stop(); return; }
+    const identity = `${s.mode}:${creds.key}`;
+    // Already connecting / connected / backing off for this very account.
+    if (!this.stopped && this.identity === identity) return;
     this.stop();
     this.stopped = false;
-    this.mode = s.mode;
+    this.identity = identity;
+    this.urlIndex = 0;
+    this.refusals = 0;
+    this.backoff = 2000;
     void this.connect(this.generation);
   }
 
   stop(): void {
     this.stopped = true;
+    this.identity = '';
     this.generation += 1;
     this.connected = false;
     this.lastMessageAt = 0;
-    if (this.keepalive) clearInterval(this.keepalive);
-    this.keepalive = null;
+    this.clearTimers();
+    if (this.retry) clearTimeout(this.retry);
+    this.retry = null;
     const ws = this.ws;
     this.ws = null;
-    if (ws) { try { ws.close(); } catch { /* ignore */ } }
+    discard(ws);
+  }
+
+  private clearTimers(): void {
+    if (this.keepalive) clearInterval(this.keepalive);
+    if (this.watchdog) clearInterval(this.watchdog);
+    this.keepalive = null;
+    this.watchdog = null;
+  }
+
+  /** `discovery`: the last URL form was refused — try the next one quickly, no backoff. */
+  private scheduleReconnect(generation: number, discovery = false): void {
+    if (this.stopped || generation !== this.generation) return;
+    if (this.retry) clearTimeout(this.retry);
+    const delay = discovery ? 1000 : this.backoff;
+    if (!discovery) this.backoff = Math.min(this.backoff * 2, 30_000);
+    this.retry = setTimeout(() => {
+      this.retry = null;
+      void this.connect(generation);
+    }, delay);
+  }
+
+  private armTimers(generation: number, ws: WebSocket): void {
+    this.clearTimers();
+    this.keepalive = setInterval(() => {
+      if (generation !== this.generation) return;
+      api.keepAliveListenKey().catch((e: any) => {
+        // A rejected keep-alive means the key is dead (-1125) — the feed would
+        // go silently quiet. Rebuild the stream with a fresh key.
+        console.warn('[ws] listenKey keep-alive failed — rebuilding the user stream:', e?.message);
+        try { ws.terminate(); } catch { /* ignore */ }
+      });
+    }, LISTEN_KEY_KEEPALIVE_MS);
+    this.watchdog = setInterval(() => {
+      if (generation !== this.generation) return;
+      if (Date.now() - this.lastActivityAt > USER_SILENCE_MS) {
+        console.warn('[ws] user stream silent (no frames or server pings) — reconnecting');
+        try { ws.terminate(); } catch { /* ignore */ }
+      }
+    }, 60_000);
+    if (typeof this.keepalive.unref === 'function') this.keepalive.unref();
+    if (typeof this.watchdog.unref === 'function') this.watchdog.unref();
   }
 
   private async connect(generation: number): Promise<void> {
     if (this.stopped || generation !== this.generation) return;
     try {
-      const s = getSettings();
-      const mode = s.mode;
+      const mode = getSettings().mode;
       const listenKey = await api.createListenKey();
       if (this.stopped || generation !== this.generation || mode !== getSettings().mode) return;
-      const ws = new WebSocket(`${wsBase(mode)}/ws/${listenKey}`);
+      const urls = userStreamUrls(mode, listenKey);
+      const index = this.urlIndex % urls.length;
+      const ws = new WebSocket(urls[index]);
       this.ws = ws;
+      let opened = false;
       ws.on('open', () => {
         if (this.stopped || generation !== this.generation) return ws.close();
+        opened = true;
+        this.urlIndex = index; // remember the form that works
+        this.refusals = 0;
         this.backoff = 2000;
         this.connected = true;
+        this.lastActivityAt = Date.now();
         console.log(`[ws] user stream connected (${mode})`);
         emit('stream', { user: true, mode });
-        if (this.keepalive) clearInterval(this.keepalive);
-        this.keepalive = setInterval(() => {
-          if (generation === this.generation) api.keepAliveListenKey().catch(() => {});
-        }, 25 * 60 * 1000);
+        this.armTimers(generation, ws);
+        // Fills may have happened while the socket was down — settle every open trade now.
+        void trader.reconcile().catch(() => {});
       });
+      ws.on('ping', () => { this.lastActivityAt = Date.now(); });
       ws.on('message', (raw) => {
         if (this.stopped || generation !== this.generation) return;
         try {
-          const m = JSON.parse(String(raw));
-          this.lastMessageAt = Date.now();
+          const parsed = JSON.parse(String(raw));
+          // the `/stream` form wraps every event as {stream, data}
+          const m = parsed?.data && parsed?.stream ? parsed.data : parsed;
+          this.lastMessageAt = this.lastActivityAt = Date.now();
           switch (m.e) {
             case 'ORDER_TRADE_UPDATE':
               trader.onOrderUpdate(m);
+              break;
+            case 'ALGO_UPDATE':
+              // a stop-loss / take-profit conditional order fired (or died)
+              trader.onAlgoUpdate(m);
               break;
             case 'ACCOUNT_UPDATE':
               // realtime wallet balance / unrealised PnL straight from Binance
@@ -233,26 +393,26 @@ export class UserDataStream {
         if (generation !== this.generation) return;
         if (this.ws === ws) this.ws = null;
         this.connected = false;
-        if (this.keepalive) clearInterval(this.keepalive);
-        this.keepalive = null;
+        this.clearTimers();
         emit('stream', { user: false });
-        if (!this.stopped) {
-          setTimeout(
-            () => void this.connect(generation),
-            (this.backoff = Math.min(this.backoff * 2, 30000)),
-          );
+        let discovery = false;
+        if (!opened) {
+          // This URL form was refused — rotate to the next documented candidate.
+          this.urlIndex = index + 1;
+          // First pass over the candidates is quick; after a full round, back off.
+          discovery = (this.refusals += 1) < urls.length;
+          console.warn(`[ws] user stream endpoint form ${index + 1}/${urls.length} refused — trying the next`);
         }
+        this.scheduleReconnect(generation, discovery);
       });
-      ws.on('error', () => { try { ws.close(); } catch { /* ignore */ } });
+      ws.on('error', (err: Error) => {
+        if (!opened) console.warn('[ws] user stream error:', err?.message);
+        try { ws.close(); } catch { /* ignore */ }
+      });
     } catch (e: any) {
       if (generation !== this.generation) return;
       console.warn('[ws] user stream failed:', e?.message);
-      if (!this.stopped) {
-        setTimeout(
-          () => void this.connect(generation),
-          (this.backoff = Math.min(this.backoff * 2, 30000)),
-        );
-      }
+      this.scheduleReconnect(generation);
     }
   }
 

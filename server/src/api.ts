@@ -7,7 +7,7 @@
  */
 import express from 'express';
 import { api } from './binance';
-import { authRequired, rateLimit, requireToken } from './auth';
+import { authRequired, LIVE_CONTROL_MESSAGE, liveControlProtected, rateLimit, requireToken } from './auth';
 import { engine, mtfDashboard } from './engine';
 import { computeStats } from './stats';
 import { getSettings, publicSettings, updateSettings } from './settings';
@@ -44,6 +44,7 @@ export function currentExecutionReadiness(): {
     account: !!account && account.mode === s.mode && account.canTrade === true && now - account.at < 30_000,
     engine: engine.lastTick() > 0 && now - engine.lastTick() < 10_000,
     scanner: !s.autoScan || (s.scanner.enabled && !!scan && now - scan.at < Math.max(180_000, s.scanner.intervalSec * 3_000)),
+    liveControl: s.mode !== 'live' || liveControlProtected(),
   };
   const labels: Record<keyof typeof checks, string> = {
     keys: `${s.mode} API keys are not configured`,
@@ -53,6 +54,7 @@ export function currentExecutionReadiness(): {
     account: 'fresh trade-enabled Binance account snapshot is unavailable',
     engine: 'signal engine heartbeat is stale',
     scanner: '50-asset scanner snapshot is stale',
+    liveControl: LIVE_CONTROL_MESSAGE,
   };
   const reasons = (Object.keys(checks) as (keyof typeof checks)[])
     .filter((key) => !checks[key])
@@ -234,14 +236,19 @@ export function apiRouter(): express.Router {
   });
 
   r.get('/positions', async (_req, res) => {
-    const view = accountService.get() ?? (await accountService.refresh());
-    res.json({
-      managed: accountService.managedNow(),
-      external: view?.positions.external ?? [],
-      slots: { used: openTrades().length, max: getSettings().maxPositions },
-      note: 'external positions are never adopted, managed, closed or counted in bot PnL',
-      at: view?.at ?? Date.now(),
-    });
+    try {
+      const view = accountService.get() ?? (await accountService.refresh());
+      res.json({
+        managed: accountService.managedNow(),
+        external: view?.positions.external ?? [],
+        slots: { used: openTrades().length, max: getSettings().maxPositions },
+        note: 'external positions are never adopted, managed, closed or counted in bot PnL',
+        at: view?.at ?? Date.now(),
+      });
+    } catch (e: any) {
+      // Express 4 does not catch async rejections — answer instead of hanging.
+      res.status(502).json({ error: e?.message || 'position refresh failed' });
+    }
   });
 
   r.get('/income', async (req, res) => {
@@ -286,7 +293,7 @@ export function apiRouter(): express.Router {
 
   r.get('/execution/readiness', (_req, res) => res.json(currentExecutionReadiness()));
 
-  r.post('/scanner/scan', async (_req, res) => {
+  r.post('/scanner/scan', mutate, async (_req, res) => {
     const result = await scanner.scan();
     res.json(result ?? { error: 'scan failed — check the activity log' });
   });
@@ -309,6 +316,19 @@ export function apiRouter(): express.Router {
 
     if (patch.mode !== undefined && !['testnet', 'live'].includes(patch.mode)) {
       return res.status(400).json({ error: 'mode must be testnet | live — simulation was removed' });
+    }
+    if (patch.autoTrade !== undefined && typeof patch.autoTrade !== 'boolean') {
+      return res.status(400).json({ error: 'autoTrade must be true or false' });
+    }
+    if (patch.mode !== undefined && patch.mode !== before.mode && openTrades().length > 0) {
+      // Open trades live on the exchange of THEIR environment; once the mode
+      // flips nothing could monitor, protect or close them.
+      return res.status(409).json({
+        error: `${openTrades().length} bot position(s) are still open in ${before.mode.toUpperCase()} mode — close them (Kill) before switching to ${String(patch.mode).toUpperCase()}`,
+      });
+    }
+    if (resultingMode === 'live' && patch.autoTrade === true && before.autoTrade !== true && !liveControlProtected()) {
+      return res.status(403).json({ error: LIVE_CONTROL_MESSAGE });
     }
     if (wantsLive && patch.confirmLive !== true) {
       return res.status(400).json({
@@ -392,8 +412,14 @@ export function apiRouter(): express.Router {
    * therefore needs `confirmLive: true` too.
    */
   r.post('/autotrade', mutate, (req, res) => {
-    const enabled = !!req.body?.enabled;
+    if (typeof req.body?.enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be true or false' });
+    }
+    const enabled: boolean = req.body.enabled;
     const mode = getSettings().mode;
+    if (enabled && mode === 'live' && !liveControlProtected()) {
+      return res.status(403).json({ error: LIVE_CONTROL_MESSAGE });
+    }
     if (enabled && mode === 'live' && req.body?.confirmLive !== true) {
       return res.status(400).json({
         error: 'Enabling auto-trade in LIVE mode executes real orders — resend with confirmLive: true',
@@ -427,7 +453,17 @@ export function apiRouter(): express.Router {
     res.status(confirmed ? 200 : 502).json(payload);
   });
 
+  /**
+   * Emergency stop: DISARM first, then flatten. Closing positions while
+   * auto-trade stays armed would let the very next signal re-enter within
+   * minutes; re-arm deliberately once the situation is understood.
+   */
   r.post('/kill', mutate, async (_req, res) => {
+    if (getSettings().autoTrade) {
+      updateSettings({ autoTrade: false });
+      emit('log', { level: 'error', msg: 'KILL — auto-trade DISARMED; closing every bot position' });
+      emit('status', { autoTrade: false });
+    }
     const attempted = openTrades().length;
     const closed = await trader.kill();
     void accountService.refresh();

@@ -13,7 +13,8 @@ import http from 'http';
 import path from 'path';
 import { apiRouter, currentExecutionReadiness } from './api';
 import { closeBroadcast, emit, initBroadcast } from './broadcast';
-import { authRequired } from './auth';
+import { authRequired, bindHost, LIVE_CONTROL_MESSAGE, liveControlProtected } from './auth';
+import { api } from './binance';
 import { engine } from './engine';
 import { loadSettings, getSettings, updateSettings } from './settings';
 import { openTradeOn, openTrades, pruneOld, remainingQtyOf } from './store';
@@ -25,7 +26,7 @@ import { limiter } from './ratelimit';
 
 const PORT = Number(process.env.PORT) || 4000;
 /** Host binding: 0.0.0.0 by default (containers/preview), override with VX_HOST. */
-const HOST = process.env.VX_HOST || '0.0.0.0';
+const HOST = bindHost();
 /** Live trading must be explicitly re-armed at boot: restarting the process
  *  alone must never resume real-money execution silently. */
 const ALLOW_LIVE = process.env.VX_ALLOW_LIVE === '1';
@@ -46,8 +47,20 @@ async function main(): Promise<void> {
       level: 'error',
       msg: 'LIVE mode was persisted with auto-trade ON but VX_ALLOW_LIVE is not set — started DISARMED (re-arm explicitly when ready)',
     });
+  } else if (settings.mode === 'live' && settings.autoTrade && !liveControlProtected()) {
+    // LIVE + an open, unauthenticated control API is never allowed to trade.
+    updateSettings({ autoTrade: false });
+    console.warn(`[boot] SAFETY: ${LIVE_CONTROL_MESSAGE} — starting DISARMED`);
+    emit('log', { level: 'error', msg: `${LIVE_CONTROL_MESSAGE} — started DISARMED` });
   } else if (settings.autoTrade) {
     console.warn(`[boot] SAFETY: starting with auto-trade ON in ${settings.mode.toUpperCase()} mode`);
+  }
+  // Trades are only managed with the keys/endpoints of their own environment.
+  const otherMode = openTrades().filter((t) => t.mode !== getSettings().mode);
+  if (otherMode.length) {
+    const list = otherMode.map((t) => `${t.symbol}(${t.mode})`).join(', ');
+    console.warn(`[boot] WARNING: ${otherMode.length} open bot trade(s) belong to the other environment and are NOT monitored in ${getSettings().mode.toUpperCase()} mode: ${list}`);
+    emit('log', { level: 'error', msg: `Open ${otherMode[0].mode.toUpperCase()} trade(s) not monitored while running ${getSettings().mode.toUpperCase()}: ${list} — switch back to manage them` });
   }
   const bootKeys = settings.keys[settings.mode];
   if (!bootKeys.key || !bootKeys.secret) {
@@ -128,6 +141,12 @@ async function main(): Promise<void> {
   if (bootKeys.key && bootKeys.secret) userStream.start();
   accountService.start(12_000);
 
+  // Signed requests carry a timestamp (recvWindow 5 s). Measure the host's clock
+  // drift against Binance at boot and every 5 minutes so a drifting clock is
+  // compensated instead of rejecting orders.
+  void api.ping();
+  engineTimers.push(setInterval(() => void api.ping(), 5 * 60_000));
+
   // Keep the market stream subscribed to whatever the engine watches
   // (scanner picks change, positions open/close) and refresh the account view
   // whenever the set of bot positions changes, so the dashboard never lags.
@@ -188,6 +207,12 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[shutdown] ${reason} — stopping feeds (open positions keep their exchange SL/TP orders)`);
+    // A lingering dashboard connection can keep server.close() waiting forever —
+    // never let that hold the process (or a supervisor's stop timeout) hostage.
+    setTimeout(() => {
+      console.error('[shutdown] forced exit after 10 s');
+      process.exit(code || 1);
+    }, 10_000).unref();
     try {
       engine.stop();
       scanner.stop();
@@ -196,7 +221,10 @@ async function main(): Promise<void> {
       userStream.stop();
       closeBroadcast();
       for (const t of engineTimers) clearInterval(t);
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections?.(); // SSE / keep-alive connections would otherwise block close()
+      });
     } catch (e: any) {
       console.error('[shutdown]', e?.message || e);
     }

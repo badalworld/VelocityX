@@ -74,8 +74,9 @@ async function timed(url, init) {
     console.log(`     most volatile right now: ${ranked.slice(0, 5).map((r) => `${r.symbol} ${r.range.toFixed(1)}%`).join(', ')}`);
 
     // ----------------------------------------------------------- realtime ws
-    const wsTarget = `wss://fstream.binance.com/stream?streams=btcusdt@bookTicker`;
-    const wsOk = await new Promise((resolve) => {
+    // Binance split the USD-M WebSocket in 2026: bookTicker lives on /public, klines
+    // on /market (the old /ws and /stream roots were decommissioned on 2026-04-23).
+    const probe = (wsTarget) => new Promise((resolve) => {
       let done = false;
       const finish = (v, why) => {
         if (!done) {
@@ -89,7 +90,7 @@ async function timed(url, init) {
         ws.onmessage = () => {
           clearTimeout(t);
           ws.close();
-          finish(true, 'bookTicker received');
+          finish(true, 'frame received');
         };
         ws.onerror = (e) => {
           clearTimeout(t);
@@ -100,7 +101,10 @@ async function timed(url, init) {
         finish(false, e?.message || 'cannot open socket');
       }
     });
-    ok(wsOk.v, 'market WebSocket pushes live bookTicker (this is the dashboard price path)', wsOk.why);
+    const pub = await probe('wss://fstream.binance.com/public/stream?streams=btcusdt@bookTicker');
+    ok(pub.v, 'public WebSocket pushes live bookTicker (the dashboard price path)', pub.why);
+    const mkt = await probe('wss://fstream.binance.com/market/stream?streams=btcusdt@kline_5m');
+    ok(mkt.v, 'market WebSocket pushes live klines (the signal path)', mkt.why);
   } catch (e) {
     exchangeUp = false;
     console.log(`!    Binance unreachable from this host (${e.message || e}) — exchange checks skipped.`);
