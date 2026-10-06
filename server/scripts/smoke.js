@@ -1,92 +1,66 @@
-// Smoke test: verify the EMA/ATR ports, signal logic and the qty split.
-//
-// The reference vectors in scripts/fixtures/indicator-reference.json are
-// produced by scripts/gen-reference.py, an INDEPENDENT Python implementation of
-// Pine's ta.ema / ta.atr. The vectors are committed, so this test is a real
-// cross-check of the TypeScript maths on every run (no network, no skipped
-// checks). Regenerate with:  python3 scripts/gen-reference.py
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { ema, atr, signalAt, computeSnapshot } = require('../dist/indicators');
-const { splitQty } = require('../dist/trader');
+
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vx-clean-smoke-'));
+process.env.VX_DATA_DIR = dataDir;
+process.env.BINANCE_MODE = '';
+process.env.BINANCE_SYMBOL = '';
+
+const oldSettings = {
+  mode: 'testnet',
+  symbol: 'ethusdt',
+  autoTrade: true,
+  autoScan: true,
+  maxPositions: 8,
+  tradeSizePercent: 5,
+  leverage: 12,
+  scanner: { enabled: true, candidates: 50 },
+  strategy: { lookbackBars: 30, stopBufferAtr: 0.1 },
+  emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
+  keys: { testnet: { key: 'demo-key', secret: 'demo-secret' }, live: { key: '', secret: '' } },
+};
+const legacyTrade = {
+  id: 'old-trade-1', symbol: 'BTCUSDT', side: 'LONG', status: 'OPEN', qty: 0.01,
+  entryPrice: 65000, openedAt: 1000, closedAt: null, realizedPnl: 0, fees: 0.2,
+  funding: -0.01, mode: 'testnet', result: null,
+  exitPlan: 'LIQUIDITY_5R', q1: 0.002, q2: 0.002, q3: 0.002, q4: 0.002, q5: 0.002,
+  slInitial: 64000, slCurrent: 64000, tp1: 66000, tp5: 70000,
+  orders: { entry: 'VXoldE', sl: 'VXoldS0', tp1: 'VXoldT1' },
+  scan: { rank: 1 }, initialRisk: 10,
+};
+fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify(oldSettings));
+fs.writeFileSync(path.join(dataDir, 'trades.json'), JSON.stringify([legacyTrade]));
+fs.writeFileSync(path.join(dataDir, 'signals.json'), JSON.stringify([{ strategy: 'OLD', side: 'LONG' }]));
 
 let failures = 0;
-function approx(a, b, tol, name) {
-  const ok = Number.isFinite(a) && Math.abs(a - b) <= tol;
-  if (!ok) { failures++; console.log(`FAIL ${name}: got ${a}, expected ${b}`); }
-  else console.log(`ok   ${name} = ${a}`);
+function check(name, condition) {
+  if (condition) console.log(`ok   ${name}`);
+  else { failures += 1; console.error(`FAIL ${name}`); }
 }
 
-const fixturePath = path.join(__dirname, 'fixtures', 'indicator-reference.json');
-let ref;
 try {
-  ref = require(fixturePath);
-} catch (e) {
-  console.error(`FAIL missing reference fixture ${fixturePath} — run: python3 scripts/gen-reference.py`);
-  process.exit(1);
+  const settings = require('../dist/settings');
+  const current = settings.loadSettings();
+  const { allTrades, openTrades } = require('../dist/store');
+  const { api } = require('../dist/binance');
+  const persistedSettings = JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'), 'utf8'));
+  const persistedTrades = JSON.parse(fs.readFileSync(path.join(dataDir, 'trades.json'), 'utf8'));
+
+  check('settings keep the selected connection and normalize symbol', current.mode === 'testnet' && current.symbol === 'ETHUSDT');
+  check('legacy strategy and execution settings are stripped', !('autoTrade' in current) && !('scanner' in persistedSettings) && !('strategy' in persistedSettings) && !('leverage' in persistedSettings));
+  check('API secrets remain private and available to the selected account', current.keys.testnet.key === 'demo-key' && current.keys.testnet.secret === 'demo-secret' && !JSON.stringify(settings.publicSettings()).includes('demo-secret'));
+  check('legacy journal is retained as an open, neutral record', allTrades().length === 1 && openTrades().length === 1 && allTrades()[0].id === legacyTrade.id);
+  check('strategy, stop, target, signal and order metadata is removed from the archive', !('exitPlan' in allTrades()[0]) && !('tp1' in allTrades()[0]) && !('orders' in allTrades()[0]) && !('scan' in allTrades()[0]) && !('slInitial' in persistedTrades[0]));
+  check('legacy signal file is left untouched but is not part of the active store', fs.existsSync(path.join(dataDir, 'signals.json')) && typeof settings.getSettings === 'function');
+  check('order-writing and conditional-order methods are absent', !api.marketOrder && !api.newOrder && !api.newAlgoOrder && !api.protectiveStop && !api.cancelAlgoOrder);
+  check('legacy execution module is absent from the clean build', !fs.existsSync(path.join(__dirname, '..', 'dist', 'trader.js')));
+} catch (error) {
+  failures += 1;
+  console.error('FAIL smoke test threw:', error?.stack || error);
+} finally {
+  fs.rmSync(dataDir, { recursive: true, force: true });
 }
 
-const closes = ref.closes;
-const candles = ref.candles.map((c, i) => ({ ...c, time: i, closeTime: i }));
-const idx = ref.indices;
-
-// Reference `null` means "not defined yet" (fewer samples than the period) —
-// the port marks that with NaN, which must match exactly.
-function seriesCheck(name, mine, refSeries, i) {
-  const expected = refSeries[i];
-  if (expected === null || expected === undefined) {
-    if (Number.isNaN(mine[i])) console.log(`ok   ${name}[${i}] = NaN (undefined before the seed)`);
-    else { failures++; console.log(`FAIL ${name}[${i}]: got ${mine[i]}, expected undefined`); }
-    return;
-  }
-  approx(mine[i], expected, 1e-9, `${name}[${i}]`);
-}
-const ema5 = ema(closes, 5), ema11 = ema(closes, 11), ema34 = ema(closes, 34), atr14 = atr(candles, 14);
-for (const i of idx) {
-  seriesCheck('ema5', ema5, ref.ema5, i);
-  seriesCheck('ema11', ema11, ref.ema11, i);
-  seriesCheck('ema34', ema34, ref.ema34, i);
-  seriesCheck('atr14', atr14, ref.atr14, i);
-}
-
-// ---- signal: craft a cross up at index 100 ----
-const f = [], s = [];
-for (let i = 0; i < 120; i++) {
-  if (i < 100) { f.push(100); s.push(100); }        // flat: no cross
-  else if (i === 100) { f.push(101); s.push(100); } // cross happens AT 100
-  else { f.push(102); s.push(100); }
-}
-// signalAt checks i-1 vs i-2 => at i=101: f[100]>s[100] && f[99]<=s[99] => LONG
-console.assert(signalAt(f, s, 100) === null, 'no signal at cross bar itself (confirmed logic)');
-console.assert(signalAt(f, s, 101) === 'LONG', 'LONG at 101');
-console.assert(signalAt(f, s, 102) === null, 'no repeat at 102');
-// cross down
-const f2 = f.slice(), s2 = s.slice();
-f2[110] = 99; s2[110] = 100; // cross down occurs at 110 (prev f=102>s=100)
-// at i=111: f[110]<s[110] && f[109]>=s[109] => SHORT
-console.assert(signalAt(f2, s2, 111) === 'SHORT', 'SHORT at 111');
-console.assert(signalAt(f2, s2, 110) === null, 'no signal at down-cross bar');
-console.log('ok   signal detection logic');
-
-// ---- splitQty: 33% / 50%-of-remaining / rest ----
-const cases = [
-  [1.000, 0.001], // 1000 steps
-  [0.008, 0.001], // 8 steps
-  [0.003, 0.001], // 3 steps (minimum ladder)
-  [0.004, 0.001],
-  [5000, 1],      // DOGE-like
-  [12345, 1],
-];
-for (const [q, step] of cases) {
-  const { q1, q2, q3 } = splitQty(q, step, 33, 50);
-  const sum = Number((q1 + q2 + q3).toFixed(8));
-  const okSum = Math.abs(sum - q) < 1e-7;
-  const okMin = q < 3 * step ? (q1 === 0 && q3 === q) : (q1 >= step && q2 >= step && q3 >= step);
-  if (!okSum || !okMin) { failures++; console.log(`FAIL splitQty(${q},${step}): ${q1}/${q2}/${q3}`); }
-  else console.log(`ok   splitQty(${q}, ${step}) = ${q1}/${q2}/${q3} (${((q1/q)*100).toFixed(0)}/${((q2/q)*100).toFixed(0)}/${((q3/q)*100).toFixed(0)}%)`);
-}
-
-// snapshot wiring
-const snap = computeSnapshot(candles, [5,11,15,18,21,24,28,34], 200, 14);
-console.assert(snap.emas.length === 8 && snap.emas[1].length === candles.length, 'snapshot shape');
-console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} FAILURES`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(failures ? `\n${failures} CLEAN-BASELINE CHECK(S) FAILED` : '\nCLEAN-BASELINE SMOKE PASSED');
+process.exit(failures ? 1 : 0);

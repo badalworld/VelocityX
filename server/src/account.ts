@@ -1,60 +1,13 @@
-/**
- * Account / PnL service — every number here comes from Binance.
- *
- *   • Equity, wallet balance, margin in use, unrealised PnL, ROI  → /fapi/v2/account
- *   • Positions (managed + external)                              → /fapi/v2/positionRisk
- *   • Fees, funding, realised PnL, transfers                      → /fapi/v1/income
- *
- * Attribution rule (your requirement): only trades **opened by this bot** are
- * counted in the bot's PnL/ROI. Any position on the account that the bot did
- * not open is listed separately, is never adopted, never closed and its profit
- * or loss is never mixed into bot statistics.
- */
+/** Read-only Binance account, position and income snapshot service. */
 import { api, AccountSnapshot, IncomeRecord, RawPosition } from './binance';
 import { getSettings, Mode } from './settings';
-import { allTrades, openTrades, remainingQtyOf, Trade } from './store';
 import { emit } from './broadcast';
-import { priceOf } from './prices';
-
-export interface ManagedPosition {
-  trade: Trade;
-  markPrice: number;
-  /** Unrealised PnL of OUR quantity only, priced from Binance mark price. */
-  unrealized: number;
-  roiPct: number;
-  /** Binance-verified fees for this trade (commission), USDT. */
-  fees: number;
-  /** Binance funding paid/received while this trade was open, USDT. */
-  funding: number;
-  /** remaining quantity still open */
-  remainingQty: number;
-  notional: number;
-  margin: number;
-  leverage: number;
-  liquidationPrice: number;
-  /** Every managed position is a real exchange position. */
-  source: 'binance';
-}
-
-export interface ExternalPosition {
-  symbol: string;
-  positionAmt: number;
-  entryPrice: number;
-  markPrice: number;
-  unrealized: number;
-  leverage: number;
-  notional: number;
-  /** always false — the bot never adopts or manages these */
-  managed: false;
-  /** shown in the UI: why this row is excluded from every bot number */
-  note?: string;
-}
 
 export interface IncomeSummary {
   windowDays: number;
   realizedPnl: number;
-  commission: number; // negative = paid
-  funding: number; // negative = paid
+  commission: number;
+  funding: number;
   transfers: number;
   insurance: number;
   other: number;
@@ -65,62 +18,39 @@ export interface IncomeSummary {
 }
 
 export interface AccountView {
-  /** Always Binance — the account is never simulated. */
   source: 'binance';
   mode: Mode;
   at: number;
-  /** Binance account fields (null until the first successful poll) */
   equity: number | null;
   walletBalance: number | null;
   unrealizedPnl: number | null;
   availableBalance: number | null;
   initialMargin: number | null;
   maintMargin: number | null;
-  roiPct: number | null; // unrealised ÷ margin in use
+  roiPct: number | null;
   roiOnWalletPct: number | null;
   canTrade: boolean | null;
-  /** Bot-attributed numbers — managed trades only */
-  bot: {
-    managedCount: number;
-    closedCount: number;
-    maxPositions: number;
-    marginUsed: number;
-    notional: number;
-    unrealizedPnl: number;
-    realizedPnl: number;
-    fees: number;
-    funding: number;
-    netPnl: number;
-    roiPct: number;
-  };
+  /** Direct exchange positions, with no bot adoption or automated management. */
+  positions: RawPosition[];
   income: IncomeSummary | null;
-  external: {
-    count: number;
-    notional: number;
-    unrealized: number;
-  };
-  positions: {
-    managed: ManagedPosition[];
-    external: ExternalPosition[];
-  };
   errors: string[];
   latencyMs: number;
 }
 
-const clampDays = (d: number) => Math.min(90, Math.max(1, Math.round(d)));
+const clampDays = (value: number) => Math.min(90, Math.max(1, Math.round(value)));
 
 class AccountService {
   private view: AccountView | null = null;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private incomeCache = new Map<number, { at: number; data: IncomeSummary }>();
-  /** Invalidates in-flight reads when mode or active credentials change. */
   private generation = 0;
 
   start(intervalMs = 12_000): void {
     if (this.timer) return;
     void this.refresh();
     this.timer = setInterval(() => void this.refresh(), intervalMs);
+    if (typeof this.timer.unref === 'function') this.timer.unref();
   }
 
   stop(): void {
@@ -132,197 +62,117 @@ class AccountService {
     return this.view;
   }
 
-  /** Drop account-specific state before changing environment or credentials. */
   invalidate(): void {
     this.generation += 1;
     this.view = null;
     this.incomeCache.clear();
   }
 
-  /**
-   * Real-time balance/position push from the user-data stream (no REST weight).
-   *
-   * Binance ACCOUNT_UPDATE semantics: `a.B[].wb` is the asset wallet balance,
-   * `a.B[].cw` is the CROSS wallet balance (not a PnL!), and unrealised PnL
-   * lives in `a.P[].up` per position. Equity is therefore wallet + Σup — the
-   * same identity `/fapi/v2/account` reports. (Older builds mis-read `cw` as
-   * PnL, which made equity jump before the next REST poll corrected it.)
-   */
+  /** Apply real Binance ACCOUNT_UPDATE balance/position values to the cache. */
   onUserStreamAccount(payload: any): void {
     if (!this.view) return;
     try {
-      const bal = (payload?.a?.B || []).find((b: any) => b.a === 'USDT');
-      const positions: any[] = Array.isArray(payload?.a?.P) ? payload.a.P : [];
-      const wallet = Number(bal?.wb);
-      if (Number.isFinite(wallet) && wallet >= 0) {
-        const hasPositions = positions.length > 0;
-        const unreal = hasPositions
-          ? positions.reduce((a, p) => a + (Number(p?.up) || 0), 0)
-          : this.view.unrealizedPnl ?? 0;
-        const initialMargin = hasPositions
-          ? positions.reduce((a, p) => a + (Number(p?.iw) || 0), 0)
-          : this.view.initialMargin;
-        this.view = {
-          ...this.view,
-          at: Date.now(),
-          walletBalance: wallet,
-          unrealizedPnl: unreal,
-          equity: wallet + unreal,
-          initialMargin,
-          roiOnWalletPct: wallet > 0 ? (unreal / wallet) * 100 : 0,
-          roiPct: initialMargin && initialMargin > 0 ? (unreal / initialMargin) * 100 : this.view.roiPct,
-        };
+      const balance = (payload?.a?.B || []).find((item: any) => item.a === 'USDT');
+      const wallet = Number(balance?.wb);
+      const accountPositions: any[] = Array.isArray(payload?.a?.P) ? payload.a.P : [];
+      const known = new Map(this.view.positions.map((position) => [position.symbol, position]));
+      for (const item of accountPositions) {
+        const symbol = String(item?.s || '');
+        if (!symbol) continue;
+        const previous = known.get(symbol);
+        const amount = Number(item.pa);
+        if (Number.isFinite(amount) && amount === 0) {
+          known.delete(symbol);
+          continue;
+        }
+        known.set(symbol, {
+          symbol,
+          positionAmt: Number.isFinite(amount) ? amount : previous?.positionAmt ?? 0,
+          entryPrice: Number(item.ep) || previous?.entryPrice || 0,
+          markPrice: previous?.markPrice || 0,
+          unRealizedProfit: Number(item.up) || 0,
+          liquidationPrice: previous?.liquidationPrice || 0,
+          leverage: previous?.leverage || 1,
+          marginType: String(item.mt || previous?.marginType || ''),
+          isolatedMargin: Number(item.iw) || previous?.isolatedMargin || 0,
+          positionInitialMargin: Number(item.iw) || previous?.positionInitialMargin || 0,
+          notional: previous?.notional || 0,
+          updateTime: Date.now(),
+        });
       }
-      emit('account', { at: this.view.at, equity: this.view.equity, unrealizedPnl: this.view.unrealizedPnl });
-    } catch {
-      /* malformed event — next poll will reconcile */
-    }
+      const positions = [...known.values()].filter((position) => position.positionAmt !== 0);
+      const hasPositionUpdates = accountPositions.length > 0;
+      const unrealized = hasPositionUpdates
+        ? positions.reduce((sum, position) => sum + position.unRealizedProfit, 0)
+        : this.view.unrealizedPnl ?? 0;
+      const initialMargin = hasPositionUpdates
+        ? positions.reduce((sum, position) => sum + position.positionInitialMargin, 0)
+        : this.view.initialMargin;
+      const walletBalance = Number.isFinite(wallet) && wallet >= 0 ? wallet : this.view.walletBalance;
+      this.view = {
+        ...this.view,
+        at: Date.now(),
+        positions,
+        walletBalance,
+        unrealizedPnl: unrealized,
+        equity: walletBalance == null ? this.view.equity : walletBalance + unrealized,
+        initialMargin,
+        roiOnWalletPct: walletBalance && walletBalance > 0 ? (unrealized / walletBalance) * 100 : 0,
+        roiPct: initialMargin && initialMargin > 0 ? (unrealized / initialMargin) * 100 : this.view.roiPct,
+      };
+      emit('account', { source: 'binance', at: this.view.at });
+    } catch { /* malformed stream payloads must not corrupt the account cache */ }
   }
 
-  /** Force a fresh account + positions read. */
   async refresh(): Promise<AccountView | null> {
     if (this.running) return this.view;
     this.running = true;
     const generation = this.generation;
-    const t0 = Date.now();
-    const s = getSettings();
+    const startedAt = Date.now();
+    const mode = getSettings().mode;
     const errors: string[] = [];
     try {
-      const mode = s.mode;
-      const managed = this.managedPositions();
       let snapshot: AccountSnapshot | null = null;
-      let rawPositions: RawPosition[] = [];
-      let income: IncomeSummary | null = null;
+      let positions: RawPosition[] | null = null;
+      const results = await Promise.allSettled([api.accountSnapshot(), api.positionRisk()]);
+      if (results[0].status === 'fulfilled') snapshot = results[0].value;
+      else errors.push(`account: ${results[0].reason?.message || results[0].reason}`);
+      if (results[1].status === 'fulfilled') positions = results[1].value;
+      else errors.push(`positions: ${results[1].reason?.message || results[1].reason}`);
+      if (generation !== this.generation || mode !== getSettings().mode) return this.view;
 
-      try {
-        snapshot = await api.accountSnapshot();
-      } catch (e: any) {
-        errors.push(`account: ${e?.message || e}`);
-      }
-      try {
-        rawPositions = await api.positionRisk();
-      } catch (e: any) {
-        errors.push(`positions: ${e?.message || e}`);
-      }
+      const previous = this.view;
+      let income = previous?.income ?? null;
+      try { income = await this.incomeSummary(getSettings().historyDays); }
+      catch (e: any) { errors.push(`income: ${e?.message || e}`); }
+      if (generation !== this.generation || mode !== getSettings().mode) return this.view;
 
-      // ---- match Binance positions to bot trades -------------------------
-      const bySymbol = new Map(rawPositions.map((p) => [p.symbol, p]));
-      for (const m of managed) {
-        const p = bySymbol.get(m.trade.symbol);
-        m.markPrice = p?.markPrice || m.markPrice;
-        m.liquidationPrice = p?.liquidationPrice || 0;
-        if (p && p.markPrice > 0) {
-          m.unrealized = (p.markPrice - m.trade.entryPrice) * (m.trade.side === 'LONG' ? 1 : -1) * m.remainingQty;
-        }
-        m.margin = m.trade.margin;
-        m.notional = m.remainingQty * (m.markPrice || m.trade.entryPrice);
-        m.roiPct = m.margin > 0 ? (m.unrealized / m.margin) * 100 : 0;
-      }
-
-      // ---- external positions: everything the bot did not open -----------
-      const external: ExternalPosition[] = [];
-      for (const p of rawPositions) {
-        const mine = managed.reduce((sum, m) => (m.trade.symbol === p.symbol ? sum + m.remainingQty : sum), 0);
-        const amt = Math.abs(p.positionAmt);
-        const extra = Math.max(0, amt - mine);
-        if (extra > 1e-9) {
-          const dir = Math.sign(p.positionAmt);
-          external.push({
-            symbol: p.symbol,
-            positionAmt: p.positionAmt,
-            entryPrice: p.entryPrice,
-            markPrice: p.markPrice,
-            unrealized: (p.markPrice - p.entryPrice) * dir * extra,
-            leverage: p.leverage,
-            notional: Math.abs(extra * p.markPrice),
-            managed: false,
-            note: 'opened outside the bot — never adopted, never closed, never counted in any bot number',
-          });
-        }
-      }
-
-      // ---- bot totals: closed history + the positions open right now -----
-      // (a closed trade keeps contributing to the P&L / fees / funding totals,
-      //  exactly like Binance's own income ledger does)
-      const closedTrades = allTrades().filter((t) => t.status === 'CLOSED');
-      const closedSum = (key: 'realizedPnl' | 'fees' | 'funding') =>
-        closedTrades.reduce((a, t) => a + (Number(t[key]) || 0), 0);
-      const realizedPnl = closedSum('realizedPnl') + managed.reduce((a, m) => a + m.trade.realizedPnl, 0);
-      const fees = closedSum('fees') + managed.reduce((a, m) => a + m.fees, 0);
-      const funding = closedSum('funding') + managed.reduce((a, m) => a + m.funding, 0);
-      const unrealizedPnl = managed.reduce((a, m) => a + m.unrealized, 0);
-      const marginUsed = managed.reduce((a, m) => a + m.margin, 0);
-      const notional = managed.reduce((a, m) => a + m.notional, 0);
-      const netPnl = realizedPnl + unrealizedPnl;
-      const closedCount = closedTrades.length;
-
-      // Income (real fees / funding / realised PnL straight from Binance).
-      try {
-        income = await this.incomeSummary(s.historyDays);
-      } catch (e: any) {
-        errors.push(`income: ${e?.message || e}`);
-      }
-      // Attribute symbol-level funding to the open trade on that symbol.
-      if (income) {
-        const bySym = new Map(income.bySymbol.map((b) => [b.symbol, b]));
-        for (const m of managed) {
-          const b = bySym.get(m.trade.symbol);
-          if (b) m.funding = b.funding;
-        }
-      }
-
-      const view: AccountView = {
+      const values = snapshot ?? {} as Partial<AccountSnapshot>;
+      this.view = {
         source: 'binance',
         mode,
         at: Date.now(),
-        equity: snapshot?.equity ?? null,
-        walletBalance: snapshot?.walletBalance ?? null,
-        unrealizedPnl: snapshot?.unrealizedPnl ?? null,
-        availableBalance: snapshot?.availableBalance ?? null,
-        initialMargin: snapshot?.initialMargin ?? null,
-        maintMargin: snapshot?.maintMargin ?? null,
-        roiPct: snapshot?.roiPct ?? null,
-        roiOnWalletPct: snapshot?.roiOnWalletPct ?? null,
-        canTrade: snapshot?.canTrade ?? null,
-        bot: {
-          managedCount: managed.length,
-          closedCount,
-          maxPositions: s.maxPositions,
-          marginUsed,
-          notional,
-          unrealizedPnl,
-          realizedPnl,
-          fees,
-          funding,
-          netPnl,
-          roiPct: marginUsed > 0 ? (unrealizedPnl / marginUsed) * 100 : 0,
-        },
+        equity: values.equity ?? previous?.equity ?? null,
+        walletBalance: values.walletBalance ?? previous?.walletBalance ?? null,
+        unrealizedPnl: values.unrealizedPnl ?? previous?.unrealizedPnl ?? null,
+        availableBalance: values.availableBalance ?? previous?.availableBalance ?? null,
+        initialMargin: values.initialMargin ?? previous?.initialMargin ?? null,
+        maintMargin: values.maintMargin ?? previous?.maintMargin ?? null,
+        roiPct: values.roiPct ?? previous?.roiPct ?? null,
+        roiOnWalletPct: values.roiOnWalletPct ?? previous?.roiOnWalletPct ?? null,
+        canTrade: values.canTrade ?? previous?.canTrade ?? null,
+        positions: positions ?? previous?.positions ?? [],
         income,
-        external: {
-          count: external.length,
-          notional: external.reduce((a, e) => a + e.notional, 0),
-          unrealized: external.reduce((a, e) => a + e.unrealized, 0),
-        },
-        positions: { managed, external },
         errors,
-        latencyMs: Date.now() - t0,
+        latencyMs: Date.now() - startedAt,
       };
-
-      // Never publish a snapshot that finished after its account credentials
-      // were replaced. The next scheduled refresh will use the new identity.
-      if (generation !== this.generation || getSettings().mode !== mode) {
-        this.incomeCache.clear();
-        return this.view;
-      }
-      this.view = view;
-      return view;
+      emit('account', { source: 'binance', at: this.view.at });
+      return this.view;
     } finally {
       this.running = false;
-      void t0;
     }
   }
 
-  /** Binance income summary (fees, funding, realised PnL) over a day window. */
   async incomeSummary(days?: number): Promise<IncomeSummary> {
     const generation = this.generation;
     const windowDays = clampDays(days ?? getSettings().historyDays);
@@ -331,7 +181,6 @@ class AccountService {
 
     const startTime = Date.now() - windowDays * 86_400_000;
     const rows: IncomeRecord[] = [];
-    // One page is 1000 records; the 95% budget keeps this cheap (weight 30).
     let page = await api.incomeHistory({ startTime, limit: 1000 });
     rows.push(...page);
     if (page.length === 1000) {
@@ -342,39 +191,23 @@ class AccountService {
 
     const bySymbol = new Map<string, { realizedPnl: number; commission: number; funding: number }>();
     let realizedPnl = 0, commission = 0, funding = 0, transfers = 0, insurance = 0, other = 0;
-
-    for (const r of rows) {
-      const key = r.symbol || 'ACCOUNT';
-      const entry = bySymbol.get(key) || { realizedPnl: 0, commission: 0, funding: 0 };
-      switch (r.incomeType) {
-        case 'REALIZED_PNL':
-          realizedPnl += r.income;
-          entry.realizedPnl += r.income;
-          break;
-        case 'COMMISSION':
-          commission += r.income;
-          entry.commission += r.income;
-          break;
-        case 'FUNDING_FEE':
-          funding += r.income;
-          entry.funding += r.income;
-          break;
+    for (const row of rows) {
+      const symbol = row.symbol || 'ACCOUNT';
+      const item = bySymbol.get(symbol) || { realizedPnl: 0, commission: 0, funding: 0 };
+      switch (row.incomeType) {
+        case 'REALIZED_PNL': realizedPnl += row.income; item.realizedPnl += row.income; break;
+        case 'COMMISSION': commission += row.income; item.commission += row.income; break;
+        case 'FUNDING_FEE': funding += row.income; item.funding += row.income; break;
         case 'TRANSFER':
         case 'INTERNAL_TRANSFER':
         case 'WELCOME_BONUS':
         case 'CONTEST_REWARD':
-        case 'REFERRAL_KICKBACK':
-          transfers += r.income;
-          break;
-        case 'INSURANCE_CLEAR':
-          insurance += r.income;
-          break;
-        default:
-          other += r.income;
+        case 'REFERRAL_KICKBACK': transfers += row.income; break;
+        case 'INSURANCE_CLEAR': insurance += row.income; break;
+        default: other += row.income;
       }
-      bySymbol.set(key, entry);
+      bySymbol.set(symbol, item);
     }
-
     const data: IncomeSummary = {
       windowDays,
       realizedPnl,
@@ -385,66 +218,14 @@ class AccountService {
       other,
       net: realizedPnl + commission + funding + insurance + other + transfers,
       bySymbol: [...bySymbol.entries()]
-        .map(([symbol, v]) => ({ symbol, ...v, net: v.realizedPnl + v.commission + v.funding }))
+        .map(([symbol, values]) => ({ ...values, symbol, net: values.realizedPnl + values.commission + values.funding }))
         .sort((a, b) => Math.abs(b.net) - Math.abs(a.net)),
       records: rows.length,
       at: Date.now(),
     };
-    if (generation === this.generation) {
-      this.incomeCache.set(windowDays, { at: Date.now(), data });
-    }
+    if (generation === this.generation) this.incomeCache.set(windowDays, { at: Date.now(), data });
     return data;
   }
-
-  private managedPositions(): ManagedPosition[] {
-    const out: ManagedPosition[] = [];
-    for (const t of openTrades()) {
-      // Start from the freshest local price; live modes refine it with the mark
-      // price Binance reports straight afterwards.
-      const local = priceOf(t.symbol) || t.entryPrice;
-      const dirMul = t.side === 'LONG' ? 1 : -1;
-      const remaining = remainingQtyOf(t);
-      out.push({
-        trade: t,
-        markPrice: local,
-        unrealized: (local - t.entryPrice) * dirMul * remaining,
-        roiPct: t.margin > 0 ? (((local - t.entryPrice) * dirMul * remaining) / t.margin) * 100 : 0,
-        fees: t.fees,
-        funding: t.funding ?? 0,
-        remainingQty: remainingQtyOf(t),
-        notional: 0,
-        margin: t.margin,
-        leverage: t.leverage,
-        liquidationPrice: 0,
-        source: 'binance',
-      });
-    }
-    return out;
-  }
-
-  /**
-   * Live view of the bot's positions, straight from the executor journal (never
-   * the cached account poll), enriched with the freshest mark prices we have.
-   * The Positions view must never lag behind a trade that just opened.
-   */
-  managedNow(): ManagedPosition[] {
-    const managed = this.managedPositions();
-    const cached = new Map((this.view?.positions.managed ?? []).map((m) => [m.trade.id, m]));
-    for (const m of managed) {
-      const price = priceOf(m.trade.symbol) || cached.get(m.trade.id)?.markPrice || m.trade.entryPrice;
-      m.markPrice = price;
-      const dirMul = m.trade.side === 'LONG' ? 1 : -1;
-      m.unrealized = (price - m.trade.entryPrice) * dirMul * m.remainingQty;
-      m.notional = m.remainingQty * price;
-      m.margin = m.trade.margin;
-      m.roiPct = m.margin > 0 ? (m.unrealized / m.margin) * 100 : 0;
-      m.fees = m.trade.fees;
-      m.funding = m.trade.funding ?? 0;
-      m.liquidationPrice = cached.get(m.trade.id)?.liquidationPrice ?? 0;
-    }
-    return managed;
-  }
-
 }
 
 export const accountService = new AccountService();

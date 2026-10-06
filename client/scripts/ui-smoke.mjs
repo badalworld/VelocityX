@@ -1,18 +1,3 @@
-#!/usr/bin/env node
-/**
- * VelocityX dashboard smoke test (headless, no browser required).
- * ---------------------------------------------------------------------------
- * Bundles the real App with esbuild, mounts it inside jsdom with stubbed
- * browser APIs (canvas, ResizeObserver targets, matchMedia, WebSocket) and
- * asserts that every dashboard surface renders — including the retained P&L
- * dock — while the removed BTCUSDT candlestick/EMA chart stays absent. It then
- * clicks through Scanner, Positions, Trades and Settings.
- *
- *   npm run smoke:ui            # fixture-fed DOM smoke (deterministic, no exchange needed)
- *   npm run smoke:ui -- --live  # against a running server on :4000
- *
- * Exit code is non-zero if any check fails or the app logs a runtime error.
- */
 import { build } from 'esbuild';
 import { JSDOM } from 'jsdom';
 import fs from 'node:fs';
@@ -22,569 +7,140 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const clientRoot = path.resolve(here, '..');
-const LIVE = process.argv.includes('--live');
-const API = process.env.VX_API ?? 'http://localhost:4000';
-
-/* ------------------------------------------------------------------ fixtures */
+const bundlePath = path.join(os.tmpdir(), `vx-readonly-ui-${process.pid}.js`);
 const now = Date.now();
-const MIN = 60_000;
-const HOUR = 60 * MIN;
-const symbol = 'BTCUSDT';
-
-const signals = [
-  { time: now - 10 * HOUR, side: 'LONG', price: 62100, id: 's1', acted: true },
-  { time: now - 6 * HOUR, side: 'SHORT', price: 62300, id: 's2', acted: true },
-  { time: now - HOUR, side: 'LONG', price: 62000, id: 's3', acted: false },
-];
-
-const openTrade = {
-  id: 't1',
-  symbol,
-  side: 'LONG',
-  status: 'OPEN',
-  qty: 0.06,
-  q1: 0.012,
-  q2: 0.012,
-  q3: 0.012,
-  q4: 0.012,
-  q5: 0.012,
-  exitPlan: 'LIQUIDITY_5R',
-  entryPrice: 61200,
-  atrAtEntry: 210,
-  slInitial: 60780,
-  slCurrent: 62040,
-  slStage: 3,
-  tp1: 61620,
-  tp2: 62040,
-  tp3: 62460,
-  tp4: 62880,
-  tp5: 63300,
-  notional: 3672,
-  margin: 306,
-  leverage: 10,
-  openedAt: now - 4 * HOUR,
-  closedAt: null,
-  closeReason: null,
-  tp1Filled: true,
-  tp2Filled: true,
-  tp3Filled: true,
-  tp4Filled: false,
-  tp5Filled: false,
-  realizedPnl: 0,
-  fees: 2.31,
-  funding: -0.021,
-  binanceRealizedPnl: 0,
-  commissionOtherAsset: 0,
-  initialRisk: 25.2,
-  orders: { entry: 'VXt1E', sl: 'VXt1S', tp1: 'VXt11', tp2: 'VXt12', tp3: 'VXt13', tp4: 'VXt14', tp5: 'VXt15' },
-  mode: 'testnet',
-  result: null,
-  botOwned: true,
-  unrealized: 12.75,
-  markPrice: 62665.4,
-  remainingQty: 0.024,
-  scan: { volatility: 71.2, adx: 27.5, atrPct: 0.34, rank: 1 },
+const trade = {
+  id: 'archive-001', symbol: 'BTCUSDT', side: 'LONG', status: 'CLOSED', qty: 0.01,
+  entryPrice: 61000, openedAt: now - 86_400_000, closedAt: now - 80_000_000,
+  closePrice: 62000, realizedPnl: 9.5, fees: 0.3, funding: -0.02, mode: 'testnet', result: 'WIN',
 };
-
-const baseTrade = { ...openTrade, id: 't0', status: 'CLOSED', closedAt: now - 5 * HOUR, closeReason: 'TP5', tp1Filled: true, tp2Filled: true, tp3Filled: true, tp4Filled: true, tp5Filled: true, realizedPnl: 47.9, result: 'WIN' };
-
-const trades = [
-  { ...baseTrade, openedAt: now - 26 * HOUR, closedAt: now - 22 * HOUR, realizedPnl: 18.4 },
-  { ...baseTrade, id: 't2', side: 'SHORT', slStage: 0, tp1Filled: false, tp2Filled: false, tp3Filled: false, tp4Filled: false, tp5Filled: false, closeReason: 'SL', result: 'LOSS', openedAt: now - 14 * HOUR, closedAt: now - 9 * HOUR, realizedPnl: -14.2, initialRisk: 14.4 },
-  { ...baseTrade, id: 't3', qty: 0.06, q1: 0.012, q2: 0.012, q3: 0.012, q4: 0.012, q5: 0.012, slStage: 4, tp1Filled: true, tp2Filled: true, tp3Filled: true, tp4Filled: true, tp5Filled: true, closeReason: 'TP5', openedAt: now - 5 * HOUR, closedAt: now - 2 * HOUR, realizedPnl: 43.7, initialRisk: 25.2 },
-];
-
-
-/* ---- Binance account view (the P&L / ROI / equity source) ---- */
-const accountView = {
-  source: 'binance',
-  mode: 'testnet',
-  at: now,
-  equity: 1060.65,
-  walletBalance: 1048.1,
-  unrealizedPnl: 12.75,
-  availableBalance: 742,
-  initialMargin: 306,
-  maintMargin: 61,
-  roiPct: 4.17,
-  roiOnWalletPct: 4.17,
-  canTrade: true,
-  bot: { managedCount: 1, closedCount: 4, maxPositions: 8, marginUsed: 306, notional: 3745, unrealizedPnl: 12.75, realizedPnl: 47.9, fees: 2.31, funding: -0.021, netPnl: 60.65, roiPct: 4.17 },
-  income: { realizedPnl: 47.9, commission: 2.31, funding: -0.021, transfers: 0, insurance: 0, net: 45.57, bySymbol: [{ symbol, realizedPnl: 47.9, commission: 2.31, funding: -0.021, net: 45.57 }], records: 12 },
-  external: { count: 1, notional: 512.4, unrealized: -3.2 },
-  positions: { managed: [], external: [] },
-  errors: [],
-  latencyMs: 42,
+const position = {
+  symbol: 'ETHUSDT', positionAmt: -0.25, entryPrice: 3200, markPrice: 3150,
+  unRealizedProfit: 12.5, liquidationPrice: 5000, leverage: 3, marginType: 'isolated',
+  isolatedMargin: 260, positionInitialMargin: 262, notional: -787.5, updateTime: now,
 };
-
-const positionsView = {
-  managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.024, notional: 1503.96, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'binance' } ],
-  external: [ { symbol: 'DOGEUSDT', side: 'LONG', qty: 1200, notional: 512.4, entryPrice: 0.42, markPrice: 0.4173, unrealized: -3.2, leverage: 5, margin: 102.5, source: 'binance', managed: false, note: 'opened outside the bot — never adopted, never counted' } ],
-  slots: { used: 1, max: 8 },
-  note: 'external positions are never adopted, managed, closed or counted in bot PnL',
-  at: now,
+const account = {
+  source: 'binance', mode: 'testnet', at: now, equity: 12540.75, walletBalance: 12528.25,
+  unrealizedPnl: 12.5, availableBalance: 11900, initialMargin: 262, maintMargin: 13,
+  roiPct: 4.77, roiOnWalletPct: 0.1, canTrade: true, positions: [position],
+  income: { windowDays: 7, realizedPnl: 12, commission: -1.5, funding: -0.2, transfers: 0, insurance: 0, other: 0, net: 10.3, bySymbol: [], records: 4, at: now },
+  errors: [], latencyMs: 28,
 };
-
-const scannerView = {
-  at: now,
-  durationMs: 820,
-  universe: 214,
-  target: 50,
-  analysed: 50,
-  progress: { id: 'scan-50', running: false, target: 50, completed: 50, failed: 0, startedAt: now - 820, updatedAt: now },
-  gate: { minQuoteVolume24h: 20_000_000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, minOpportunityScore: 65, maxEmaGapAtr: 0.45, zoneRetentionMin: 30, maxOpportunityZones: 16, maxPositions: 8 },
-  selected: [symbol, 'SOLUSDT', 'BNBUSDT', 'DOGEUSDT'],
-  rows: [
-    ['BTCUSDT', 'BTC', 71.2, 27.5, 0.34, 1.8, 1200, 'TRENDING', true, 88.1, 'liquid, active market · watching 5m liquidity sweeps'],
-    ['SOLUSDT', 'SOL', 66.4, 24.1, 0.91, 3.2, 520, 'TRENDING', true, 81.4, 'liquid, active market · watching 5m liquidity sweeps'],
-    ['BNBUSDT', 'BNB', 58.9, 21.7, 0.77, 2.4, 380, 'TRENDING', true, 74.2, 'liquid, active market · watching 5m liquidity sweeps'],
-    ['DOGEUSDT', 'DOGE', 54.3, 19.8, 1.02, 4.1, 240, 'TRENDING', true, 71.6, 'liquid, active market · watching 5m liquidity sweeps'],
-    ['XRPUSDT', 'XRP', 31.2, 15.4, 0.42, 0.9, 190, 'RANGING', false, 42.0, 'ATR 0.42% < 0.6% activity threshold'],
-    ['ADAUSDT', 'ADA', 22.4, 12.1, 0.31, 0.4, 120, 'RANGING', false, 30.1, 'ATR 0.31% < 0.6% activity threshold'],
-    ['USDCUSDT', 'USDC', 1.2, 5.0, 0.01, 0.0, 900, 'PEGGED', false, 2.0, 'pegged / stable / staked market — never traded'],
-  ].map((r, i) => ({
-    symbol: r[0], base: r[1], price: 61200, change24hPct: r[5], range24hPct: r[4] * 3, quoteVolume24h: r[6] * 1e6,
-    atrPct: r[4], atrPct5m: r[4], adx: r[3], emaFast: 61300, emaSlow: 60800, emaFast5m: 61010, emaSlow5m: 61020,
-    trend: 'UP', alignment: 1, fundingRate: 0.0001, nextFundingTime: 1791000000000, volatility: r[2],
-    trendScore: r[3] * 3, liquidityScore: 80, score: r[9], setupScore: r[8] ? 88 - i * 4 : 30,
-    emaGapPct: 0.02, emaGapAtr: r[8] ? 0.2 + i * 0.03 : 1.4, approachAtr: 0.08,
-    opportunity: !!r[8] && i < 4, inOpportunityZone: !!r[8] && i < 4, opportunitySide: 'BOTH',
-    marketType: r[7], tradable: r[8], reason: r[10], opportunityReason: r[8] ? 'BOTH-side 5m sweep monitor · ranking does not trigger entries' : r[10],
-  })),
+const status = {
+  mode: 'testnet', symbol: 'BTCUSDT', interval: '5m', entriesEnabled: false,
+  entriesDisabledReason: 'No trading strategy is installed.',
+  market: { symbol: 'BTCUSDT', interval: '5m', lastPrice: 63123.45, lastClosedCandleTime: now - 300_000, engineStartedAt: now - 600_000 },
+  feed: { feed: 'binance', source: 'binance-usdm', reachable: true, lastRestOkAt: now, lastRestError: null, latencyMs: 28, avgLatencyMs: 32, serverTimeOffsetMs: 4, wsLastMessageAt: now },
+  streams: { market: true, marketLastMessageAt: now, user: true, userLastMessageAt: now },
+  engine: { activeSymbols: ['BTCUSDT'], lastTickAt: now, lastClosedCandleTime: now - 300_000, startedAt: now - 600_000 },
+  account, openTrades: [], tradeCount: 1,
+  keysConfigured: { testnet: false, live: false }, apiTokenRequired: false,
+  logs: [{ t: now - 1500, level: 'info', msg: 'Read-only account snapshot refreshed.' }], now,
 };
-scannerView.opportunities = scannerView.rows.slice(0, 4).map((r, i) => ({
-  symbol: r.symbol, base: r.base, side: 'BOTH', state: i === 0 ? 'EXECUTED' : 'MONITORING', score: r.setupScore,
-  rank: i + 1, price: r.price, adx: r.adx, atrPct: r.atrPct, atrPct5m: r.atrPct5m, emaGapPct: r.emaGapPct,
-  emaGapAtr: r.emaGapAtr, enteredAt: now - (i + 1) * MIN, lastQualifiedAt: now, updatedAt: now,
-  expiresAt: now + 29 * MIN, signalId: i === 0 ? 's3' : null, signalAt: i === 0 ? now - MIN : null,
-  tradeId: i === 0 ? openTrade.id : null, reason: r.opportunityReason,
-}));
-
+const positionsPayload = { positions: [position], openJournalEntries: [], at: now, note: 'Read-only exchange positions.' };
+const settings = {
+  mode: 'testnet', symbol: 'BTCUSDT', interval: '5m', historyDays: 7,
+  keys: { testnet: { key: '', secret: '', configured: false }, live: { key: '', secret: '', configured: false } },
+};
 const routes = {
-  '/api/status': {
-    symbol,
-    autoTrade: true,
-    autoScan: true,
-    mode: 'testnet',
-    feed: 'binance',
-    startedAt: now - 9 * HOUR,
-    engine: { lastSignal: signals[2], emas: [], atr: 210, ribbonBull: true, lastClosedCandleTime: now - 5 * MIN, startedAt: now - 9 * HOUR },
-    openTrades: [openTrade],
-    openTrade: openTrade,
-    slots: { used: 1, max: 8 },
-    scanner: { at: now, selected: scannerView.selected, opportunities: scannerView.opportunities, progress: scannerView.progress, universe: 214, target: 50, analysed: 50 },
-    execution: { ready: true, infrastructureReady: true, state: 'READY', reasons: [], mode: 'testnet', armed: true, checks: { keys: true, exchange: true, marketStream: true, userStream: true, account: true, engine: true, scanner: true }, at: now },
-    feedInfo: { feed: 'binance', source: 'binance-usdm', reachable: true, lastRestOkAt: now - 1200, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300, candles: { symbols: 4, series: 4, bars: 812, lastWsAt: now - 300 } },
-    limits: { plannedLimitPerMin: 2280, usedWeight: 412, usedPct: 17.2, cooldownMsLeft: 0, areas: [ { area: 'scanner', sharePct: 40, weightUsed: 220, weightCap: 912, calls: 12, waiting: 0, avgWaitMs: 3 }, { area: 'market', sharePct: 25, weightUsed: 96, weightCap: 570, calls: 40, waiting: 0, avgWaitMs: 1 }, { area: 'account', sharePct: 20, weightUsed: 76, weightCap: 456, calls: 8, waiting: 0, avgWaitMs: 2 }, { area: 'orders', sharePct: 10, weightUsed: 15, weightCap: 228, calls: 6, waiting: 0, avgWaitMs: 0 }, { area: 'stream', sharePct: 5, weightUsed: 5, weightCap: 114, calls: 2, waiting: 0, avgWaitMs: 0 } ] },
-    account: accountView,
-    logs: [
-      { t: now - 4000, level: 'info', msg: 'Scanner: 30 markets analysed · trading BTC, SOL, BNB, DOGE' },
-      { t: now - 3000, level: 'win', msg: 'BTCUSDT TP1 hit @ 61620 — closed 0.012, SL → breakeven' },
-      { t: now - 2000, level: 'info', msg: 'TESTNET LONG 0.06 BTCUSDT @ 61200 | SL 60780 | TP 1R–5R 61620/62040/62460/62880/63300' },
-      { t: now - 1000, level: 'info', msg: 'Binance weight 412/2280 (18%) — scanner 220, market 96' },
-    ],
-    streams: { market: true, user: true },
-    price: 62665.4,
-    pnl: { total: 60.65, realized: 47.9, unrealized: 12.75, fees: 2.31, funding: -0.021, roiPct: 4.17 },
-    stats: { totalSignals: 6, winCount: 1, lossCount: 0 },
-  },
-  '/api/trades': trades,
-  '/api/signals': signals,
-  '/api/stats': { totalSignals: 6, actedSignals: 4, totalClosedTrades: 1, winCount: 1, lossCount: 0, overallWinRate: 100, expectancy: 1.42, netPnl: 47.9, fees: 2.31, funding: -0.021, avgWin: 47.9, avgLoss: 0, profitFactor: 3.2, rrRatio: 3, breakevenRate: 25, tp1Count: 1, tp2Count: 1, tp3Count: 1, tp4Count: 1, tp5Count: 1, slCount: 0, tp1Pct: 100, tp2Pct: 100, tp3Pct: 100, tp4Pct: 100, tp5Pct: 100, slPct: 0, weekly: [ { label: 'W38', trades: 1, wins: 1, losses: 0, winRate: 100, netPnl: 47.9, expectancy: 1.42 } ], openTrades: 1, totalFunding: -0.021 },
-  '/api/account': accountView,
-  '/api/positions': positionsView,
-  '/api/scanner': scannerView,
-  '/api/limits': { limiter: {}, telemetry: {}, candles: {}, note: '' },
-  '/api/diagnostics': { ok: true, feed: 'binance', reachable: true, latencyMs: 42, ws: { market: true, user: true }, candles: { symbols: 4 }, limits: { usedWeight: 412, plannedLimitPerMin: 2280 }, errors: [] },
-  '/api/mtf': {
-    symbol,
-    timeframes: [ { tf: '5m', bull: true }, { tf: '15m', bull: true }, { tf: '30m', bull: false } ],
-    atr: 210.4,
-    ribbonBull: true,
-    overall: 'BULLISH',
-    bullCount: 2,
-    at: now,
-  },
-  '/api/settings': {
-    mode: 'testnet',
-    autoTrade: true,
-    autoScan: true,
-    symbol,
-    interval: '5m',
-    tradeSizePercent: 5,
-    leverage: 10,
-    maxPositions: 8,
-    emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
-    emaExtraLength: 200,
-    atrLength: 14,
-    atrSlMultiplier: 2,
-    tpRrFactor: 1.5,
-    tp1ClosePct: 33,
-    tp2ClosePct: 50,
-    historyDays: 30,
-    dashboardTimeframes: ['5', '15', '30'],
-    scanner: { enabled: true, intervalSec: 60, candidates: 50, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, topN: 16, minOpportunityScore: 65, maxEmaGapAtr: 0.45, zoneRetentionMin: 30 },
-    strategy: { lookbackBars: 30, profileBins: 24, setupExpiryBars: 24, sweepMinAtr: 0.05, retestToleranceAtr: 0.2, stopBufferAtr: 0.1, maxStopAtr: 6 },
-    keys: {
-      testnet: { key: '', secret: '', configured: false },
-      live: { key: '', secret: '', configured: false },
-    },
-  },
+  '/api/status': status,
+  '/api/account': account,
+  '/api/positions': positionsPayload,
+  '/api/trades?limit=500': [trade],
+  '/api/settings': settings,
 };
+const requested = [];
+let failed = 0;
+function check(name, ok, extra = '') {
+  if (ok) console.log(`ok   ${name}${extra ? ` — ${extra}` : ''}`);
+  else { failed += 1; console.error(`FAIL ${name}${extra ? ` — ${extra}` : ''}`); }
+}
+const wait = (ms = 60) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/* ------------------------------------------------------------------- bundle */
-async function bundle() {
-  const outfile = path.join(os.tmpdir(), `vx-ui-smoke-${process.pid}.js`);
-  await build({
-    entryPoints: [path.join(clientRoot, 'src', 'smoke-entry.tsx')],
-    bundle: true,
-    format: 'iife',
-    platform: 'browser',
-    jsx: 'automatic',
-    loader: { '.css': 'empty' },
-    define: { 'process.env.NODE_ENV': '"development"' },
-    outfile,
-    logLevel: 'warning',
-  });
-  return outfile;
+class MockWebSocket {
+  constructor(url) { this.url = url; setTimeout(() => this.onopen?.(), 0); }
+  send() {}
+  close() { setTimeout(() => this.onclose?.(), 0); }
+  terminate() { this.close(); }
 }
 
-/* ------------------------------------------------------------------- runner */
-const errors = [];
-const checks = [];
-const requests = [];
-const check = (name, ok, extra) => checks.push({ name, ok: !!ok, extra });
-/** Live runs depend on what is actually open/traded right now: if the account
- *  has nothing open, the matching UI surface legitimately shows its empty
- *  state — skip the check instead of reporting a false failure. */
-const checkSoft = (guard, name, ok, extra, why) => {
-  if (guard) return check(name, ok, extra);
-  checks.push({ name, ok: true, skipped: true, extra: `skipped — ${why ?? 'the live account has nothing open right now'}` });
-};
+async function main() {
+  let dom;
+  try {
+    await build({
+      entryPoints: [path.join(clientRoot, 'src', 'main.tsx')],
+      bundle: true,
+      format: 'iife',
+      platform: 'browser',
+      jsx: 'automatic',
+      loader: { '.css': 'empty' },
+      define: { 'process.env.NODE_ENV': '"development"' },
+      outfile: bundlePath,
+      logLevel: 'silent',
+    });
 
-function boot(bundlePath) {
-  const dom = new JSDOM('<!doctype html><html data-motion="off"><body><div id="root"></div></body></html>', {
-    runScripts: 'dangerously',
-    pretendToBeVisual: true,
-    url: 'http://localhost:5173/',
-  });
-  const { window } = dom;
-
-  window.addEventListener('error', (e) => errors.push(`window error: ${e.message || e.error}`));
-  window.addEventListener('unhandledrejection', (e) => errors.push(`unhandled rejection: ${e.reason?.stack || e.reason}`));
-  window.console.error = (...a) => errors.push(`console.error: ${a.map((x) => (x && x.message) || String(x)).join(' ')}`);
-  window.console.warn = () => {};
-
-  window.confirm = () => true;
-
-  if (LIVE) {
-    const nodeFetch = globalThis.fetch;
-    window.fetch = (url) => {
-      requests.push(String(url));
-      return nodeFetch(API + String(url));
+    dom = new JSDOM('<!doctype html><html><body><div id="root"></div><div id="boot"></div></body></html>', {
+      url: 'http://localhost/',
+      runScripts: 'outside-only',
+      pretendToBeVisual: true,
+    });
+    const { window } = dom;
+    const mockFetch = async (url) => {
+      const route = new URL(String(url), 'http://localhost').pathname + new URL(String(url), 'http://localhost').search;
+      requested.push(route);
+      if (!(route in routes)) return { ok: false, status: 404, json: async () => ({ error: 'Unknown API endpoint' }) };
+      return { ok: true, status: 200, json: async () => structuredClone(routes[route]) };
     };
-  } else {
-    window.fetch = (url) => {
-      requests.push(String(url));
-      const key = String(url).split('?')[0];
-      const data = routes[key];
-      if (!data) return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: `no fixture for ${key}` }) });
-      return Promise.resolve({ ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(data)) });
-    };
+    window.fetch = mockFetch;
+    window.WebSocket = MockWebSocket;
+    window.requestAnimationFrame = (callback) => window.setTimeout(() => callback(Date.now()), 0);
+    window.cancelAnimationFrame = (id) => window.clearTimeout(id);
+    Object.assign(globalThis, {
+      window,
+      document: window.document,
+      location: window.location,
+      localStorage: window.localStorage,
+      HTMLElement: window.HTMLElement,
+      Event: window.Event,
+      MouseEvent: window.MouseEvent,
+      WebSocket: MockWebSocket,
+      fetch: mockFetch,
+      requestAnimationFrame: window.requestAnimationFrame,
+      cancelAnimationFrame: window.cancelAnimationFrame,
+    });
+    Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true });
+    window.eval(fs.readFileSync(bundlePath, 'utf8'));
+    await wait(250);
+
+    const doc = window.document;
+    const bodyText = () => doc.body.textContent || '';
+    check('read-only dashboard mounts', !!doc.querySelector('.shell'));
+    check('baseline is clearly labelled read only', /READ ONLY/.test(bodyText()) && /Strategy-free mode/.test(bodyText()));
+    check('market and live account metrics render from fixtures', /BTCUSDT/.test(bodyText()) && /\$63,123\.45/.test(bodyText()) && /\$12,540\.75/.test(bodyText()));
+    check('exchange positions display without position-control buttons', /ETHUSDT/.test(bodyText()) && !/Close position|Kill all|Auto.?trade/i.test(bodyText()));
+    check('no legacy scanner/backtest/order controls render', !/Scanner|Backtest|TP1|TP2|Auto.?trade/i.test(bodyText()));
+    check('only current read-only API resources are requested', requested.every((route) => ['/api/status', '/api/account', '/api/positions', '/api/trades?limit=500', '/api/settings'].includes(route)));
+
+    const nav = [...doc.querySelectorAll('.nav-item')];
+    check('navigation has overview, positions, archive and settings only', nav.length === 4 && /Trade archive/.test(nav.map((node) => node.textContent).join(' ')));
+    nav.find((node) => /Positions/.test(node.textContent || ''))?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait();
+    check('positions page shows the Binance snapshot', /Exchange positions/.test(bodyText()) && /ETHUSDT/.test(bodyText()));
+    nav.find((node) => /Trade archive/.test(node.textContent || ''))?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait();
+    check('archive page is strategy neutral', /Strategy-neutral records/i.test(bodyText()) && /archive-001/.test(bodyText()) && !/TP1|initial risk|stop stage/i.test(bodyText()));
+    nav.find((node) => /Settings/.test(node.textContent || ''))?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait();
+    check('settings expose connection fields and clean handoff copy only', /Account environment/.test(bodyText()) && /Ready for your strategy/.test(bodyText()) && !/scanner settings|strategy & backtest|leverage/i.test(bodyText()));
+  } catch (error) {
+    failed += 1;
+    console.error('FAIL UI smoke threw:', error?.stack || error);
+  } finally {
+    try { dom?.window.close(); } catch { /* ignore */ }
+    try { fs.rmSync(bundlePath, { force: true }); } catch { /* ignore */ }
   }
-
-  // --- browser APIs jsdom does not implement ---------------------------------
-  if (typeof window.matchMedia !== 'function') {
-    window.matchMedia = (q) => ({ matches: false, media: q, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false });
-  }
-  const gradient = { addColorStop() {} };
-  const ctxMock = () =>
-    new Proxy(
-      {},
-      {
-        get(_t, prop) {
-          if (prop === 'canvas') return { width: 900, height: 460, style: {} };
-          if (prop === 'measureText') return () => ({ width: 42, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2, actualBoundingBoxLeft: 0, actualBoundingBoxRight: 42 });
-          if (prop === 'createLinearGradient' || prop === 'createRadialGradient' || prop === 'createConicGradient') return () => gradient;
-          if (prop === 'createPattern') return () => ({});
-          if (prop === 'getImageData') return () => ({ data: new Uint8ClampedArray(4), width: 1, height: 1 });
-          if (prop === 'toDataURL') return () => 'data:image/png;base64,';
-          if (['fillStyle', 'strokeStyle', 'font', 'lineWidth'].includes(prop)) return '';
-          return () => undefined;
-        },
-        set: () => true,
-      },
-    );
-  window.HTMLCanvasElement.prototype.getContext = () => ctxMock();
-  Object.defineProperty(window.HTMLElement.prototype, 'clientWidth', { get: () => 900, configurable: true });
-  Object.defineProperty(window.HTMLElement.prototype, 'clientHeight', { get: () => 460, configurable: true });
-  window.HTMLElement.prototype.getBoundingClientRect = function () {
-    return { x: 0, y: 0, top: 0, left: 0, right: 900, bottom: 460, width: 900, height: 460, toJSON() {} };
-  };
-
-  const script = window.document.createElement('script');
-  script.textContent = fs.readFileSync(bundlePath, 'utf8');
-  window.document.body.appendChild(script);
-  return window;
+  console.log(failed ? `\n${failed} READ-ONLY UI CHECK(S) FAILED` : '\nREAD-ONLY UI SMOKE PASSED');
+  process.exit(failed ? 1 : 0);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-const bundlePath = await bundle();
-const window = boot(bundlePath);
-const doc = window.document;
-const text = (sel) => doc.querySelector(sel)?.textContent?.trim() ?? null;
-const clickTab = (label) => {
-  const node = [...doc.querySelectorAll('.navrow .seg-item')].find((n) => (n.textContent || '').toLowerCase().includes(label));
-  node?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  return !!node;
-};
-
-await sleep(1600);
-
-/* ---- what is actually open right now (live runs only) ---- */
-let liveManaged = 0;
-let liveSignals = [];
-let liveClosed = 0;
-let liveExternal = 0;
-let liveScannerRows = 0;
-let liveMode = null;
-if (LIVE) {
-  const jget = async (p) => {
-    try {
-      const r = await fetch(API + p);
-      return r.ok ? await r.json() : null;
-    } catch {
-      return null;
-    }
-  };
-  const st = await jget('/api/status');
-  liveMode = st?.mode ?? null;
-  const pos = await jget('/api/positions');
-  liveManaged = Array.isArray(pos?.managed) ? pos.managed.length : 0;
-  liveExternal = Array.isArray(pos?.external) ? pos.external.length : 0;
-  const sigs = await jget('/api/signals');
-  liveSignals = Array.isArray(sigs) ? sigs : Array.isArray(sigs?.signals) ? sigs.signals : [];
-  const trades = await jget('/api/trades?limit=200');
-  liveClosed = (Array.isArray(trades) ? trades : []).filter((t) => t.status === 'CLOSED').length;
-  const scanner = await jget('/api/scanner');
-  liveScannerRows = Array.isArray(scanner?.rows) ? scanner.rows.length : 0;
-  console.log(
-    `live account: ${liveManaged} managed position(s), ${liveSignals.length} signal(s), ${liveClosed} closed trade(s), ${liveScannerRows} scanned market(s) — data-dependent checks adapt`,
-  );
-}
-
-/* ---- dashboard ---- */
-check('app shell mounted', !!doc.querySelector('.app'));
-check('liquid background layers', !!doc.querySelector('.bg-stack .aurora') && !!doc.querySelector('.grain') && !!doc.querySelector('.goo-layer'));
-check('brand + wordmark', /velocity/i.test(text('.brand-name') ?? ''));
-check('five nav tabs (BTCUSDT Chart tab removed)', doc.querySelectorAll('.navrow .seg-item').length === 5);
-check('binance feed banner', /binance live feed/i.test(doc.body.textContent));
-checkSoft(
-  !LIVE || liveScannerRows > 0,
-  'scanner marquee',
-  doc.querySelectorAll('.ticker-item').length >= 6,
-  undefined,
-  'the scanner is still warming up',
-);
-{
-  const banner = text('.feed-banner') ?? '';
-  check('feed banner is truthful', !!doc.querySelector('.feed-banner') && /binance/i.test(banner) && (LIVE ? /live|unreachable|stale|degraded/i.test(banner) : /live feed/i.test(banner)), banner.slice(0, 60));
-}
-check('hero + equity sparkline', !!text('.hero-title') && !!doc.querySelector('.hero .kpi-spark svg path'));
-check('four KPI pods', doc.querySelectorAll('.kpi').length === 4);
-{
-  // one six-level ladder (SL + TP1..TP5) per new-strategy position
-  const rungs = doc.querySelectorAll('.lad-row').length;
-  checkSoft(!LIVE || liveManaged > 0, 'position ladder (6 levels per 5R position)', rungs >= 6 && rungs % 6 === 0, `${rungs} rungs`);
-  const fills = [...doc.querySelectorAll('.lad-fill')];
-  const widthsOk =
-    fills.length === rungs &&
-    fills.every((f) => /^\d{1,3}%$/.test(f.style.width || '') && Number((f.style.width || '0%').replace('%', '')) <= 100);
-  checkSoft(
-    !LIVE || liveManaged > 0,
-    'ladder fill bars show distance-to-level progress',
-    widthsOk,
-    `${fills.length} fills`,
-    'no managed position in this feed',
-  );
-}
-check('stats rings', doc.querySelectorAll('.ring').length === 3);
-check('hit-rate bars', doc.querySelectorAll('.bar-row').length >= 5);
-check('MTF gauge', !!doc.querySelector('.gauge-svg .gauge-fill'));
-check('MTF timeframe chips', doc.querySelectorAll('.tf-chip').length >= 3);
-check('execution rules panel', /execution rules/i.test(doc.body.textContent));
-{
-  // The red/amber banner is a real-money warning: it MUST show whenever the
-  // server runs on mainnet (armed or disarmed) and MUST be absent on testnet.
-  const alert = doc.querySelector('.feed-banner[role="alert"]');
-  const alertText = alert ? (text('.feed-banner[role="alert"]') ?? '') : '';
-  const liveServer = LIVE ? liveMode === 'live' : false;
-  const known = !LIVE || liveMode != null;
-  checkSoft(
-    known,
-    'live-money banner matches the execution environment',
-    liveServer ? !!alert && /LIVE MONEY/.test(alertText) : !alert || !/LIVE MONEY/.test(alertText),
-    liveServer ? alertText.slice(0, 50) : alertText.slice(0, 50) || 'absent',
-    'the live server did not report its mode',
-  );
-}
-checkSoft(
-  !LIVE || liveScannerRows > 0,
-  'scanner top picks',
-  doc.querySelectorAll('.scr-item').length >= Math.min(3, liveScannerRows || 3),
-  undefined,
-  'the scanner is still warming up',
-);
-checkSoft(
-  !LIVE || liveScannerRows > 0,
-  'scanner ranking table',
-  doc.querySelectorAll('.scr-tbl tbody tr').length >= Math.min(5, liveScannerRows || 5),
-  undefined,
-  'the scanner is still warming up',
-);
-checkSoft(!LIVE || liveManaged > 0, 'managed position card', doc.querySelectorAll('.pos-item').length >= 1);
-{
-  const text = doc.body.textContent || '';
-  const paperModeOffered = /\bpaper mode\b|\bpaper order execution\b|\bdemo feed\b|\boffline demo\b|\bsimulated mode\b/i.test(text);
-  const editableBalance = [...doc.querySelectorAll('input')].some((input) =>
-    /equity|asset balance/i.test(`${input.getAttribute('aria-label') || ''} ${input.placeholder || ''} ${input.closest('label')?.textContent || ''}`));
-  check('no paper-order or synthetic-feed mode is offered', !paperModeOffered && !editableBalance);
-}
-check('activity feed', doc.querySelectorAll('.feed-line').length >= 3);
-check(
-  'BTCUSDT candlestick chart removed',
-  !doc.querySelector('.chart-canvas') &&
-    !doc.querySelector('.tv-lightweight-charts') &&
-    ![...doc.querySelectorAll('.navrow .seg-item')].some((node) => /^chart$/i.test(node.textContent?.trim() ?? '')) &&
-    !requests.some((url) => /\/api\/chart(?:\?|$)/.test(url)),
-);
-check('P&L rail retained', doc.querySelector('.rail')?.getAttribute('data-open') === 'true');
-check('P&L chart retained', !!doc.querySelector('.pnl-chart svg'));
-check(
-  'P&L curve or valid empty state renders',
-  (!!doc.querySelector('.pnl-chart svg path[stroke^="url"]')?.getAttribute('d') &&
-    doc.querySelectorAll('.pnl-chart svg rect').length >= 1) ||
-    !!doc.querySelector('.pnl-empty'),
-);
-check('P&L range selector retained', doc.querySelectorAll('.pnl-dock .seg-item').length === 4);
-check('P&L stat tiles retained', doc.querySelectorAll('.pnl-stat').length === 5);
-check('dashboard starts with motion off', doc.documentElement.dataset.motion === 'off');
-check('live values do not flash', !doc.querySelector('.value-flash-up, .value-flash-down'));
-check('no NaN / Infinity in output', !/NaN|Infinity/.test(doc.getElementById('root').textContent));
-check('segmented thumb sane (never 0-width)', !doc.querySelector('.navrow .seg-thumb') || parseFloat(doc.querySelector('.navrow .seg-thumb').style.width || '0') > 2);
-
-/* ---- slow stability check: cross both the 5s status and 10s account polls ---- */
-const stableHero = doc.querySelector('.hero');
-const stablePnl = doc.querySelector('.pnl-chart');
-const statusRequestsBefore = requests.filter((url) => /\/api\/status(?:\?|$)/.test(url)).length;
-const accountRequestsBefore = requests.filter((url) => /\/api\/account(?:\?|$)/.test(url)).length;
-await sleep(10_600);
-const statusRequestsAfter = requests.filter((url) => /\/api\/status(?:\?|$)/.test(url)).length;
-const accountRequestsAfter = requests.filter((url) => /\/api\/account(?:\?|$)/.test(url)).length;
-check(
-  'dashboard remains mounted through repeated polls',
-  stableHero === doc.querySelector('.hero') && stablePnl === doc.querySelector('.pnl-chart'),
-);
-check('status poll ran twice during stability check', statusRequestsAfter >= statusRequestsBefore + 2);
-check('account poll ran during stability check', accountRequestsAfter >= accountRequestsBefore + 1);
-check(
-  'dashboard stays calm after polling',
-  doc.documentElement.dataset.motion === 'off' &&
-    !doc.querySelector('.value-flash-up, .value-flash-down') &&
-    !requests.some((url) => /\/api\/chart(?:\?|$)/.test(url)),
-);
-
-/* ---- view switching ---- */
-check('scanner tab clickable', clickTab('scanner'));
-await sleep(800);
-checkSoft(
-  !LIVE || liveScannerRows > 0,
-  'scanner view ranking + gates',
-  doc.querySelectorAll('.scr-tbl tbody tr').length >= Math.min(5, liveScannerRows || 5) && /trade gates/i.test(doc.body.textContent),
-  undefined,
-  'the scanner is still warming up',
-);
-check('50-asset workflow is visible', /50 assets scanned|50-asset batch/i.test(doc.body.textContent));
-check('opportunity zone hand-off is visible', /opportunity zone/i.test(doc.body.textContent));
-checkSoft(
-  !LIVE,
-  'retained opportunity cards',
-  doc.querySelectorAll('.opp-card').length >= Math.min(1, (scannerView.opportunities || []).length),
-  undefined,
-  'no opportunity zone is active right now',
-);
-check('execution readiness bridge is visible', /execution bridge/i.test(doc.body.textContent));
-
-check('positions tab clickable', clickTab('positions'));
-await sleep(800);
-check('positions view account ledger', /account \u00b7 binance/i.test(doc.body.textContent) || /Account/i.test(doc.body.textContent));
-check('closed trades with fees + funding', /funding/i.test(doc.body.textContent));
-
-check('binance account ledger', !!text('.acct-equity') || /equity/i.test(doc.body.textContent));
-checkSoft(
-  !LIVE || liveExternal > 0,
-  'external positions shown read-only, never adopted',
-  /external/i.test(doc.body.textContent) && /never adopt/i.test(doc.body.textContent),
-  undefined,
-  'no manual/external position exists on the account right now',
-);
-
-check('trades tab clickable', clickTab('trades'));
-await sleep(800);
-check('signal log renders table or empty state', !!doc.querySelector('.tbl') || /no signals detected yet/i.test(doc.body.textContent));
-{
-  const want = LIVE ? Math.min(3, Math.max(1, liveClosed)) : 3;
-  checkSoft(!LIVE || liveClosed > 0, `journal rows (≥${want})`, doc.querySelectorAll('.tbl tbody tr').length >= want);
-}
-
-check('settings tab clickable', clickTab('settings'));
-await sleep(800);
-check('settings inputs', doc.querySelectorAll('.input, .select, .textarea').length >= 6);
-{
-  // Connection tab: the API-token field must be there (server hardening).
-  const connTab = [...doc.querySelectorAll('.seg-item')].find((n) => /connection/i.test(n.textContent || ''));
-  connTab?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  await sleep(300);
-  check('connection tab renders (incl. API token field)', /API token/i.test(doc.body.textContent));
-  const modeSelect = [...doc.querySelectorAll('select')].find((sel) => [...sel.options].some((o) => /testnet/i.test(o.textContent || '')));
-  check(
-    'mode selector offers only real environments (testnet/live)',
-    !!modeSelect && modeSelect.options.length === 2 && ![...modeSelect.options].some((o) => /paper|simulat/i.test(o.textContent || '')),
-  );
-}
-check('scanner settings tab', (() => { const t = [...doc.querySelectorAll('.settings-sec h4')].some((h) => /market scanner/i.test(h.textContent || '')) || true; return t; })());
-{
-  const strategyTab = [...doc.querySelectorAll('.seg-item')].find((n) => /strategy & backtest/i.test(n.textContent || ''));
-  strategyTab?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  await sleep(300);
-  const strategyText = doc.body.textContent || '';
-  check('strategy & backtest settings tab renders', /5-minute liquidity sweep/i.test(strategyText));
-  check('historical backtest is explicitly no-orders, not a paper mode',
-    /historical backtest — no orders/i.test(strategyText) && /not paper trading or a profit forecast/i.test(strategyText));
-  check('backtest form exposes its default history window',
-    [...doc.querySelectorAll('.settings-sec button')].some((b) => /run 30-day backtest/i.test(b.textContent || '')));
-}
-check('guardrails panel', /execution guardrails/i.test(doc.body.textContent));
-
-const motionBtn = doc.querySelector('.motion-toggle');
-motionBtn?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-await sleep(200);
-check('motion switch toggles data-motion', ['on', 'off'].includes(doc.documentElement.dataset.motion));
-check('kill control present', !!doc.querySelector('.topbar .btn.danger'));
-
-/* ---- report ---- */
-const failed = checks.filter((c) => !c.ok);
-console.log(`\n=== VelocityX dashboard smoke test ${LIVE ? `(live API ${API})` : '(fixtures)'} ===`);
-for (const c of checks) console.log(`${c.ok ? (c.skipped ? 'SKIP' : 'PASS') : 'FAIL'}  ${c.name}${c.extra ? `  [${c.extra}]` : ''}`);
-console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
-if (errors.length) {
-  console.log('\n--- runtime errors ---');
-  errors.slice(0, 10).forEach((e) => console.log(String(e).slice(0, 500)));
-}
-try {
-  fs.unlinkSync(bundlePath);
-} catch {
-  /* ignore */
-}
-process.exit(failed.length || errors.length ? 1 : 0);
+await main();

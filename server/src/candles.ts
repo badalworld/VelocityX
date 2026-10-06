@@ -1,6 +1,6 @@
 /**
- * Candle store — the single source of truth for OHLCV used by the engine and
- * the dashboard.
+ * Candle store — the single source of truth for exchange OHLCV used by the
+ * market-data engine and dashboard.
  *
  * Priority of realtime data:
  *   1. Binance WebSocket `<symbol>@kline_<interval>` streams (weight-free,
@@ -8,8 +8,17 @@
  *   2. REST /fapi/v1/klines only to seed history (and as a fallback when a
  *      stream is down) — always scheduled through the 95% weight budget.
  */
-import { Candle } from './indicators';
 import { api } from './binance';
+
+export interface Candle {
+  time: number;
+  closeTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
 
 const MAX_BARS = 1500;
 
@@ -36,25 +45,12 @@ class CandleStore {
     return this.map.get(CandleStore.key(symbol, interval)) ?? [];
   }
 
-  /** Candles with the forming bar removed (what the signal engine may act on). */
+  /** Candles with the forming bar removed. */
   closed(symbol: string, interval: string, now = Date.now()): Candle[] {
     const all = this.get(symbol, interval);
     if (!all.length) return all;
     const last = all[all.length - 1];
     return last.closeTime <= now ? all : all.slice(0, -1);
-  }
-
-  /**
-   * Seed history that another subsystem already fetched. The 50-asset scanner
-   * uses this for its 5m batch, so promoting an opportunity never causes a
-   * second REST burst before the realtime monitor can start.
-   */
-  seed(symbol: string, interval: string, candles: Candle[]): Candle[] {
-    const key = CandleStore.key(symbol, interval);
-    const merged = merge(this.map.get(key) ?? [], candles);
-    this.map.set(key, merged);
-    this.seededAt.set(key, Date.now());
-    return merged;
   }
 
   /** Seed/refresh history over REST when the store is empty or stale. */
