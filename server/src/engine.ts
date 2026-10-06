@@ -10,6 +10,7 @@ import { candleStore, Candle } from './candles';
 import { emit } from './broadcast';
 import { priceOf } from './prices';
 import { getSettings } from './settings';
+import { latestStrategy, type StrategySignal } from './strategy';
 
 export interface MarketState {
   symbol: string;
@@ -73,6 +74,12 @@ class Engine {
     } finally {
       this.running = false;
     }
+  }
+
+  strategy(symbol?: string): { point: ReturnType<typeof latestStrategy>['point']; signal: StrategySignal | null; settings: ReturnType<typeof latestStrategy>['settings'] } {
+    const settings = getSettings();
+    const selected = symbol ?? settings.symbol;
+    return latestStrategy(candleStore.closed(selected, settings.interval), undefined);
   }
 
   state(symbol?: string): MarketState | null {
