@@ -83,6 +83,23 @@ class Engine {
     this.lastSignalRec = null;
   }
 
+  /**
+   * Apply cooldown for `symbol` after a stop-loss (avoids immediate revenge re-entries).
+   * Cooldown length comes from strategy.cooldownBarsAfterLoss. We find the latest
+   * closed-candle index for the symbol and suppress new setups/signals for that
+   * many additional closed bars.
+   */
+  applyCooldown(symbol: string): void {
+    const s = getSettings();
+    const bars = Math.max(0, Math.floor(s.strategy.cooldownBarsAfterLoss));
+    if (!bars) return;
+    const closed = candleStore.closed(symbol, s.interval);
+    const lastIdx = closed.length - 1;
+    if (lastIdx < 0) return;
+    this.liquidity.setCooldown(symbol, lastIdx, bars);
+    console.log(`[engine] ${symbol}: cooldown active for ${bars} bars (${bars * 5} minutes) after stop-out`);
+  }
+
   private async tick(first = false): Promise<void> {
     if (this.running) return;
     this.running = true;

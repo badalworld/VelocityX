@@ -122,6 +122,7 @@ async function main(): Promise<void> {
     const readiness = currentExecutionReadiness();
     return { ready: readiness.ready, reasons: readiness.reasons };
   });
+  trader.setCooldownHook((symbol) => engine.applyCooldown(symbol));
   scanner.onChange(() => {
     marketStream.subscribe(engine.activeSymbols());
     emit('scanner', {

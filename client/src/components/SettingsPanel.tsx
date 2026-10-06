@@ -436,16 +436,50 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                   onChange={(e) => set({ strategy: { ...draft.strategy, stopBufferAtr: Number(e.target.value) } })} />
               </label>
             </div>
-            <div className="frow">
+            <div className="frow three">
               <label className="field">
                 <span className="field-label">Maximum stop distance (ATR)</span>
                 <input className="input" type="number" min={0.1} max={30} step={0.1} value={draft.strategy.maxStopAtr}
                   onChange={(e) => set({ strategy: { ...draft.strategy, maxStopAtr: Number(e.target.value) } })} />
               </label>
-              <div className="field hint" style={{ justifyContent: 'center' }}>ATR(14) · closed 5m candles · market entry after confirmed retest</div>
+              <label className="field">
+                <span className="field-label">Retest window (bars after reclaim)</span>
+                <input className="input" type="number" min={1} max={48} step={1} value={(draft.strategy as any).retestWindowBars ?? 8}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, retestWindowBars: Number(e.target.value) } })} />
+              </label>
+              <label className="field">
+                <span className="field-label">Retest close strength (0–1)</span>
+                <input className="input" type="number" min={0.2} max={0.95} step={0.05} value={(draft.strategy as any).retestCloseStrength ?? 0.55}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, retestCloseStrength: Number(e.target.value) } })} />
+              </label>
+            </div>
+            <div className="frow three">
+              <label className="field">
+                <span className="field-label">Sweep volume multiplier</span>
+                <input className="input" type="number" min={0.5} max={5} step={0.1} value={(draft.strategy as any).sweepVolumeMultiplier ?? 1.1}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, sweepVolumeMultiplier: Number(e.target.value) } })} />
+              </label>
+              <label className="field">
+                <span className="field-label">POC minimum volume ratio</span>
+                <input className="input" type="number" min={0.5} max={5} step={0.1} value={(draft.strategy as any).pocVolumeMinRatio ?? 1.2}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, pocVolumeMinRatio: Number(e.target.value) } })} />
+              </label>
+              <label className="field">
+                <span className="field-label">Trend EMA filter (0 = off)</span>
+                <input className="input" type="number" min={0} max={1000} step={10} value={(draft.strategy as any).trendFilterEma ?? 200}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, trendFilterEma: Number(e.target.value) } })} />
+              </label>
+            </div>
+            <div className="frow">
+              <label className="field">
+                <span className="field-label">Cooldown after loss (bars)</span>
+                <input className="input" type="number" min={0} max={144} step={1} value={(draft.strategy as any).cooldownBarsAfterLoss ?? 6}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, cooldownBarsAfterLoss: Number(e.target.value) } })} />
+              </label>
+              <div className="field hint" style={{ justifyContent: 'center' }}>ATR(14) · closed 5m candles · market entry after confirmed retest · 1:5 RRR with five 20% scale-outs</div>
             </div>
             <div className="hint warn">
-              POC is an OHLCV approximation: the candle's volume is distributed uniformly across its high-low range and then binned. It is not trade-level volume-at-price. Exchange quantity steps may slightly alter 20% tranches or make a very small tranche unavailable.
+              Exit ladder: 20% @ 1R (SL → breakeven) · 20% @ 2R (SL → 1R) · 20% @ 3R (SL → 2R) · 20% @ 4R (SL → 3R) · 20% @ 5R (full close). POC is an OHLCV approximation: each candle's volume is distributed uniformly across its high-low range and binned. Exchange quantity steps may slightly alter 20% tranches.
             </div>
           </div>
           <BacktestPanel
