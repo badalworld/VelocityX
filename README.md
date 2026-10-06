@@ -6,10 +6,13 @@ Web dashboard + signal engine + trade executor. It computes the indicator *itsel
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│  Binance REST/WS ──►  Market Scanner  (volatility-first, realtime)     │
-│  (universe, tickers,     │  volume + range + ATR% + ADX gates         │
+│  Binance REST/WS ──►  50-Asset Scanner  (bounded parallel batch)      │
+│  (universe, tickers,     │  volatility + trend + setup-quality gates  │
 │   klines, bookTicker,    ▼                                            │
-│   user stream)     Signal Engine per symbol (EMA11/EMA34, 5m)         │
+│   user stream)     Retained Opportunity Zone (dedicated 5m monitor)   │
+│                          │ confirmed EMA11/EMA34 signal               │
+│                          ▼                                            │
+│                    Signal Engine (closed candles only)                 │
 │                          │  ATR(14)×2 SL · TP 1.5R/3R/4.5R            │
 │                          ▼                                            │
 │                   Trade Executor  (testnet / live — real orders)     │
@@ -37,7 +40,7 @@ The signal logic is a 1:1 port of the TradingView script's *non-repaint* core:
 | TP1 / TP2 / TP3 | `1.5R / 3R / 4.5R` (TP multiplier 1.5 per level) |
 | Ribbon | EMAs 5, 11, 15, 18, 21, 24, 28, 34 + extra EMA 200 |
 | Dashboard | MTF trend (5m/15m/30m by default) — EMA34 < EMA11 ⇒ Bullish |
-| Market scan | every USDT perpetual is ranked by volatility (24h range, ATR%, trend strength); the engine watches the top `maxPositions` markets |
+| Market scan | 50 liquid leaders are analysed concurrently per cycle; only aligned setups near a fresh 5m cross enter a retained opportunity zone, which is monitored while the next batch continues |
 | Stats table | weekly WR, TP hit %, expectancy in R — same formulas as the script |
 
 All defaults are pre-filled and editable in **Settings → INDICATOR**.
@@ -46,8 +49,8 @@ All defaults are pre-filled and editable in **Settings → INDICATOR**.
 
 | Event | Action |
 |---|---|
-| Scan (every N s) | Rank the whole USDT-perp universe by volatility, drop pegged/stable/staked/index markets, keep only trending high-volatility symbols |
-| Signal (auto-trade ON) | Open market position — margin = **5% of equity**, **10× leverage** (one-way mode, isolated), **one position per symbol, never more than 8** |
+| Scan (every N s) | Rank the whole USDT-perp universe, analyse 50 leaders with 5m/15m/1h candles, and keep high-quality pre-signal setups in the retained Opportunity Zone while the next batch scans |
+| Confirmed zone signal (auto-trade ON) | Re-check the server execution bridge, then open at market — margin = **5% of equity**, **10× leverage** (isolated), **one position per symbol, never more than 8** |
 | **TP1** hit | Close **33%** → move **SL to breakeven** |
 | **TP2** hit | Close **50% of remaining** → move **SL to TP1** |
 | **TP3** hit | Close **rest = full profit** |
@@ -64,8 +67,11 @@ Rounding is lot-step aware; on exchange minimum-lot symbols the ladder degrades 
 | The bot never touches a manual position | Every exit order is `reduceOnly` with an **explicit quantity** equal to the bot's own remaining size — `closePosition`/close-all is never used, so a stop can only ever shrink the bot's own quantity. |
 | The bot never opens a market someone else is trading | Before an entry the executor reads `positionRisk`; a non-zero position it did not open **blocks the entry** for that symbol. |
 | The bot never over-leverages | `/fapi/v1/leverageBracket` clamps the configured leverage per symbol instead of failing the entry. |
-| Duplicate signals cannot double-open | One entry round-trip per symbol at a time (`entering` guard). |
-| A bad key cannot start trading | `canTrade: false` from Binance aborts the entry with a logged reason. |
+| Duplicate/concurrent signals cannot over-open | Per-symbol entry locks plus global in-flight slot reservations enforce one entry per market and the 8-position cap. |
+| A bad or stale connection cannot start trading | Immediately before the entry POST, the backend requires keys, reachable REST, fresh market/user streams, a fresh trade-enabled account snapshot, engine heartbeat and a current scanner snapshot. `GET /api/execution/readiness` exposes the same contract to the UI. |
+| A lost HTTP response cannot duplicate an order | Every order has a unique `VX<tradeId>` client id; uncertain entry/close responses are recovered by that id (or the just-verified position snapshot), never resent blindly. |
+| A reverse cannot stack positions | Close-and-reverse proceeds only after Binance confirms the old position leg is flat; failed closes remain OPEN in the journal. |
+| An entry cannot disappear before protection | Ownership is persisted immediately after the market fill, before SL/TP placement; a ladder failure requests emergency flattening and remains managed if flattening is not confirmed. |
 
 ---
 
@@ -167,7 +173,7 @@ The dashboard UI is documented in **[DESIGN.md](DESIGN.md)** — tokens, glass l
 ### API surface
 
 `GET /api/health` (public) · `/api/status` · `/api/account` · `/api/positions` · `/api/income` ·
-`/api/scanner` · `/api/limits` · `/api/diagnostics` · `/api/settings` · `/api/trades` · `/api/signals` · `/api/stats` · `/api/mtf`
+`/api/scanner` · `/api/execution/readiness` · `/api/limits` · `/api/diagnostics` · `/api/settings` · `/api/trades` · `/api/signals` · `/api/stats` · `/api/mtf`
 
 Unknown `/api/*` paths answer JSON `404` (never the SPA shell). The retired `/api/chart` and
 `/api/screener` endpoints were removed together with the dead client code that used to call them.
@@ -188,7 +194,7 @@ Five views behind one sticky, frosted header:
 | View | Contents |
 |---|---|
 | **Dashboard** | Metrics deck: hero summary, net P&L / win rate / expectancy / signal KPIs, open positions with the live risk ladder, weekly statistics, the MTF EMA11/EMA34 gauge across 5m/15m/30m, execution rules, scanner summary, engine health and activity feed. A red banner is shown while LIVE auto-trading is armed. |
-| **Scanner** | The volatility ranking table, scan summary, trade gates and engine watchlist. |
+| **Scanner** | Live 50-asset batch progress, retained Opportunity Zone, execution-readiness bridge, setup-quality ranking, trade gates and dedicated monitor. |
 | **Positions** | Binance account ledger, managed positions, **external positions listed read-only**, closed trades, fees, funding and risk rules. |
 | **Trades** | Journal summary, full trade table, signal log and activity feed. |
 | **Settings** | Connection / markets & sizing / scanner / indicator tabs, execution guardrails and motion switch. |
@@ -201,15 +207,17 @@ The dashboard starts with **Motion off** so it does not blink or pulse. Motion c
 
 ## Market scanner
 
-Every scan ranks the *whole* USD-M universe — not a hardcoded list:
+Every scan ranks the *whole* USD-M universe — not a hardcoded list — then analyses a bounded-parallel batch of **50 assets by default**:
 
 1. `exchangeInfo` → TRADING, PERPETUAL, USDT-quoted contracts.
 2. Reject pegged/stack/index markets (`USDC`, `FDUSD`, `TUSD`, `DAI`, `EUR`, `BNSOL`, `WBETH`, `WBTC`, `PAXG`, `BTCDOM`, …): they are copy/stack/index products, never directional trades.
-3. `ticker/24hr` + `premiumIndex` → 24h range %, |change %|, quote volume, funding.
-4. Gate: quote volume ≥ 20M USDT, 24h range ≥ 3 %, ATR% ≥ 0.6 %, ADX ≥ 18, 15m and 1h trend aligned, plus a behavioural peg check (a market whose 24h range is not meaningfully larger than its own gate is treated as pegged no matter what it is called).
-5. Score = `0.45·volatility + 0.30·trend + 0.25·liquidity`, sorted **high → low**; the engine loads the top `maxPositions` markets and trades only those (plus the primary symbol).
+3. `ticker/24hr` ranks candidates by 24h range and move with liquidity preference; `premiumIndex` adds funding context. Eight bounded workers fetch 5m/15m/1h history for the leading 50 without creating a 150-request burst.
+4. Market gate: quote volume ≥ 20M USDT, 24h range ≥ 3 %, ATR% ≥ 0.6 %, ADX ≥ 18 and 15m/1h direction aligned, plus the behavioural peg check.
+5. Opportunity gate: the 5m EMA11/EMA34 gap must be converging in the aligned direction and be ≤ `0.45 ATR`; deterministic setup quality must be ≥ `65`. This score ranks rule alignment — it is **not** a guaranteed win probability.
+6. Passing setups enter a retained Opportunity Zone (16 monitor slots by default, 30-minute TTL). Those symbols stay on the realtime 5m engine while the next 50-asset batch continues. Only a fresh, confirmed zone-side crossover is execution-eligible; stale/missed signals are never replayed.
+7. Auto-scan mode does **not** let the primary dashboard symbol bypass the zone. Up to eight entries may be open, independently from the larger monitor queue.
 
-Scanner knobs live in **Settings → Market Scanner** (interval, volume/range/ATR/ADX gates, candidate count, symbols per scan).
+Scanner knobs live in **Settings → Market Scanner** (batch size, interval, volume/range/ATR/ADX gates, setup-quality/gap gates, zone capacity and retention).
 
 ## Request budget — 95% of Binance, spread over the work areas
 
@@ -239,8 +247,9 @@ VelocityX contains **no synthetic data path**: no demo feed, no paper fills, no 
 
 ## Reliability notes
 
-- Signals act **only on candles that close after engine start** — no backfill, no repainting.
-- Fill detection via the `ORDER_TRADE_UPDATE` user stream + 10 s REST reconciliation (missed fills caught, missing SL re-armed, realised PnL/fees re-read from Binance's own ledger).
+- Signals act **only on candles that close after engine/zone monitoring starts** — no backfill, no repainting and no retroactive execution when auto-trade is armed later.
+- The Scanner page and `GET /api/execution/readiness` show the same backend gate enforced immediately before a real entry; the browser never decides whether an order is safe to send.
+- Fill detection via the `ORDER_TRADE_UPDATE` user stream + 10 s REST reconciliation (missed fills caught, missing SL or TP legs re-armed with persisted recovery ids, realised PnL/fees re-read from Binance's own ledger).
 - SL replace failure ⇒ position is flattened immediately (never left unprotected).
 - Up to **8 concurrent positions**, at most one per symbol; each symbol keeps its own signal guard, guard-rail price and SL/TP ladder.
 - `botOwned` is stamped on every trade the executor opens; anything else on the account is reported as external and can never enter the journal, the PnL or the stats.

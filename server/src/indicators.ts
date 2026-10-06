@@ -125,7 +125,7 @@ export type SignalSide = 'LONG' | 'SHORT';
  * Evaluated at closed bar index i (i >= 2):
  *   LONG  <=> EMA_fast[i-1] >  EMA_slow[i-1]  &&  EMA_fast[i-2] <= EMA_slow[i-2]
  *   SHORT <=> EMA_fast[i-1] <  EMA_slow[i-1]  &&  EMA_fast[i-2] >= EMA_slow[i-2]
- * where fast = emaLengths[1] (11) and slow = emaLengths[7] (34).
+ * where fast = EMA11 and slow = EMA34 (the scanner and engine use the same pair).
  */
 export function signalAt(fast: number[], slow: number[], i: number): SignalSide | null {
   if (i < 2) return null;

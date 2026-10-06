@@ -408,8 +408,14 @@ export default function Overview({
               </div>
             </div>
             <div className="mini">
-              <div className="k">Scanner</div>
-              <div className="v">{status?.scanner?.selected.length ?? 0} symbols</div>
+              <div className="k">Opportunity zones</div>
+              <div className="v">{status?.scanner?.selected.length ?? 0} monitoring</div>
+            </div>
+            <div className="mini">
+              <div className="k">Execution bridge</div>
+              <div className={`v ${status?.execution?.state === 'READY' ? 'up' : status?.execution?.state === 'BLOCKED' ? 'down' : ''}`}>
+                {status?.execution?.state ?? 'CHECKING'}
+              </div>
             </div>
             <div className="mini">
               <div className="k">Externals</div>

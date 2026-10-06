@@ -26,6 +26,7 @@ process.env.BINANCE_TESTNET_SECRET = 'TESTSECRET0000000000';
 
 const { loadSettings, updateSettings, getSettings } = require('../dist/settings');
 const { trader } = require('../dist/trader');
+trader.setRuntimeGate(() => ({ ready: true, reasons: [] }));
 const { saveSignal, allTrades, openTrades, openTradeOn } = require('../dist/store');
 const { computeStats } = require('../dist/stats');
 const { api } = require('../dist/binance');
@@ -154,6 +155,11 @@ api.cancelOrder = async (symbol, orderId, cid) => {
   return {};
 };
 api.openOrders = async (symbol) => ex.orders.filter((o) => o.symbol === symbol && o.status === 'NEW');
+api.queryOrder = async (symbol, cid) => {
+  const order = ex.orders.find((o) => o.symbol === symbol && o.clientOrderId === cid);
+  if (!order) throw new Error('stub: unknown order');
+  return order;
+};
 api.allOrders = async (symbol) => ex.orders.filter((o) => o.symbol === symbol);
 api.userTrades = async (symbol, opts = {}) => ex.ledger.filter((f) => f.symbol === symbol && f.time >= (opts.startTime ?? 0));
 api.incomeHistory = async () => [];
@@ -270,6 +276,34 @@ async function main() {
   assert(killed >= 1 && t4c.status === 'CLOSED' && t4c.closeReason === 'KILL', 'kill switch flattened the bot position (KILL)');
   assert(openTrades().length === 0, 'no open trade after the kill switch');
 
+  console.log('\n— Failed close can never become a stacked reverse —');
+  await trader.onSignal(mkSignal('LONG', 100, 1, 'LTCUSDT'));
+  const guardedReverse = openOf('LTCUSDT');
+  assert(!!guardedReverse && guardedReverse.side === 'LONG', 'reverse guard fixture opened a LONG');
+  const realMarketOrder = api.marketOrder.bind(api);
+  api.marketOrder = async (symbol, side, qty, opts = {}) => {
+    if (symbol === 'LTCUSDT' && opts.reduceOnly) throw new Error('stub: close transport failure');
+    return realMarketOrder(symbol, side, qty, opts);
+  };
+  await trader.onSignal(mkSignal('SHORT', 99, 1, 'LTCUSDT'));
+  const afterFailedReverse = openOf('LTCUSDT');
+  assert(afterFailedReverse?.id === guardedReverse.id && afterFailedReverse?.side === 'LONG', 'failed close stays OPEN in the journal');
+  assert(openTrades().filter((t) => t.symbol === 'LTCUSDT').length === 1, 'no reverse entry was stacked on the unconfirmed close');
+  api.marketOrder = realMarketOrder;
+  await trader.kill();
+  await settle();
+  assert(!openOf('LTCUSDT'), 'reverse guard fixture cleaned up after transport recovery');
+
+  console.log('\n— Same-symbol external size is left untouched —');
+  await trader.onSignal(mkSignal('LONG', 100, 1, 'ATOMUSDT'));
+  const atom = openOf('ATOMUSDT');
+  assert(!!atom, 'ownership-drift fixture opened a bot LONG');
+  ex.positions.set('ATOMUSDT', (ex.positions.get('ATOMUSDT') ?? 0) + 2); // manual same-side size added later
+  const atomClosed = await trader.closeByMarket(atom, 'KILL');
+  assert(atomClosed && !openOf('ATOMUSDT'), 'bot portion closed and journal finalized');
+  assert(approx(ex.positions.get('ATOMUSDT') ?? 0, 2), 'the extra external quantity remains on the exchange');
+  ex.positions.delete('ATOMUSDT');
+
   /* ---------- 5. auto-trade OFF ---------- */
   console.log('\n— Auto-trade master switch —');
   updateSettings({ autoTrade: false });
@@ -304,10 +338,14 @@ async function main() {
   console.log('\n— Reconcile: missing protective stop is re-armed —');
   const solStop = ex.orders.filter((o) => o.symbol === 'SOLUSDT' && o.type === 'STOP_MARKET' && o.status === 'NEW').pop();
   if (solStop) solStop.status = 'CANCELED';
+  const solTp2 = ex.orders.find((o) => o.clientOrderId === `VX${sol.id}2`);
+  if (solTp2) solTp2.status = 'CANCELED';
   await trader.reconcile();
   await settle();
   const rearmed = ex.orders.filter((o) => o.symbol === 'SOLUSDT' && o.type === 'STOP_MARKET' && o.status === 'NEW').pop();
   assert(!!rearmed && rearmed.reduceOnly && rearmed.executedQty > 0, 'reconcile re-armed the missing stop with an explicit quantity');
+  const rearmedTp2 = ex.orders.filter((o) => o.symbol === 'SOLUSDT' && o.type === 'TAKE_PROFIT_MARKET' && o.status === 'NEW' && o.clientOrderId !== solTp2?.clientOrderId).pop();
+  assert(!!rearmedTp2 && rearmedTp2.reduceOnly && rearmedTp2.executedQty > 0, 'reconcile re-armed a missing TP leg with a persisted recovery id');
 
   /* ---------- 8. multi-position cap (max 8, one per symbol) ---------- */
   console.log('\n— Multi-position cap (hard 8) —');
@@ -344,7 +382,8 @@ async function main() {
   assert(hTps.every((o) => !o.reduceOnly), 'hedge-mode TP legs never send reduceOnly (Binance rejects it there)');
   const hStop = hedgeOrders().find((o) => o.type === 'STOP_MARKET');
   assert(!!hStop && hStop.positionSide === 'LONG' && !hStop.reduceOnly, 'hedge-mode stop is scoped by positionSide');
-  fillCid(`VX${hedged.id}E`, 100, 0, 0);
+  // The MARKET entry was already returned as FILLED by the stub exchange;
+  // never replay an entry fill before testing the close path.
   await trader.kill();
   await settle();
   assert(openTrades().length === 0, 'hedge-mode position closed through the tagged reduce path');

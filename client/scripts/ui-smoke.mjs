@@ -122,8 +122,10 @@ const scannerView = {
   at: now,
   durationMs: 820,
   universe: 214,
-  analysed: 30,
-  gate: { minQuoteVolume24h: 20_000_000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, maxPositions: 8 },
+  target: 50,
+  analysed: 50,
+  progress: { id: 'scan-50', running: false, target: 50, completed: 50, failed: 0, startedAt: now - 820, updatedAt: now },
+  gate: { minQuoteVolume24h: 20_000_000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, minOpportunityScore: 65, maxEmaGapAtr: 0.45, zoneRetentionMin: 30, maxOpportunityZones: 16, maxPositions: 8 },
   selected: [symbol, 'SOLUSDT', 'BNBUSDT', 'DOGEUSDT'],
   rows: [
     ['BTCUSDT', 'BTC', 71.2, 27.5, 0.34, 1.8, 1200, 'TRENDING', true, 88.1, 'high volatility + trending'],
@@ -133,13 +135,23 @@ const scannerView = {
     ['XRPUSDT', 'XRP', 31.2, 15.4, 0.42, 0.9, 190, 'RANGING', false, 42.0, 'trend not aligned on 15m/1h'],
     ['ADAUSDT', 'ADA', 22.4, 12.1, 0.31, 0.4, 120, 'RANGING', false, 30.1, 'ADX 12 < 18 (no trend)'],
     ['USDCUSDT', 'USDC', 1.2, 5.0, 0.01, 0.0, 900, 'PEGGED', false, 2.0, 'pegged / stable / staked market — never traded'],
-  ].map((r) => ({
+  ].map((r, i) => ({
     symbol: r[0], base: r[1], price: 61200, change24hPct: r[5], range24hPct: r[4] * 3, quoteVolume24h: r[6] * 1e6,
-    atrPct: r[4], atrPct5m: r[4], adx: r[3], emaFast: 61300, emaSlow: 60800, trend: 'UP', alignment: 1,
-    fundingRate: 0.0001, nextFundingTime: 1791000000000, volatility: r[2], trendScore: r[3] * 3, liquidityScore: 80,
-    score: r[8], marketType: r[7], tradable: r[8], reason: r[9],
+    atrPct: r[4], atrPct5m: r[4], adx: r[3], emaFast: 61300, emaSlow: 60800, emaFast5m: 61010, emaSlow5m: 61020,
+    trend: 'UP', alignment: 1, fundingRate: 0.0001, nextFundingTime: 1791000000000, volatility: r[2],
+    trendScore: r[3] * 3, liquidityScore: 80, score: r[9], setupScore: r[8] ? 88 - i * 4 : 30,
+    emaGapPct: 0.02, emaGapAtr: r[8] ? 0.2 + i * 0.03 : 1.4, approachAtr: 0.08,
+    opportunity: !!r[8] && i < 4, inOpportunityZone: !!r[8] && i < 4, opportunitySide: 'LONG',
+    marketType: r[7], tradable: r[8], reason: r[10], opportunityReason: r[8] ? 'LONG setup · 15m/1h aligned · EMA gap 0.20 ATR' : r[10],
   })),
 };
+scannerView.opportunities = scannerView.rows.slice(0, 4).map((r, i) => ({
+  symbol: r.symbol, base: r.base, side: 'LONG', state: i === 0 ? 'EXECUTED' : 'MONITORING', score: r.setupScore,
+  rank: i + 1, price: r.price, adx: r.adx, atrPct: r.atrPct, atrPct5m: r.atrPct5m, emaGapPct: r.emaGapPct,
+  emaGapAtr: r.emaGapAtr, enteredAt: now - (i + 1) * MIN, lastQualifiedAt: now, updatedAt: now,
+  expiresAt: now + 29 * MIN, signalId: i === 0 ? 's3' : null, signalAt: i === 0 ? now - MIN : null,
+  tradeId: i === 0 ? openTrade.id : null, reason: r.opportunityReason,
+}));
 
 const routes = {
   '/api/status': {
@@ -153,7 +165,8 @@ const routes = {
     openTrades: [openTrade],
     openTrade: openTrade,
     slots: { used: 1, max: 8 },
-    scanner: { at: now, selected: scannerView.selected, universe: 214, analysed: 30 },
+    scanner: { at: now, selected: scannerView.selected, opportunities: scannerView.opportunities, progress: scannerView.progress, universe: 214, target: 50, analysed: 50 },
+    execution: { ready: true, infrastructureReady: true, state: 'READY', reasons: [], mode: 'testnet', armed: true, checks: { keys: true, exchange: true, marketStream: true, userStream: true, account: true, engine: true, scanner: true }, at: now },
     feedInfo: { feed: 'binance', source: 'binance-usdm', reachable: true, lastRestOkAt: now - 1200, lastRestError: null, latencyMs: 42, avgLatencyMs: 48, serverTimeOffsetMs: 12, wsLastMessageAt: now - 300, candles: { symbols: 4, series: 4, bars: 812, lastWsAt: now - 300 } },
     limits: { plannedLimitPerMin: 2280, usedWeight: 412, usedPct: 17.2, cooldownMsLeft: 0, areas: [ { area: 'scanner', sharePct: 40, weightUsed: 220, weightCap: 912, calls: 12, waiting: 0, avgWaitMs: 3 }, { area: 'market', sharePct: 25, weightUsed: 96, weightCap: 570, calls: 40, waiting: 0, avgWaitMs: 1 }, { area: 'account', sharePct: 20, weightUsed: 76, weightCap: 456, calls: 8, waiting: 0, avgWaitMs: 2 }, { area: 'orders', sharePct: 10, weightUsed: 15, weightCap: 228, calls: 6, waiting: 0, avgWaitMs: 0 }, { area: 'stream', sharePct: 5, weightUsed: 5, weightCap: 114, calls: 2, waiting: 0, avgWaitMs: 0 } ] },
     account: accountView,
@@ -203,7 +216,7 @@ const routes = {
     tp2ClosePct: 50,
     historyDays: 30,
     dashboardTimeframes: ['5', '15', '30'],
-    scanner: { enabled: true, intervalSec: 60, candidates: 30, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, topN: 8 },
+    scanner: { enabled: true, intervalSec: 60, candidates: 50, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, topN: 16, minOpportunityScore: 65, maxEmaGapAtr: 0.45, zoneRetentionMin: 30 },
     keys: {
       testnet: { key: '', secret: '', configured: false },
       live: { key: '', secret: '', configured: false },
@@ -481,6 +494,16 @@ checkSoft(
   undefined,
   'the scanner is still warming up',
 );
+check('50-asset workflow is visible', /50 assets scanned|50-asset batch/i.test(doc.body.textContent));
+check('opportunity zone hand-off is visible', /opportunity zone/i.test(doc.body.textContent));
+checkSoft(
+  !LIVE,
+  'retained opportunity cards',
+  doc.querySelectorAll('.opp-card').length >= Math.min(1, (scannerView.opportunities || []).length),
+  undefined,
+  'no opportunity zone is active right now',
+);
+check('execution readiness bridge is visible', /execution bridge/i.test(doc.body.textContent));
 
 check('positions tab clickable', clickTab('positions'));
 await sleep(800);

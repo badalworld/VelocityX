@@ -32,7 +32,7 @@ The previous **Chart** navigation item and its BTCUSDT candlestick/EMA stage wer
 Views:
 
 * **Dashboard** — feed status, hero, KPIs, managed positions, scanner, statistics, **MTF trend gauge** (EMA11/EMA34 across 5m/15m/30m with timeframe chips), **execution rules**, engine health and activity. A full-width alert banner (`role="alert"`) appears only while LIVE auto-trading is armed so real-money mode can never be mistaken for a safe environment.
-* **Scanner** — volatility ranking, score distribution, trade gates and watchlist.
+* **Scanner** — live 50-asset batch progress, retained Opportunity Zone cards, backend execution-readiness bridge, setup-quality/volatility ranking, trade gates and dedicated monitor.
 * **Positions** — Binance account ledger, bot positions, external read-only positions, closed trades, fees and funding.
 * **Trades** — journal, signals and executor activity.
 * **Settings** — connection (mode, keys, **API token**), sizing, scanner, indicator, guardrail and motion controls. Arming LIVE asks for an explicit confirmation before the request is sent.

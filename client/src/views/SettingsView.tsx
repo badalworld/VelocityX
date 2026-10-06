@@ -53,7 +53,16 @@ export default function SettingsView({
               <div className="k">Scanner</div>
               <div className="v">{status?.autoScan ? 'auto' : 'manual'}</div>
             </div>
+            <div className="mini">
+              <div className="k">Execution bridge</div>
+              <div className={`v ${status?.execution?.state === 'READY' ? 'up' : status?.execution?.state === 'BLOCKED' ? 'down' : ''}`}>
+                {status?.execution?.state ?? 'CHECKING'}
+              </div>
+            </div>
           </div>
+          {status?.execution?.reasons?.length ? (
+            <div className="hint warn mt">Blocked/disarmed: {status.execution.reasons.join(' · ')}</div>
+          ) : null}
           <div className="hint warn mt" style={{ display: 'flex', gap: 7 }}>
             <IconAlert style={{ width: 14, height: 14, flex: 'none', marginTop: 2 }} />
             The bot never touches manual or external positions — it only manages trades it opened itself (max 8), and

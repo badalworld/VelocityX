@@ -35,6 +35,11 @@ export interface OpenSignal {
   atr: number;
 }
 
+export interface ExecutionGate {
+  ready: boolean;
+  reasons: string[];
+}
+
 function rndId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -64,9 +69,26 @@ export function splitQty(qty: number, step: number, p1: number, p2: number): { q
 }
 
 class Trader {
-  /** Symbols with an entry round-trip in flight — blocks duplicate entries. */
+  /** Symbols with an entry round-trip in flight — blocks duplicates and reserves slots. */
   private entering = new Set<string>();
   private slBusy = new Set<string>();
+  /** Production runtime gate (feed/account/stream freshness), wired at boot. */
+  private runtimeGate: (() => ExecutionGate) | null = null;
+
+  setRuntimeGate(fn: (() => ExecutionGate) | null): void {
+    this.runtimeGate = fn;
+  }
+
+  private gate(): ExecutionGate {
+    // Default-deny: only the production bootstrap (or an explicit hermetic test
+    // harness) may declare the execution infrastructure ready.
+    if (!this.runtimeGate) return { ready: false, reasons: ['runtime execution gate is not initialized'] };
+    try {
+      return this.runtimeGate();
+    } catch (e: any) {
+      return { ready: false, reasons: [`runtime gate failed: ${e?.message || e}`] };
+    }
+  }
 
   /** Symbols with an OPEN bot trade. */
   managedSymbols(): string[] {
@@ -75,7 +97,7 @@ class Trader {
   private slotsFree(): number {
     const s = getSettings();
     const cap = Math.min(s.maxPositions, MAX_POSITIONS_CAP);
-    return Math.max(0, cap - openTrades().length);
+    return Math.max(0, cap - openTrades().length - this.entering.size);
   }
 
   // ---------------- price tick ----------------
@@ -99,48 +121,64 @@ class Trader {
   // ---------------- signal entry ----------------
 
   async onSignal(sig: OpenSignal): Promise<void> {
-    const settings = getSettings();
     const symbol = sig.record.symbol;
-    const current = openTradeOn(symbol);
+    if (!Number.isFinite(sig.price) || sig.price <= 0 || !Number.isFinite(sig.atr) || sig.atr <= 0) {
+      this.log('error', `${symbol}: invalid signal price/ATR — entry rejected`);
+      return;
+    }
+    if (Date.now() - sig.record.detectedAt > 120_000) {
+      this.log('error', `${symbol}: stale signal (${Math.round((Date.now() - sig.record.detectedAt) / 1000)}s) — never replaying an old entry`);
+      return;
+    }
 
+    const current = openTradeOn(symbol);
     if (current) {
       const opposite = (sig.side === 'LONG' && current.side === 'SHORT') || (sig.side === 'SHORT' && current.side === 'LONG');
       if (opposite) {
         this.log('info', `${symbol}: opposite ${sig.side} signal → closing bot ${current.side} trade (close & reverse)`);
-        await this.closeByMarket(current, 'REVERSE');
+        const closed = await this.closeByMarket(current, 'REVERSE');
+        if (!closed) {
+          this.log('error', `${symbol}: reverse aborted because the existing position could not be confirmed closed`);
+          return;
+        }
       } else {
         this.log('info', `${symbol}: same-direction signal while a bot trade is open — keeping current trade`);
         return;
       }
     }
 
-    if (!settings.autoTrade) {
+    const s = getSettings();
+    if (!s.autoTrade) {
       this.log('info', `Signal ${sig.side} ${symbol} @ ${sig.price} — auto-trade OFF, not entering`);
       return;
     }
-
-    const s = getSettings();
-    if (openTrades().length >= Math.min(s.maxPositions, MAX_POSITIONS_CAP)) {
-      this.log('info', `Signal ${sig.side} ${symbol} — all ${s.maxPositions} position slots in use, skipping`);
+    if (openTrades().length + this.entering.size >= Math.min(s.maxPositions, MAX_POSITIONS_CAP)) {
+      this.log('info', `Signal ${sig.side} ${symbol} — all ${s.maxPositions} position slots are used or reserved, skipping`);
       return;
     }
-    if (s.autoScan && scanner.result() && !scanner.isTradable(symbol) && symbol !== s.symbol) {
-      this.log('info', `Signal ${sig.side} ${symbol} — symbol is not in the scanner's trending high-volatility set, skipping`);
+    if (s.autoScan && !scanner.isExecutionEligible(symbol, sig.side)) {
+      this.log('info', `Signal ${sig.side} ${symbol} — no live matching opportunity zone, skipping`);
+      return;
+    }
+    const gate = this.gate();
+    if (!gate.ready) {
+      this.log('error', `Signal ${sig.side} ${symbol} — execution blocked: ${gate.reasons.join(' · ') || 'runtime not ready'}`);
       return;
     }
 
     await this.openTrade(sig);
   }
 
-  /**
-   * Entry gate: one entry round-trip per symbol at a time. Signals arrive from
-   * a single engine loop today, but a duplicate/retried signal must never be
-   * able to open a second position on the same market.
-   */
+  /** Reserve one global position slot and one symbol before any async preflight. */
   private async openTrade(sig: OpenSignal): Promise<void> {
     const symbol = sig.record.symbol;
     if (this.entering.has(symbol)) {
       this.log('info', `${symbol}: entry already in flight — duplicate signal ignored`);
+      return;
+    }
+    const s = getSettings();
+    if (openTrades().length + this.entering.size >= Math.min(s.maxPositions, MAX_POSITIONS_CAP)) {
+      this.log('info', `${symbol}: no unreserved position slot — entry ignored`);
       return;
     }
     this.entering.add(symbol);
@@ -217,15 +255,69 @@ class Trader {
       await api.setLeverage(symbol, leverage);
       await api.setIsolated(symbol);
 
+      // Async preflight above can take seconds. Re-check every mutable safety
+      // switch immediately before the irreversible entry POST.
+      const latest = getSettings();
+      if (!latest.autoTrade) throw new Error('auto-trade was disarmed during entry preflight');
+      if (latest.mode !== s.mode) throw new Error(`execution mode changed from ${s.mode} to ${latest.mode} during preflight`);
+      if (latest.autoScan && !scanner.isExecutionEligible(symbol, sig.side)) {
+        throw new Error('opportunity zone expired during entry preflight');
+      }
+      const stillEmpty = await api.positionAmount(symbol);
+      if (Math.abs(stillEmpty) > info.stepSize / 2) {
+        throw new Error(`${symbol} acquired a position during preflight — entry cancelled to protect ownership`);
+      }
+      const finalGate = this.gate();
+      if (!finalGate.ready) throw new Error(`runtime became unavailable: ${finalGate.reasons.join(' · ')}`);
+
       const id = rndId();
       const prefix = `VX${id}`;
+      const entryCid = `${prefix}E`;
       const openSide: 'BUY' | 'SELL' = sig.side === 'LONG' ? 'BUY' : 'SELL';
-      const entryRes = await api.marketOrder(symbol, openSide, qty, { newClientOrderId: `${prefix}E` });
+      const entryStartedAt = Date.now();
+      let entryRes: any;
+      try {
+        entryRes = await api.marketOrder(symbol, openSide, qty, { newClientOrderId: entryCid });
+      } catch (postError) {
+        // A timeout after Binance accepted a POST is ambiguous. Querying by our
+        // unique client id makes the retry path idempotent and prevents a
+        // second entry order from ever being sent.
+        try {
+          entryRes = await api.queryOrder(symbol, entryCid);
+          const executed = Number(entryRes?.executedQty || 0);
+          if (executed <= 0 || !['FILLED', 'PARTIALLY_FILLED'].includes(String(entryRes?.status))) throw postError;
+          this.log('info', `${symbol}: recovered uncertain entry response from Binance by client order id`);
+        } catch {
+          // If both the POST response and order lookup were interrupted, the
+          // preflight proved this symbol was flat immediately beforehand. A
+          // newly visible position is therefore this exact entry and can be
+          // recovered without sending another order.
+          try {
+            const recoveredPosition = await api.positionAmount(symbol, sig.side);
+            const recoveredQty = Math.abs(recoveredPosition);
+            const correctDirection = recoveredPosition * dir(sig.side) > info.stepSize / 2;
+            const matchesOrderQty = Math.abs(recoveredQty - qty) <= info.stepSize / 2;
+            if (!correctDirection || !matchesOrderQty) throw postError;
+            entryRes = {
+              status: 'FILLED',
+              executedQty: recoveredQty,
+              avgPrice: 0,
+              clientOrderId: entryCid,
+            };
+            this.log('error', `${symbol}: recovered uncertain entry from the Binance position snapshot`);
+          } catch {
+            throw postError;
+          }
+        }
+      }
+      const executedQty = Number(entryRes?.executedQty || 0);
+      if (entryRes?.status && !['FILLED', 'PARTIALLY_FILLED'].includes(String(entryRes.status)) && executedQty <= 0) {
+        throw new Error(`entry order returned unexpected status ${entryRes.status}`);
+      }
+      if (executedQty > 0) qty = floorToStep(executedQty, info.stepSize);
+      if (qty <= 0) throw new Error('Binance reported zero executed quantity for the entry');
 
-      // The ack of a MARKET order frequently carries avgPrice 0.00; the fill
-      // price comes from the trade ledger. Using the real average is what makes
-      // the protective ladder sit where it should.
-      const filledAvg = await this.entryFillPrice(symbol, prefix, Number(entryRes?.avgPrice || 0), Date.now());
+      const filledAvg = await this.entryFillPrice(symbol, prefix, Number(entryRes?.avgPrice || 0), entryStartedAt);
       if (filledAvg > 0) entry = filledAvg;
 
       const slDist = sig.atr * s.atrSlMultiplier;
@@ -268,14 +360,38 @@ class Trader {
         binanceRealizedPnl: 0,
         commissionOtherAsset: 0,
         initialRisk: slDist * qty,
-        orders: { entry: `${prefix}E` },
+        // Predeclare deterministic client ids before any protective POST. If a
+        // response is lost, emergency finalization can still cancel every
+        // possibly-accepted order by id.
+        orders: {
+          entry: `${prefix}E`,
+          sl: `${prefix}S0`,
+          tp1: q1 > 0 ? `${prefix}1` : undefined,
+          tp2: q2 > 0 ? `${prefix}2` : undefined,
+          tp3: `${prefix}3`,
+        },
         mode: s.mode,
         result: null,
         botOwned: true,
         scan: scanRow
-          ? { volatility: scanRow.volatility, adx: scanRow.adx, atrPct: scanRow.atrPct, rank: (scanner.result()?.rows.indexOf(scanRow) ?? -1) + 1 }
+          ? {
+              volatility: scanRow.volatility,
+              adx: scanRow.adx,
+              atrPct: scanRow.atrPct,
+              rank: (scanner.result()?.rows.indexOf(scanRow) ?? -1) + 1,
+              setupScore: scanRow.setupScore,
+              emaGapAtr: scanRow.emaGapAtr,
+              opportunity: s.autoScan,
+            }
           : null,
       };
+
+      // Persist ownership as soon as the entry is confirmed. If the process
+      // dies while placing the ladder, reconcile can now find this exact VX id
+      // and protect/close it instead of leaving an unjournaled exchange trade.
+      saveTrade(trade);
+      markSignalActed(sig.record.id, trade.id);
+      emit('trade', { event: 'entry-filled', trade });
 
       try {
         // One-way: explicit size + reduceOnly. Hedge: positionSide — both
@@ -284,30 +400,35 @@ class Trader {
         const hedgeSide = trade.side;
         await api.protectiveStop(symbol, closeSide(trade.side), trade.slInitial, qty, `${prefix}S0`);
         trade.orders.sl = `${prefix}S0`;
+        saveTrade(trade);
         if (q1 > 0) {
           await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp1, q1, { newClientOrderId: `${prefix}1`, positionSide: dual ? hedgeSide : undefined });
           trade.orders.tp1 = `${prefix}1`;
+          saveTrade(trade);
         }
         if (q2 > 0) {
           await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp2, q2, { newClientOrderId: `${prefix}2`, positionSide: dual ? hedgeSide : undefined });
           trade.orders.tp2 = `${prefix}2`;
+          saveTrade(trade);
         }
         await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp3, q3, { newClientOrderId: `${prefix}3`, positionSide: dual ? hedgeSide : undefined });
         trade.orders.tp3 = `${prefix}3`;
+        saveTrade(trade);
       } catch (err: any) {
-        this.log('error', `Order placement failed (${err?.message}) — flattening position`);
-        try {
-          await api.marketOrder(symbol, closeSide(trade.side), qty, { reduceOnly: true, newClientOrderId: `${prefix}X` });
-        } catch { /* best effort */ }
-        throw err;
+        this.log('error', `Protective ladder failed (${err?.message}) — emergency flatten requested`);
+        emit('error', { message: `${symbol}: protective ladder failed — emergency close requested` });
+        const closed = await this.closeByMarket(trade, 'KILL');
+        if (!closed) {
+          this.log('error', `${symbol}: CRITICAL — entry remains OPEN after emergency close failure; reconcile will keep trying to arm protection`);
+          emit('error', { message: `${symbol}: CRITICAL open position needs attention — emergency close was not confirmed` });
+        }
+        return;
       }
 
       this.log(
         'info',
         `${trade.mode.toUpperCase()} ${trade.side} ${fmtQty(qty)} ${symbol} @ ${trade.entryPrice} | SL ${trade.slInitial} | TP ${trade.tp1}/${trade.tp2}/${trade.tp3}`,
       );
-      saveTrade(trade);
-      markSignalActed(sig.record.id, trade.id);
       emit('trade', { event: 'opened', trade });
       emit('log', {
         level: 'info',
@@ -470,33 +591,86 @@ class Trader {
     }
   }
 
-  /** Market-close a specific bot trade (reverse / kill switch). */
-  async closeByMarket(t: Trade, reason: 'REVERSE' | 'KILL'): Promise<void> {
-    if (!t || t.status !== 'OPEN') return;
+  /**
+   * Market-close a specific bot trade. Returns true only after Binance confirms
+   * the close request and the relevant position leg is flat. A failed close is
+   * never journalled as CLOSED and a reverse entry is never attempted on top.
+   */
+  async closeByMarket(t: Trade, reason: 'REVERSE' | 'KILL'): Promise<boolean> {
+    if (!t || t.status !== 'OPEN') return true;
     const remaining = remainingQtyOf(t);
     const price = this.priceOf(t.symbol) || t.entryPrice;
     if (remaining > 0) {
       try {
+        const info = await api.exchangeInfo(t.symbol);
+        const before = await api.positionAmount(t.symbol, t.side);
+        const directionalBefore = before * dir(t.side);
+
+        // The leg is already gone (manual/external intervention or a missed
+        // fill). Never send a close in the opposite direction. Finalise our
+        // record, and block a reverse if an opposite external leg now exists.
+        if (directionalBefore <= info.stepSize / 2) {
+          const oppositeExternal = Math.abs(before) > info.stepSize / 2;
+          await this.finalize(t, 'EXTERNAL', price);
+          if (oppositeExternal) {
+            this.log('error', `${t.symbol}: bot leg is gone but an opposite external position exists — reverse blocked`);
+            return false;
+          }
+          return true;
+        }
+
+        // If somebody added size in the same direction after our entry, close
+        // exactly the bot's remaining quantity and deliberately leave the
+        // excess external size behind.
+        const closeQty = floorToStep(Math.min(remaining, directionalBefore), info.stepSize);
+        if (closeQty <= 0) throw new Error('close quantity resolved to zero');
+        const expectedDirectionalAfter = Math.max(0, directionalBefore - closeQty);
         const dual = await api.isDualSide();
         const cid = `${t.orders.entry?.slice(0, -1) ?? `VX${t.id}`}X`;
-        // Tagged + reduceOnly: the close can only shrink OUR position and is
-        // always attributable to this trade by client order id.
-        await api.marketOrder(
-          t.symbol,
-          closeSide(t.side),
-          remaining,
-          dual
-            ? { positionSide: t.side === 'LONG' ? 'LONG' : 'SHORT', newClientOrderId: cid }
-            : { reduceOnly: true, newClientOrderId: cid },
-        );
-        // Authoritative numbers straight from Binance's ledger.
+        let closeRes: any;
+        try {
+          closeRes = await api.marketOrder(
+            t.symbol,
+            closeSide(t.side),
+            closeQty,
+            dual
+              ? { positionSide: t.side === 'LONG' ? 'LONG' : 'SHORT', newClientOrderId: cid }
+              : { reduceOnly: true, newClientOrderId: cid },
+          );
+        } catch (postError) {
+          // Same idempotent recovery as entry: do not send a second close when
+          // only the HTTP response was lost.
+          try {
+            closeRes = await api.queryOrder(t.symbol, cid);
+            if (!['FILLED', 'PARTIALLY_FILLED'].includes(String(closeRes?.status))) throw postError;
+          } catch {
+            throw postError;
+          }
+        }
+        if (closeRes?.status && !['FILLED', 'PARTIALLY_FILLED'].includes(String(closeRes.status))) {
+          throw new Error(`close order returned status ${closeRes.status}`);
+        }
+
+        const after = await api.positionAmount(t.symbol, t.side);
+        const directionalAfter = Math.max(0, after * dir(t.side));
+        if (Math.abs(directionalAfter - expectedDirectionalAfter) > info.stepSize / 2) {
+          throw new Error(
+            `position delta not confirmed (expected ${fmtQty(expectedDirectionalAfter)}, Binance ${fmtQty(directionalAfter)})`,
+          );
+        }
+        if (expectedDirectionalAfter > info.stepSize / 2) {
+          this.log('info', `${t.symbol}: left ${fmtQty(expectedDirectionalAfter)} external same-side quantity untouched`);
+        }
         await this.reconcileBinanceNumbers(t);
       } catch (e: any) {
-        this.log('error', `${t.symbol}: market close failed: ${e?.message}`);
+        this.log('error', `${t.symbol}: market close NOT confirmed: ${e?.message}`);
+        emit('error', { message: `${t.symbol}: close not confirmed — position remains managed and protected` });
+        return false;
       }
     }
     this.log('info', `${t.symbol}: closed (${reason}) @ ${price} — PnL ${t.realizedPnl.toFixed(2)} USDT`);
     await this.finalize(t, reason, price);
+    return true;
   }
 
   private async finalize(t: Trade, reason: Trade['closeReason'], price: number): Promise<void> {
@@ -573,22 +747,30 @@ class Trader {
     // resolve the trade by the client order id (VX<tradeId><suffix>)
     const t = openTrades().find((x) => cid.startsWith(`VX${x.id}`)) || null;
     if (!t || t.symbol !== o.s) return;
-    const exec = o.x; // NEW | TRADED | CANCELED | EXPIRED | REJECTED
+    const exec = o.x; // NEW | TRADE | CANCELED | EXPIRED | REJECTED
     const status = o.X;
     const price = Number(o.L) || Number(o.ap) || 0;
-    const filled = exec === 'TRADED' || status === 'FILLED';
-    if (!filled) return;
     const binance = { rp: Number(o.rp) || 0, commission: Number(o.n) || 0, commissionAsset: String(o.N || 'USDT') };
+    // A TRADE event may be only a partial fill. Accrue its exchange numbers,
+    // but move the ladder exactly once after terminal FILLED status.
+    const filled = status === 'FILLED';
+    if (!filled) {
+      if (exec === 'TRADE' || exec === 'TRADED') {
+        this.applyBinanceNumbers(t, binance.rp, binance.commission, binance.commissionAsset);
+        saveTrade(t);
+      }
+      return;
+    }
 
     if (cid.startsWith(`VX${t.id}S`)) {
       this.fillSL(t, Number(o.sp) || t.slCurrent, price || t.slCurrent, binance);
-    } else if (cid === `VX${t.id}1` && !t.tp1Filled) {
+    } else if (cid === t.orders.tp1 && !t.tp1Filled) {
       this.fillTP(t, 1, price || t.tp1, binance);
-    } else if (cid === `VX${t.id}2` && !t.tp2Filled) {
+    } else if (cid === t.orders.tp2 && !t.tp2Filled) {
       this.fillTP(t, 2, price || t.tp2, binance);
-    } else if (cid === `VX${t.id}3` && !t.tp3Filled) {
+    } else if (cid === t.orders.tp3 && !t.tp3Filled) {
       this.fillTP(t, 3, price || t.tp3, binance);
-    } else if (cid === `VX${t.id}E`) {
+    } else if (cid === t.orders.entry) {
       const avg = Number(ev.ap) || 0;
       if (avg > 0 && Math.abs(avg - t.entryPrice) / t.entryPrice > 0.001) {
         this.log('info', `${t.symbol}: entry fill confirmed @ ${avg}`);
@@ -604,6 +786,10 @@ class Trader {
    */
   async reconcile(): Promise<void> {
     for (const t of openTrades()) {
+      // Entry + initial ladder placement is transactional under this symbol
+      // reservation. Do not race the recovery loop against orders still being
+      // submitted by placeEntry().
+      if (this.entering.has(t.symbol)) continue;
       try {
         await this.reconcileOne(t);
       } catch (e: any) {
@@ -617,50 +803,99 @@ class Trader {
     const info = await api.exchangeInfo(t.symbol);
     const orders = await api.allOrders(t.symbol, { startTime: t.openedAt - 60_000, limit: 200 });
     const mine = orders.filter((o) => String(o.clientOrderId || '').startsWith(`VX${t.id}`));
-    const byCid = (suffix: string) => mine.find((o) => String(o.clientOrderId) === `VX${t.id}${suffix}`);
+    const byCid = (cid?: string) => cid ? mine.find((o) => String(o.clientOrderId) === cid) : undefined;
 
-    const sl = mine.find((o) => String(o.clientOrderId).startsWith(`VX${t.id}S`));
-    if (sl?.status === 'FILLED' && t.status === 'OPEN') {
-      this.fillSL(t, Number(sl.avgPrice || sl.stopPrice) || t.slCurrent, Number(sl.avgPrice) || t.slCurrent);
+    const filledStop = mine.find(
+      (o) => String(o.clientOrderId).startsWith(`VX${t.id}S`) && String(o.status) === 'FILLED',
+    );
+    if (filledStop && t.status === 'OPEN') {
+      this.fillSL(
+        t,
+        Number(filledStop.avgPrice || filledStop.stopPrice) || t.slCurrent,
+        Number(filledStop.avgPrice) || t.slCurrent,
+      );
       return;
     }
-    if (!t.tp3Filled && byCid('3')?.status === 'FILLED') this.fillTP(t, 3, Number(byCid('3')!.avgPrice) || t.tp3);
+    const tp3Order = byCid(t.orders.tp3);
+    if (!t.tp3Filled && tp3Order?.status === 'FILLED') this.fillTP(t, 3, Number(tp3Order.avgPrice) || t.tp3);
     if (t.status !== 'OPEN') return;
-    if (!t.tp1Filled && byCid('1')?.status === 'FILLED') this.fillTP(t, 1, Number(byCid('1')!.avgPrice) || t.tp1);
+    const tp1Order = byCid(t.orders.tp1);
+    if (!t.tp1Filled && tp1Order?.status === 'FILLED') this.fillTP(t, 1, Number(tp1Order.avgPrice) || t.tp1);
     if (t.status !== 'OPEN') return;
-    if (!t.tp2Filled && byCid('2')?.status === 'FILLED') this.fillTP(t, 2, Number(byCid('2')!.avgPrice) || t.tp2);
+    const tp2Order = byCid(t.orders.tp2);
+    if (!t.tp2Filled && tp2Order?.status === 'FILLED') this.fillTP(t, 2, Number(tp2Order.avgPrice) || t.tp2);
     if (t.status !== 'OPEN') return;
 
-    // Our position still open? Check the position amount for our symbol.
-    const pos = await api.positionAmount(t.symbol);
-    const flat = Math.abs(pos) < info.stepSize / 2;
-    if (flat && t.status === 'OPEN') {
+    const pos = await api.positionAmount(t.symbol, t.side);
+    const directionalPos = pos * dir(t.side);
+    if (Math.abs(pos) < info.stepSize / 2) {
       this.log('info', `${t.symbol}: position flat (external fill detected) — closing bot trade record`);
-      void this.finalize(t, 'EXTERNAL', Number(byCid('3')?.avgPrice) || this.priceOf(t.symbol) || t.entryPrice);
+      void this.finalize(t, 'EXTERNAL', Number(tp3Order?.avgPrice) || this.priceOf(t.symbol) || t.entryPrice);
       return;
     }
-    if (!flat && !this.slBusy.has(t.id)) {
+    if (directionalPos <= info.stepSize / 2) {
+      this.log('error', `${t.symbol}: bot-side position is gone and an opposite external leg exists — dropping bot orders`);
+      void this.finalize(t, 'EXTERNAL', this.priceOf(t.symbol) || t.entryPrice);
+      return;
+    }
+
+    if (!this.slBusy.has(t.id)) {
       const open = await api.openOrders(t.symbol);
-      const hasSL = open.some((o) => String(o.clientOrderId || '').startsWith(`VX${t.id}S`));
-      if (!hasSL && !t.tp3Filled) {
-        const slAlive = mine.some(
-          (o) => String(o.clientOrderId).startsWith(`VX${t.id}S`) && ['NEW', 'PARTIALLY_FILLED'].includes(String(o.status)),
-        );
-        if (!slAlive) {
-          this.log('error', `${t.symbol}: SL order missing while position open — re-arming SL`);
-          const cid = `VX${t.id}S${t.slStage}`;
-          await api.protectiveStop(
-            t.symbol,
-            closeSide(t.side),
-            roundToTick(t.slCurrent, info.tickSize),
-            remainingQtyOf(t),
-            cid,
-          );
-          t.orders.sl = cid;
-          saveTrade(t);
-          emit('trade', { event: 'sl-rearmed', trade: t });
-        }
+      const isAlive = (cid?: string) => !!cid && (
+        open.some((o) => String(o.clientOrderId) === cid) ||
+        ['NEW', 'PARTIALLY_FILLED'].includes(String(byCid(cid)?.status))
+      );
+      const protectedQty = floorToStep(Math.min(remainingQtyOf(t), directionalPos), info.stepSize);
+      if (protectedQty <= 0) {
+        void this.finalize(t, 'EXTERNAL', this.priceOf(t.symbol) || t.entryPrice);
+        return;
       }
+
+      if (!isAlive(t.orders.sl) && !t.tp3Filled) {
+        this.log('error', `${t.symbol}: SL order missing while position open — re-arming SL`);
+        const cid = `VX${t.id}S${t.slStage}R${Date.now().toString(36).slice(-4)}`;
+        await api.protectiveStop(
+          t.symbol,
+          closeSide(t.side),
+          roundToTick(t.slCurrent, info.tickSize),
+          protectedQty,
+          cid,
+        );
+        t.orders.sl = cid;
+        saveTrade(t);
+        emit('trade', { event: 'sl-rearmed', trade: t });
+      }
+
+      // A crash can happen after the entry journal is written but before all
+      // TP legs are acknowledged. Rebuild only missing, unfilled bot legs and
+      // route future stream fills through their newly persisted client ids.
+      const dual = await api.isDualSide();
+      const hedgeSide = dual ? t.side : undefined;
+      let capacity = protectedQty;
+      const ensureTp = async (
+        key: 'tp1' | 'tp2' | 'tp3',
+        level: 1 | 2 | 3,
+        filled: boolean,
+        target: number,
+        plannedQty: number,
+      ): Promise<void> => {
+        if (filled || plannedQty <= 0 || capacity < info.stepSize / 2) return;
+        const qty = floorToStep(Math.min(plannedQty, capacity), info.stepSize);
+        capacity = Math.max(0, capacity - qty);
+        if (qty <= 0 || isAlive(t.orders[key])) return;
+        const cid = `VX${t.id}${level}R${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 4)}`;
+        this.log('error', `${t.symbol}: TP${level} order missing — re-arming ${fmtQty(qty)}`);
+        await api.takeProfitMarket(t.symbol, closeSide(t.side), target, qty, {
+          newClientOrderId: cid,
+          positionSide: hedgeSide,
+        });
+        t.orders[key] = cid;
+        saveTrade(t);
+        emit('trade', { event: 'tp-rearmed', level, trade: t });
+      };
+      await ensureTp('tp1', 1, t.tp1Filled, t.tp1, t.q1);
+      await ensureTp('tp2', 2, t.tp2Filled, t.tp2, t.q2);
+      await ensureTp('tp3', 3, t.tp3Filled, t.tp3, t.q3);
     }
   }
 
@@ -673,8 +908,9 @@ class Trader {
       this.log('info', 'Kill switch: no open bot position');
       return 0;
     }
-    for (const t of trades) await this.closeByMarket(t, 'KILL');
-    return trades.length;
+    let closed = 0;
+    for (const t of trades) if (await this.closeByMarket(t, 'KILL')) closed += 1;
+    return closed;
   }
 
   private log(level: 'info' | 'error' | 'win' | 'loss', msg: string): void {

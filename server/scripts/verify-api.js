@@ -125,6 +125,10 @@ function wsProbe(query) {
     }
     const authed = await req('GET', '/api/status', { token: TOKEN });
     assert(authed.status === 200 && authed.json?.mode === 'testnet', 'GET /api/status with the token → 200 (testnet)');
+    const readiness = await req('GET', '/api/execution/readiness', { token: TOKEN });
+    assert(readiness.status === 200 && ['READY', 'DISARMED', 'BLOCKED'].includes(readiness.json?.state), 'execution-readiness contract is available to the frontend');
+    assert(typeof readiness.json?.checks?.engine === 'boolean' && Array.isArray(readiness.json?.reasons), 'readiness exposes server-enforced checks and reasons');
+    assert(authed.json?.execution?.state === readiness.json?.state, 'status and readiness endpoint use the same execution contract');
     const queryToken = await req('GET', `/api/status?token=${TOKEN}`);
     assert(queryToken.status === 200, 'token is also accepted as ?token= (WS/preview friendly)');
 
@@ -172,6 +176,9 @@ function wsProbe(query) {
     });
     assert(liveArm.status === 200 && liveArm.json?.mode === 'live', 'mode→live succeeds with confirmLive + keys');
     assert(liveArm.json?.autoTrade === false, 'entering LIVE forces auto-trade OFF regardless of the request');
+    assert(liveArm.json?.confirmLive === undefined, 'one-shot LIVE confirmation is never persisted or echoed');
+    const settingsBypass = await req('POST', '/api/settings', { token: TOKEN, body: { autoTrade: true } });
+    assert(settingsBypass.status === 400 && /confirmLive/i.test(settingsBypass.json?.error || ''), 'settings endpoint cannot bypass LIVE auto-trade confirmation');
     const liveAuto = await req('POST', '/api/autotrade', {
       token: TOKEN,
       body: { enabled: true, confirmLive: true },
@@ -190,6 +197,8 @@ function wsProbe(query) {
     const raw = settings.text || '';
     assert(!raw.includes('TESTSECRET1234567890') && !raw.includes('TESTKEY1234567890'), 'API keys/secrets are masked in /api/settings');
     assert(settings.json?.keys?.testnet?.configured === true, 'settings still report that testnet keys are configured');
+    assert(settings.json?.scanner?.candidates === 50, 'frontend settings contract defaults to a 50-asset scan batch');
+    assert(settings.json?.scanner?.minOpportunityScore > 0 && settings.json?.scanner?.zoneRetentionMin > 0, 'opportunity quality and retention settings are exposed');
 
     /* ---------------- 5. graceful shutdown ---------------- */
     console.log('\n— Graceful shutdown —');

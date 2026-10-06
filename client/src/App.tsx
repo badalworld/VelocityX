@@ -252,6 +252,10 @@ export default function App() {
           break;
         case 'scanner':
           void loadScanner();
+          void loadStatus();
+          break;
+        case 'scanner-progress':
+          setScan((previous) => (previous ? { ...previous, progress: d } : previous));
           break;
         case 'signal':
           void loadSignals();
@@ -305,9 +309,18 @@ export default function App() {
       if (!ok) return;
     }
     try {
-      await apiPost('/autotrade', { enabled: v, confirmLive: live && v });
+      const result = await apiPost<{ autoTrade: boolean; execution?: Status['execution'] }>(
+        '/autotrade',
+        { enabled: v, confirmLive: live && v },
+      );
       await loadStatus();
-      toast(v ? 'Auto-trading ENABLED — the bot will execute signals' : 'Auto-trading disabled', v ? 'win' : 'info');
+      if (!v) {
+        toast('Auto-trading disabled', 'info');
+      } else if (result.execution?.ready) {
+        toast('Auto-trading armed — execution bridge READY', 'win');
+      } else {
+        toast(`Auto-trading armed, but execution is ${result.execution?.state ?? 'BLOCKED'} — check readiness`, 'info');
+      }
     } catch (e: any) {
       toast(e.message, 'error');
     }
@@ -342,7 +355,7 @@ export default function App() {
       const res = await apiPost<ScanResult>('/scanner/scan');
       if (res && 'rows' in res) setScan(res);
       void loadStatus();
-      toast(`Scanner analysed ${res?.analysed ?? 0} markets · ${res?.selected?.length ?? 0} selected`, 'info');
+      toast(`Scanner analysed ${res?.analysed ?? 0}/${res?.target ?? 50} assets · ${res?.selected?.length ?? 0} opportunity zones`, 'info');
     } catch (e: any) {
       toast(e.message, 'error');
     } finally {

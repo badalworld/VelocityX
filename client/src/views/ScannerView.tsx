@@ -1,7 +1,7 @@
 import { ScanResult, Status } from '../types';
 import { fmt } from '../api';
 import { AnimatedNumber, Panel } from '../motion/primitives';
-import { ScannerSummary, ScannerTable, TopPicks } from '../components/ScannerPanel';
+import { OpportunityQueue, ScannerSummary, ScannerTable, TopPicks } from '../components/ScannerPanel';
 import { IconAlert, IconRadar, IconShield, IconTrend } from '../motion/Icons';
 
 /* ============================================================================
@@ -21,6 +21,8 @@ export default function ScannerView({
 }) {
   const selected = new Set(scan?.selected ?? []);
   const slots = status?.slots ?? { used: 0, max: status?.maxPositions ?? 8 };
+  const execution = status?.execution;
+  const progress = scan?.progress;
 
   return (
     <>
@@ -32,11 +34,12 @@ export default function ScannerView({
             </span>
             <span className="chip green">binance USD-M universe</span>
           </span>
-          <h1 className="hero-title">Highest volatility markets, ranked top to down</h1>
+          <h1 className="hero-title">50 assets scanned. Best setups retained until the signal.</h1>
           <p className="hero-sub">
-            The scanner sweeps every Binance USDT-M perpetual, ranks it by volatility (24h range · ATR% · 24h move) and
-            keeps only markets that are genuinely <b>trending</b>. Pegged, stable, staked and index markets are rejected
-            by name and by behaviour — the bot never trades a copy or stack market.
+            Each cycle analyses fifty liquid USD-M markets in parallel. Aligned, high-quality setups near a fresh 5m
+            EMA11/EMA34 cross move into the <b>Opportunity Zone</b>, where the realtime engine keeps monitoring them while
+            the scanner continues through the next batch. A real order is possible only after the confirmed signal and
+            every server-side execution check passes.
           </p>
         </div>
         <div className="hero-metrics">
@@ -47,19 +50,25 @@ export default function ScannerView({
             </span>
           </div>
           <div className="hero-metric">
-            <span className="hm-k">Analysed</span>
+            <span className="hm-k">50-asset batch</span>
             <span className="hm-v">
-              <AnimatedNumber value={scan?.analysed ?? 0} decimals={0} />
+              {progress?.running ? progress.completed : scan?.analysed ?? 0}/{progress?.target || scan?.target || 50}
             </span>
           </div>
           <div className="hero-metric">
-            <span className="hm-k">Trading now</span>
+            <span className="hm-k">Opportunity zones</span>
             <span className="hm-v up">{selected.size}</span>
           </div>
           <div className="hero-metric">
             <span className="hm-k">Position slots</span>
             <span className="hm-v">
               {slots.used}/{slots.max}
+            </span>
+          </div>
+          <div className="hero-metric">
+            <span className="hm-k">Real execution</span>
+            <span className={`hm-v ${execution?.state === 'READY' ? 'up' : execution?.state === 'BLOCKED' ? 'down' : ''}`}>
+              {execution?.state ?? 'CHECKING'}
             </span>
           </div>
         </div>
@@ -69,12 +78,38 @@ export default function ScannerView({
         </button>
       </section>
 
+      <div className={`feed-banner ${execution?.state === 'READY' ? 'ok' : execution?.state === 'BLOCKED' ? 'error' : 'warn'}`} role="status">
+        <span className={`led-dot ${execution?.state === 'READY' ? 'on' : ''}`} />
+        <b>Execution bridge: {execution?.state ?? 'CHECKING'}</b>
+        <span>
+          {execution?.state === 'READY'
+            ? 'Frontend state and backend gate agree: armed, Binance connected, account trade-enabled, streams fresh and scanner current.'
+            : execution?.state === 'DISARMED'
+              ? 'Infrastructure is ready, but auto-trade is OFF. Signals are recorded and never replayed later.'
+              : execution?.reasons?.slice(0, 3).join(' · ') || 'Waiting for the backend readiness checks.'}
+        </span>
+      </div>
+
+      <Panel
+        title="Opportunity Zone"
+        sub="retained monitor · confirmed signal required"
+        icon={<IconTrend />}
+        meta={<span className="chip green">{selected.size} monitoring</span>}
+      >
+        <OpportunityQueue scan={scan} />
+        <div className="hint mt">
+          Zone assets stay on the dedicated 5m stream while the next 50-asset scan runs. A setup-quality score ranks
+          rule alignment; it is not a promised win rate. Execution still requires auto-trade, a fresh signal, available
+          position capacity and a successful Binance account preflight.
+        </div>
+      </Panel>
+
       <div className="grid-2">
-        <Panel title="Top Picks" sub="passed every gate" icon={<IconTrend />} meta={`${(scan?.rows ?? []).filter((r) => r.tradable).length} markets`}>
+        <Panel title="Strongest Candidates" sub="quality ranked · not armed yet" icon={<IconTrend />} meta={`${(scan?.rows ?? []).filter((r) => r.tradable).length} trending`}>
           <TopPicks scan={scan} />
           <div className="hint mt">
-            These symbols are handed to the signal engine. Signals still have to fire (EMA11/EMA34) before a
-            position is opened, and at most {slots.max} positions can run at once.
+            Candidates continue to be rescored. Only rows that also enter the Opportunity Zone are handed to the
+            confirmed-signal engine; at most {slots.max} real positions can run at once.
           </div>
         </Panel>
 
@@ -85,13 +120,13 @@ export default function ScannerView({
 
       <Panel
         title="Full Ranking"
-        sub="volatility descending"
+        sub="50-asset batch · volatility ranked · setup scored"
         icon={<IconRadar />}
         bodyClass="flush"
         meta={
           <span style={{ display: 'flex', gap: 6 }}>
             <span className="chip cyan">{scan?.analysed ?? 0} markets</span>
-            <span className="chip green">{selected.size} engine</span>
+            <span className="chip green">{selected.size} zones</span>
           </span>
         }
       >
@@ -118,6 +153,18 @@ export default function ScannerView({
               <div className="v">{fmt(scan?.gate?.minAdx ?? 0, 0)}</div>
             </div>
             <div className="mini">
+              <div className="k">Min setup quality</div>
+              <div className="v">{fmt(scan?.gate?.minOpportunityScore ?? 0, 0)}</div>
+            </div>
+            <div className="mini">
+              <div className="k">Max 5m EMA gap</div>
+              <div className="v">{fmt(scan?.gate?.maxEmaGapAtr ?? 0, 2)} ATR</div>
+            </div>
+            <div className="mini">
+              <div className="k">Zone retention</div>
+              <div className="v">{scan?.gate?.zoneRetentionMin ?? 0} min</div>
+            </div>
+            <div className="mini">
               <div className="k">Max positions</div>
               <div className="v">{scan?.gate?.maxPositions ?? 8}</div>
             </div>
@@ -134,15 +181,15 @@ export default function ScannerView({
           </div>
         </Panel>
 
-        <Panel title="Engine Watchlist" sub="symbols under the signal engine" icon={<IconTrend />} meta={`${(status?.scanner?.selected ?? []).length} symbols`}>
+        <Panel title="Dedicated Monitor" sub="retained opportunity symbols" icon={<IconTrend />} meta={`${(status?.scanner?.selected ?? []).length} symbols`}>
           {(status?.scanner?.selected ?? []).length === 0 ? (
-            <div className="empty">Scanner has not selected a tradable market yet.</div>
+            <div className="empty">No high-quality setup is inside the retained opportunity zone right now.</div>
           ) : (
             <div className="scr-grid">
               {(status?.scanner?.selected ?? []).map((s) => (
                 <div key={s} className="scr-item bull">
                   <span className="scr-sym">{s.replace('USDT', '')}</span>
-                  <span className="scr-state bull">being watched</span>
+                  <span className="scr-state bull">opportunity zone</span>
                 </div>
               ))}
               <div className="scr-item">

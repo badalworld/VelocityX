@@ -23,6 +23,7 @@ const {
 } = require('../dist/ratelimit');
 const { __scanInternals } = require('../dist/scanner');
 const { trader } = require('../dist/trader');
+trader.setRuntimeGate(() => ({ ready: true, reasons: [] }));
 const account = require('../dist/account');
 const { adx, atr, ema } = require('../dist/indicators');
 
@@ -155,6 +156,41 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   assert(rows.every((r) => r.volatility >= 0 && r.volatility <= 100), 'volatility score is normalised 0..100');
   assert(typeof atr(trendUp, 14).slice(-1)[0] === 'number' && ema(trendUp.map((c) => c.close), 11).length === trendUp.length, 'ATR/EMA series align with candles');
 
+  console.log('\n— 50-asset batch + retained opportunity rules —');
+  const scannerDefaults = require('../dist/settings').getSettings().scanner;
+  assert(scannerDefaults.candidates === 50, `default scan batch is exactly 50 assets (${scannerDefaults.candidates})`);
+  const fiveMinValues = [
+    ...Array.from({ length: 100 }, () => 100),
+    ...Array.from({ length: 20 }, (_, i) => 100 - i * 0.05),
+    ...Array.from({ length: 10 }, (_, i) => 99 + i * 0.08),
+  ];
+  const k5 = fiveMinValues.map((c, i) => ({
+    time: i * 300_000,
+    closeTime: i * 300_000 + 299_999,
+    open: i ? fiveMinValues[i - 1] : c,
+    high: Math.max(c, i ? fiveMinValues[i - 1] : c) * 1.001,
+    low: Math.min(c, i ? fiveMinValues[i - 1] : c) * 0.999,
+    close: c,
+    volume: 1000,
+  }));
+  const opportunityRow = { ...rowTrend, score: 85, trendScore: 90, liquidityScore: 90, tradable: true, trend: 'UP' };
+  const opportunity = __scanInternals.assessOpportunity(opportunityRow, k5, Date.now());
+  assert(opportunity.opportunity && opportunity.side === 'LONG', 'aligned 15m/1h market converging on the 5m cross enters the opportunity zone', opportunity.reason);
+  assert(opportunity.emaGapAtr <= scannerDefaults.maxEmaGapAtr, `opportunity gap is ATR-normalised (${opportunity.emaGapAtr.toFixed(2)} ATR)`);
+  assert(opportunity.setupScore >= scannerDefaults.minOpportunityScore, `setup quality clears the configured gate (${opportunity.setupScore.toFixed(0)})`);
+
+  let activeWorkers = 0, maxWorkers = 0, completedAssets = 0;
+  await __scanInternals.mapConcurrent(Array.from({ length: 50 }, (_, i) => i), 8, async () => {
+    activeWorkers += 1;
+    maxWorkers = Math.max(maxWorkers, activeWorkers);
+    await sleep(2);
+    activeWorkers -= 1;
+    completedAssets += 1;
+    return true;
+  });
+  assert(completedAssets === 50, 'all 50 assets complete in one scan batch');
+  assert(maxWorkers > 1 && maxWorkers <= 8, `batch is concurrent but bounded (${maxWorkers} workers)`);
+
   /* ------------------------------------------------------------------ 6 */
   console.log('\n— Position ownership rules —');
   const settings = require('../dist/settings');
@@ -179,15 +215,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('\n— External positions are never adopted or traded —');
   const binance = require('../dist/binance');
   const orders = [];
+  const closedBotSymbols = new Set();
   const record = (kind) => (...args) => {
     const opts = args.find((a) => a && typeof a === 'object') || {};
     const strings = args.filter((a) => typeof a === 'string');
     // Market orders that close a position are tagged separately so the checks
     // can distinguish entries from reduceOnly exits.
     const isClose = !!opts.reduceOnly || opts.closePosition === true || opts.closePosition === 'true';
+    const orderSymbol = strings.find((x) => /USDT$/.test(x)) || '';
+    if (kind === 'market') {
+      if (isClose) closedBotSymbols.add(orderSymbol);
+      else closedBotSymbols.delete(orderSymbol);
+    }
     orders.push({
       kind: kind === 'market' && isClose ? 'market-close' : kind,
-      symbol: strings.find((x) => /USDT$/.test(x)) || '',
+      symbol: orderSymbol,
       // every numeric argument (prices, quantities, leverage) — callers differ
       nums: args.filter((a) => typeof a === 'number'),
       qty: args.filter((a) => typeof a === 'number')[0] ?? null,
@@ -208,7 +250,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   binance.api.setIsolated = async () => ({});
   binance.api.isDualSide = async () => false;
   // Clamp the ticker set price to 100 (keeps the ladder' expectations valid)
-  binance.api.positionAmount = async (symbol) => (symbol === 'DOGEUSDT' ? 5000 : 0);
+  binance.api.positionAmount = async (symbol) => {
+    if (symbol === 'DOGEUSDT') return 5000;
+    if (closedBotSymbols.has(symbol)) return 0;
+    const own = store.openTradeOn(symbol);
+    return own ? store.remainingQtyOf(own) * (own.side === 'LONG' ? 1 : -1) : 0;
+  };
   binance.api.maxLeverage = async () => 0; // no bracket data in this harness
   binance.api.accountSnapshot = async () => ({ equity: 1000, walletBalance: 1000, availableBalance: 900, initialMargin: 100, maintMargin: 20, unrealizedPnl: 0, canTrade: true });
   binance.api.positionRisk = async () => [

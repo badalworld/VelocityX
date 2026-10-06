@@ -20,8 +20,67 @@ import { emit, getLogs } from './broadcast';
 import { marketStream, userStream } from './streams';
 import { limiter } from './ratelimit';
 
+/** Single frontend/backend contract for whether a REAL entry may be sent now. */
+export function currentExecutionReadiness(): {
+  ready: boolean;
+  infrastructureReady: boolean;
+  state: 'READY' | 'DISARMED' | 'BLOCKED';
+  reasons: string[];
+  mode: string;
+  armed: boolean;
+  checks: Record<string, boolean>;
+  at: number;
+} {
+  const now = Date.now();
+  const s = getSettings();
+  const keys = s.keys[s.mode];
+  const account = accountService.get();
+  const scan = scanner.result();
+  const checks = {
+    keys: !!(keys.key && keys.secret),
+    exchange: api.reachable === true,
+    marketStream: marketStream.isConnected && now - marketStream.lastMessage() < 30_000,
+    userStream: userStream.isConnected,
+    account: !!account && account.mode === s.mode && account.canTrade === true && now - account.at < 30_000,
+    engine: engine.lastTick() > 0 && now - engine.lastTick() < 10_000,
+    scanner: !s.autoScan || (s.scanner.enabled && !!scan && now - scan.at < Math.max(180_000, s.scanner.intervalSec * 3_000)),
+  };
+  const labels: Record<keyof typeof checks, string> = {
+    keys: `${s.mode} API keys are not configured`,
+    exchange: 'Binance REST feed is not confirmed reachable',
+    marketStream: 'market stream is disconnected or stale',
+    userStream: 'user-data execution stream is disconnected',
+    account: 'fresh trade-enabled Binance account snapshot is unavailable',
+    engine: 'signal engine heartbeat is stale',
+    scanner: '50-asset scanner snapshot is stale',
+  };
+  const reasons = (Object.keys(checks) as (keyof typeof checks)[])
+    .filter((key) => !checks[key])
+    .map((key) => labels[key]);
+  const infrastructureReady = reasons.length === 0;
+  if (!s.autoTrade) reasons.push('auto-trade is disarmed');
+  const ready = infrastructureReady && s.autoTrade;
+  return {
+    ready,
+    infrastructureReady,
+    state: ready ? 'READY' : infrastructureReady ? 'DISARMED' : 'BLOCKED',
+    reasons,
+    mode: s.mode,
+    armed: s.autoTrade,
+    checks,
+    at: now,
+  };
+}
+
 export function apiRouter(): express.Router {
   const r = express.Router();
+
+  // Dashboard state is realtime execution state; an intermediary/browser must
+  // never satisfy a poll from a stale cached response.
+  r.use((_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
 
   // Liveness/readiness for process supervisors. Deliberately tiny and always
   // unauthenticated so a container orchestrator can probe it.
@@ -63,6 +122,7 @@ export function apiRouter(): express.Router {
     const price = st?.lastPrice || 0;
     const view = accountService.get();
     const scan = scanner.result();
+    const activeZones = scanner.activeSymbols();
 
     res.json({
       mode: s.mode,
@@ -110,8 +170,21 @@ export function apiRouter(): express.Router {
       openTrade: openTrades().length === 1 ? openTrades()[0] : null,
       slots: { used: openTrades().length, max: s.maxPositions },
       scanner: scan
-        ? { at: scan.at, universe: scan.universe, analysed: scan.analysed, selected: scan.selected, top: scan.rows.slice(0, 12) }
+        ? {
+            at: scan.at,
+            universe: scan.universe,
+            target: scan.target,
+            analysed: scan.analysed,
+            selected: activeZones,
+            opportunities: scanner.opportunities(),
+            progress: scanner.progress(),
+            top: scan.rows.slice(0, 12).map((row) => ({
+              ...row,
+              inOpportunityZone: activeZones.includes(row.symbol),
+            })),
+          }
         : null,
+      execution: currentExecutionReadiness(),
       engine: st
         ? {
             atr: st.atr,
@@ -184,10 +257,34 @@ export function apiRouter(): express.Router {
 
   r.get('/scanner', (req, res) => {
     const result = scanner.result();
-    if (!result) return res.json({ at: 0, universe: 0, analysed: 0, rows: [], selected: [], gate: null, warming: true });
-    const limit = Math.min(80, Number(req.query.limit) || 40);
-    res.json({ ...result, rows: result.rows.slice(0, limit), warming: false });
+    if (!result) {
+      return res.json({
+        at: 0,
+        universe: 0,
+        target: scanner.progress().target,
+        analysed: 0,
+        rows: [],
+        selected: scanner.activeSymbols(),
+        opportunities: scanner.opportunities(),
+        progress: scanner.progress(),
+        gate: null,
+        warming: true,
+      });
+    }
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const selected = scanner.activeSymbols();
+    const monitored = new Set(selected);
+    res.json({
+      ...result,
+      rows: result.rows.slice(0, limit).map((row) => ({ ...row, inOpportunityZone: monitored.has(row.symbol) })),
+      selected,
+      opportunities: scanner.opportunities(),
+      progress: scanner.progress(),
+      warming: false,
+    });
   });
+
+  r.get('/execution/readiness', (_req, res) => res.json(currentExecutionReadiness()));
 
   r.post('/scanner/scan', async (_req, res) => {
     const result = await scanner.scan();
@@ -207,6 +304,8 @@ export function apiRouter(): express.Router {
     const before = getSettings();
     const patch = req.body || {};
     const wantsLive = patch.mode === 'live' && before.mode !== 'live';
+    const resultingMode = patch.mode ?? before.mode;
+    const armsLiveViaSettings = resultingMode === 'live' && patch.autoTrade === true && before.autoTrade !== true;
 
     if (patch.mode !== undefined && !['testnet', 'live'].includes(patch.mode)) {
       return res.status(400).json({ error: 'mode must be testnet | live — simulation was removed' });
@@ -214,6 +313,11 @@ export function apiRouter(): express.Router {
     if (wantsLive && patch.confirmLive !== true) {
       return res.status(400).json({
         error: 'Switching to LIVE places real orders — resend with confirmLive: true after testing on Binance testnet',
+      });
+    }
+    if (armsLiveViaSettings && !wantsLive && patch.confirmLive !== true) {
+      return res.status(400).json({
+        error: 'Arming LIVE auto-trade requires confirmLive: true (normally use POST /api/autotrade)',
       });
     }
     if (patch.symbol !== undefined && !/^[A-Z0-9]{4,24}$/.test(String(patch.symbol).toUpperCase())) {
@@ -229,8 +333,10 @@ export function apiRouter(): express.Router {
     if (patch.symbol && patch.symbol !== before.symbol) {
       emit('log', { level: 'info', msg: `Primary symbol changed to ${s.symbol}` });
     }
-    if (patch.mode && patch.mode !== before.mode) {
+    const modeChanged = !!patch.mode && patch.mode !== before.mode;
+    if (modeChanged) {
       if (s.keys[s.mode]?.key && s.keys[s.mode]?.secret) {
+        accountService.invalidate();
         userStream.start();
         void accountService.refresh();
         emit('log', {
@@ -246,11 +352,35 @@ export function apiRouter(): express.Router {
         return res.status(400).json({ error: `No API keys configured for ${s.mode} mode` });
       }
     }
-    if (patch.scanner && JSON.stringify(patch.scanner) !== JSON.stringify(before.scanner)) {
-      scanner.restart();
-      emit('log', { level: 'info', msg: 'Scanner settings applied — rescanning the market' });
-      void scanner.scan();
+    const activeKeysChanged =
+      before.keys[s.mode]?.key !== s.keys[s.mode]?.key ||
+      before.keys[s.mode]?.secret !== s.keys[s.mode]?.secret;
+    if (!modeChanged && activeKeysChanged) {
+      // User-stream listen keys and cached account data belong to one API
+      // credential. Replace both atomically from the dashboard's perspective.
+      accountService.invalidate();
+      userStream.stop();
+      userStream.start();
+      if (s.keys[s.mode]?.key && s.keys[s.mode]?.secret) void accountService.refresh();
+      emit('log', {
+        level: 'info',
+        msg: `${s.mode.toUpperCase()} credentials changed — execution stream and account snapshot refreshed`,
+      });
     }
+    if (patch.scanner && JSON.stringify(patch.scanner) !== JSON.stringify(before.scanner)) {
+      // Threshold changes invalidate authorization immediately; a fresh batch
+      // must re-qualify every retained zone under the new contract.
+      scanner.clearOpportunities();
+      scanner.restart();
+      emit('log', {
+        level: 'info',
+        msg: s.scanner.enabled ? 'Scanner settings applied — rescanning the market' : 'Scanner disabled — manual symbol mode only',
+      });
+      if (s.scanner.enabled) void scanner.scan();
+      else scanner.clearOpportunities();
+    }
+    if (patch.autoScan === false && before.autoScan !== false) scanner.clearOpportunities();
+    if (patch.autoScan === true && before.autoScan === false && s.scanner.enabled) void scanner.scan();
     if (patch.autoTrade !== undefined && patch.autoTrade !== before.autoTrade) {
       emit('log', { level: patch.autoTrade ? 'win' : 'error', msg: `Auto-trade ${patch.autoTrade ? 'ENABLED' : 'DISABLED'}` });
     }
@@ -275,7 +405,7 @@ export function apiRouter(): express.Router {
       msg: `Auto-trade ${enabled ? 'ENABLED' : 'DISABLED'}${enabled && mode === 'live' ? ' in LIVE mode — real orders active' : ''}`,
     });
     emit('status', { autoTrade: enabled });
-    res.json({ autoTrade: enabled });
+    res.json({ autoTrade: enabled, execution: currentExecutionReadiness() });
   });
 
   /** Close ONE bot-owned position at market (external positions are never touched). */
@@ -283,16 +413,32 @@ export function apiRouter(): express.Router {
     const id = String(req.body?.id || '');
     const trade = openTrades().find((t) => t.id === id);
     if (!trade) return res.status(404).json({ error: 'No open bot position with that id' });
-    await trader.closeByMarket(trade, 'KILL');
+    const confirmed = await trader.closeByMarket(trade, 'KILL');
     void accountService.refresh();
-    // hand the finalized record back so the UI/smoke tests can verify the booked PnL
-    res.json({ ok: true, id, closed: allTrades().find((t) => t.id === id) || null, openTrades: openTrades() });
+    const payload = {
+      ok: confirmed,
+      id,
+      closed: allTrades().find((t) => t.id === id) || null,
+      openTrades: openTrades(),
+      error: confirmed ? undefined : 'Binance did not confirm the close; the trade remains managed and protected',
+    };
+    // Never tell the frontend a real close succeeded when Binance did not
+    // confirm the expected position delta.
+    res.status(confirmed ? 200 : 502).json(payload);
   });
 
   r.post('/kill', mutate, async (_req, res) => {
+    const attempted = openTrades().length;
     const closed = await trader.kill();
     void accountService.refresh();
-    res.json({ ok: true, closed, openTrades: openTrades() });
+    const ok = closed === attempted;
+    res.status(ok ? 200 : 502).json({
+      ok,
+      attempted,
+      closed,
+      openTrades: openTrades(),
+      error: ok ? undefined : `${attempted - closed} bot position(s) were not confirmed closed and remain managed`,
+    });
   });
 
   // ---------------- history / stats ----------------
@@ -370,9 +516,13 @@ export function apiRouter(): express.Router {
       scanner: {
         at: scanner.result()?.at ?? 0,
         universe: scanner.result()?.universe ?? 0,
+        target: scanner.result()?.target ?? scanner.progress().target,
         analysed: scanner.result()?.analysed ?? 0,
-        selected: scanner.result()?.selected ?? [],
+        selected: scanner.activeSymbols(),
+        opportunities: scanner.opportunities(),
+        progress: scanner.progress(),
       },
+      execution: currentExecutionReadiness(),
       limiter: limiter.status(),
       account: { source: accountService.get()?.source ?? null, at: accountService.get()?.at ?? 0, errors: accountService.get()?.errors ?? [] },
       now: Date.now(),
