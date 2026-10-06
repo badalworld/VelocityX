@@ -4,20 +4,15 @@
   "private": true,
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/clean-dist.js && tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json --watch",
-    "test": "npm run build && node scripts/smoke.js",
-    "smoke": "node scripts/smoke.js",
-    "test:e2e": "node scripts/e2e-execution.js",
-    "test:liquidity": "npm run build && node scripts/verify-liquidity.js",
-    "test:backtest-api": "npm run build && node scripts/verify-backtest-api.js",
-    "test:realtime": "node scripts/verify-realtime.js",
-    "test:wire": "node scripts/verify-wire.js",
-    "verify:binance": "node scripts/verify-binance.js",
-    "preflight": "node scripts/preflight.js",
+    "test": "npm run build && node scripts/smoke.js && node scripts/verify-wire.js && node scripts/verify-api.js",
+    "smoke": "npm run build && node scripts/smoke.js",
+    "test:wire": "npm run build && node scripts/verify-wire.js",
     "test:api": "npm run build && node scripts/verify-api.js",
-    "test:all": "npm run build && node scripts/smoke.js && node scripts/verify-liquidity.js && node scripts/verify-backtest-api.js && node scripts/e2e-execution.js && node scripts/verify-realtime.js && node scripts/verify-wire.js && node scripts/verify-api.js"
+    "test:all": "npm test",
+    "verify:binance": "npm run build && node scripts/verify-binance.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

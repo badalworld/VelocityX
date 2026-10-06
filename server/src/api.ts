@@ -1,91 +1,30 @@
 /**
- * HTTP API for the dashboard UI.
+ * HTTP API for the strategy-free VelocityX baseline.
  *
- * Live account/position numbers come from Binance. Historical backtests are
- * explicitly isolated OHLCV simulations and never place or journal orders.
+ * Exposes exchange/account telemetry and strategy-neutral trade history.
+ * There are deliberately no scanner, signal, strategy, order, position-control,
+ * auto-trade, entry or backtest endpoints.
  */
 import express from 'express';
 import { api } from './binance';
-import { authRequired, LIVE_CONTROL_MESSAGE, liveControlProtected, rateLimit, requireToken } from './auth';
-import { engine, mtfDashboard } from './engine';
-import { computeStats } from './stats';
-import { runLiquidityBacktest } from './liquidityBacktest';
+import { authRequired, rateLimit, requireToken } from './auth';
+import { engine } from './engine';
 import { getSettings, publicSettings, updateSettings } from './settings';
-import { allSignals, allTrades, openTrades, remainingQtyOf } from './store';
-import { trader } from './trader';
-import { scanner } from './scanner';
+import { allTrades, openTrades } from './store';
 import { accountService } from './account';
 import { candleStore } from './candles';
 import { emit, getLogs } from './broadcast';
 import { marketStream, userStream } from './streams';
 import { limiter } from './ratelimit';
 
-/** Single frontend/backend contract for whether a REAL entry may be sent now. */
-export function currentExecutionReadiness(): {
-  ready: boolean;
-  infrastructureReady: boolean;
-  state: 'READY' | 'DISARMED' | 'BLOCKED';
-  reasons: string[];
-  mode: string;
-  armed: boolean;
-  checks: Record<string, boolean>;
-  at: number;
-} {
-  const now = Date.now();
-  const s = getSettings();
-  const keys = s.keys[s.mode];
-  const account = accountService.get();
-  const scan = scanner.result();
-  const checks = {
-    keys: !!(keys.key && keys.secret),
-    exchange: api.reachable === true,
-    marketStream: marketStream.isConnected && now - marketStream.lastMessage() < 30_000,
-    userStream: userStream.isConnected,
-    account: !!account && account.mode === s.mode && account.canTrade === true && now - account.at < 30_000,
-    engine: engine.lastTick() > 0 && now - engine.lastTick() < 10_000,
-    scanner: !s.autoScan || (s.scanner.enabled && !!scan && now - scan.at < Math.max(180_000, s.scanner.intervalSec * 3_000)),
-    liveControl: s.mode !== 'live' || liveControlProtected(),
-  };
-  const labels: Record<keyof typeof checks, string> = {
-    keys: `${s.mode} API keys are not configured`,
-    exchange: 'Binance REST feed is not confirmed reachable',
-    marketStream: 'market stream is disconnected or stale',
-    userStream: 'user-data execution stream is disconnected',
-    account: 'fresh trade-enabled Binance account snapshot is unavailable',
-    engine: 'signal engine heartbeat is stale',
-    scanner: '50-asset scanner snapshot is stale',
-    liveControl: LIVE_CONTROL_MESSAGE,
-  };
-  const reasons = (Object.keys(checks) as (keyof typeof checks)[])
-    .filter((key) => !checks[key])
-    .map((key) => labels[key]);
-  const infrastructureReady = reasons.length === 0;
-  if (!s.autoTrade) reasons.push('auto-trade is disarmed');
-  const ready = infrastructureReady && s.autoTrade;
-  return {
-    ready,
-    infrastructureReady,
-    state: ready ? 'READY' : infrastructureReady ? 'DISARMED' : 'BLOCKED',
-    reasons,
-    mode: s.mode,
-    armed: s.autoTrade,
-    checks,
-    at: now,
-  };
-}
-
 export function apiRouter(): express.Router {
   const r = express.Router();
+  const mutate = rateLimit({ perMinute: 60, burst: 20 });
 
-  // Dashboard state is realtime execution state; an intermediary/browser must
-  // never satisfy a poll from a stale cached response.
   r.use((_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     next();
   });
-
-  // Liveness/readiness for process supervisors. Deliberately tiny and always
-  // unauthenticated so a container orchestrator can probe it.
   r.get('/health', (_req, res) => {
     res.json({
       ok: true,
@@ -93,536 +32,176 @@ export function apiRouter(): express.Router {
       feed: api.reachable === false ? 'binance-unreachable' : 'binance',
       authRequired: authRequired(),
       mode: getSettings().mode,
+      entriesEnabled: false,
     });
   });
-
-  // Every API route is token-gated when VX_API_TOKEN is set (open by default,
-  // with a loud boot warning — see index.ts).
   r.use(requireToken);
-  // State-changing routes are rate limited per IP.
-  const mutate = rateLimit({ perMinute: 60, burst: 20 });
 
-  const feedInfo = () => {
-    const unreachable = api.reachable === false;
-    return {
-      feed: unreachable ? 'binance-unreachable' : 'binance',
-      source: 'binance-usdm',
-      reachable: api.reachable,
-      lastRestOkAt: api.telemetry.lastRestOkAt,
-      lastRestError: api.telemetry.lastRestError || null,
-      latencyMs: api.telemetry.lastLatencyMs,
-      avgLatencyMs: api.telemetry.avgLatencyMs,
-      serverTimeOffsetMs: api.telemetry.serverTimeOffsetMs,
-      wsLastMessageAt: api.telemetry.wsLastMessageAt,
-      candles: candleStore.stats(),
-    };
-  };
+  const feedInfo = () => ({
+    feed: api.reachable === false ? 'binance-unreachable' : 'binance',
+    source: 'binance-usdm',
+    reachable: api.reachable,
+    lastRestOkAt: api.telemetry.lastRestOkAt,
+    lastRestError: api.telemetry.lastRestError || null,
+    latencyMs: api.telemetry.lastLatencyMs,
+    avgLatencyMs: api.telemetry.avgLatencyMs,
+    serverTimeOffsetMs: api.telemetry.serverTimeOffsetMs,
+    wsLastMessageAt: api.telemetry.wsLastMessageAt,
+    candles: candleStore.stats(),
+  });
 
-  r.get('/status', async (_req, res) => {
+  r.get('/status', (_req, res) => {
     const s = getSettings();
-    const st = engine.state();
-    const price = st?.lastPrice || 0;
+    const market = engine.state();
     const view = accountService.get();
-    const scan = scanner.result();
-    const activeZones = scanner.activeSymbols();
-
     res.json({
       mode: s.mode,
-      autoTrade: s.autoTrade,
       symbol: s.symbol,
       interval: s.interval,
-      leverage: s.leverage,
-      tradeSizePercent: s.tradeSizePercent,
-      maxPositions: s.maxPositions,
-      autoScan: s.autoScan,
-      price,
-      // Binance account view (equity / PNL / ROI / fees / funding) + bot attribution
-      account: view
-        ? {
-            source: view.source,
-            mode: view.mode,
-            equity: view.equity,
-            walletBalance: view.walletBalance,
-            unrealizedPnl: view.unrealizedPnl,
-            availableBalance: view.availableBalance,
-            initialMargin: view.initialMargin,
-            maintMargin: view.maintMargin,
-            roiPct: view.roiPct,
-            roiOnWalletPct: view.roiOnWalletPct,
-            canTrade: view.canTrade,
-            bot: view.bot,
-            income: view.income,
-            external: view.external,
-            at: view.at,
-            errors: view.errors,
-            latencyMs: view.latencyMs,
-          }
-        : null,
-      // Managed (bot-owned) positions — never external ones
-      openTrades: openTrades().map((t) => {
-        const mark = marketStream.price(t.symbol) || t.entryPrice;
-        const remaining = remainingQtyOf(t);
-        return {
-          ...t,
-          markPrice: mark,
-          remainingQty: remaining,
-          unrealized: view?.positions.managed.find((m) => m.trade.id === t.id)?.unrealized ?? (mark - t.entryPrice) * (t.side === 'LONG' ? 1 : -1) * remaining,
-        };
-      }),
-      openTrade: openTrades().length === 1 ? openTrades()[0] : null,
-      slots: { used: openTrades().length, max: s.maxPositions },
-      scanner: scan
-        ? {
-            at: scan.at,
-            universe: scan.universe,
-            target: scan.target,
-            analysed: scan.analysed,
-            selected: activeZones,
-            opportunities: scanner.opportunities(),
-            progress: scanner.progress(),
-            top: scan.rows.slice(0, 12).map((row) => ({
-              ...row,
-              inOpportunityZone: activeZones.includes(row.symbol),
-            })),
-          }
-        : null,
-      execution: currentExecutionReadiness(),
-      engine: st
-        ? {
-            atr: st.atr,
-            ribbonBull: st.ribbonBull,
-            lastSignal: st.lastSignal,
-            emas: st.emas,
-            emaExtra: st.emaExtra,
-            lastClosedCandleTime: st.lastClosedCandleTime,
-            startedAt: st.engineStartedAt,
-          }
-        : null,
-      feed: feedInfo().feed,
-      feedInfo: feedInfo(),
-      limits: limiter.status(),
-      streams: { market: marketStream.isConnected, user: userStream.isConnected, userLastMessageAt: userStream.lastMessage() },
+      entriesEnabled: false,
+      entriesDisabledReason: 'No trading strategy is installed.',
+      market,
+      feed: feedInfo(),
+      streams: {
+        market: marketStream.isConnected,
+        marketLastMessageAt: marketStream.lastMessage(),
+        user: userStream.isConnected,
+        userLastMessageAt: userStream.lastMessage(),
+      },
+      engine: {
+        activeSymbols: engine.activeSymbols(),
+        lastTickAt: engine.lastTick(),
+        lastClosedCandleTime: market?.lastClosedCandleTime ?? 0,
+        startedAt: market?.engineStartedAt ?? 0,
+      },
+      account: view,
+      openTrades: openTrades(),
+      tradeCount: allTrades().length,
       keysConfigured: {
         testnet: !!(s.keys.testnet.key && s.keys.testnet.secret),
         live: !!(s.keys.live.key && s.keys.live.secret),
       },
+      apiTokenRequired: authRequired(),
       logs: getLogs(60),
       now: Date.now(),
     });
   });
 
-  const numQuery = (v: unknown): number | undefined => {
-    if (v === undefined || v === null || v === '') return undefined;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : undefined;
-  };
-
   r.get('/account', async (req, res) => {
-    const days = numQuery(req.query.days);
+    const days = Number(req.query.days);
     let view = accountService.get();
-    if (!view || Date.now() - view.at > 5000) {
+    if (!view || Date.now() - view.at > 5_000) {
       try {
         view = await accountService.refresh();
       } catch (e: any) {
-        return res.status(502).json({ error: e?.message || 'account refresh failed' });
+        return res.status(502).json({ error: e?.message || 'Account refresh failed' });
       }
     }
-    if (days && view) {
-      try {
-        view = { ...view, income: await accountService.incomeSummary(days) };
-      } catch { /* keep the cached income summary */ }
+    if (Number.isFinite(days) && days > 0 && view) {
+      try { view = { ...view, income: await accountService.incomeSummary(days) }; }
+      catch { /* retain last-known account data */ }
     }
     res.json({ ...view, feed: feedInfo() });
   });
 
   r.get('/positions', async (_req, res) => {
     try {
-      const view = accountService.get() ?? (await accountService.refresh());
+      const view = accountService.get() ?? await accountService.refresh();
       res.json({
-        managed: accountService.managedNow(),
-        external: view?.positions.external ?? [],
-        slots: { used: openTrades().length, max: getSettings().maxPositions },
-        note: 'external positions are never adopted, managed, closed or counted in bot PnL',
+        positions: view?.positions ?? [],
+        openJournalEntries: openTrades(),
         at: view?.at ?? Date.now(),
+        note: 'Read-only exchange positions. Legacy journal entries are archival; no positions or orders are managed by this build.'
       });
     } catch (e: any) {
-      // Express 4 does not catch async rejections — answer instead of hanging.
-      res.status(502).json({ error: e?.message || 'position refresh failed' });
+      res.status(502).json({ error: e?.message || 'Position refresh failed' });
     }
   });
 
   r.get('/income', async (req, res) => {
-    const days = numQuery(req.query.days) ?? getSettings().historyDays;
-    try {
-      res.json(await accountService.incomeSummary(days));
-    } catch (e: any) {
-      res.status(502).json({ error: e?.message });
-    }
+    const days = Number(req.query.days) || getSettings().historyDays;
+    try { res.json(await accountService.incomeSummary(days)); }
+    catch (e: any) { res.status(502).json({ error: e?.message || 'Income history unavailable' }); }
   });
 
-  // ---------------- market scanner ----------------
-
-  r.get('/scanner', (req, res) => {
-    const result = scanner.result();
-    if (!result) {
-      return res.json({
-        at: 0,
-        universe: 0,
-        target: scanner.progress().target,
-        analysed: 0,
-        rows: [],
-        selected: scanner.activeSymbols(),
-        opportunities: scanner.opportunities(),
-        progress: scanner.progress(),
-        gate: null,
-        warming: true,
-      });
-    }
-    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
-    const selected = scanner.activeSymbols();
-    const monitored = new Set(selected);
-    res.json({
-      ...result,
-      rows: result.rows.slice(0, limit).map((row) => ({ ...row, inOpportunityZone: monitored.has(row.symbol) })),
-      selected,
-      opportunities: scanner.opportunities(),
-      progress: scanner.progress(),
-      warming: false,
-    });
+  r.get('/trades', (req, res) => {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+    res.json(allTrades().slice(0, limit));
   });
 
-  r.get('/execution/readiness', (_req, res) => res.json(currentExecutionReadiness()));
-
-  /** Historical POC-strategy backtest. This route uses public candles only. */
-  r.post('/backtest/run', mutate, async (req, res) => {
-    const body = req.body || {};
-    const symbol = String(body.symbol || getSettings().symbol).toUpperCase().trim();
-    const days = Number(body.days ?? 30);
-    const startingBalance = Number(body.startingBalance ?? 10_000);
-    const riskPercent = Number(body.riskPercent ?? 1);
-    const feeRate = Number(body.feeRate ?? 0.0004);
-    const slippageBps = Number(body.slippageBps ?? 2);
-    if (!/^[A-Z0-9]{4,24}$/.test(symbol)) return res.status(400).json({ error: 'symbol must be a valid Binance USD-M symbol' });
-    if (!Number.isInteger(days) || days < 1 || days > 90) return res.status(400).json({ error: 'days must be an integer from 1 to 90' });
-    if (!Number.isFinite(startingBalance) || startingBalance < 1 || startingBalance > 1e9) return res.status(400).json({ error: 'startingBalance must be between 1 and 1,000,000,000 USDT' });
-    if (!Number.isFinite(riskPercent) || riskPercent < 0.1 || riskPercent > 5) return res.status(400).json({ error: 'riskPercent must be between 0.1 and 5' });
-    if (!Number.isFinite(feeRate) || feeRate < 0 || feeRate > 0.01) return res.status(400).json({ error: 'feeRate must be between 0 and 0.01' });
-    if (!Number.isFinite(slippageBps) || slippageBps < 0 || slippageBps > 100) return res.status(400).json({ error: 'slippageBps must be between 0 and 100' });
-
-    const endTime = Date.now();
-    const startTime = endTime - days * 86400000;
-    const candles = [] as Awaited<ReturnType<typeof api.historicalKlines>>;
-    let cursor = startTime;
-    let pages = 0;
-    try {
-      while (cursor < endTime && pages < 24) {
-        const page = await api.historicalKlines(symbol, '5m', cursor, endTime, 1500);
-        pages += 1;
-        if (!page.length) break;
-        candles.push(...page.filter((bar) => bar.time >= startTime && bar.closeTime <= endTime));
-        const next = page[page.length - 1].time + 5 * 60_000;
-        if (!(next > cursor)) break;
-        cursor = next;
-      }
-      if (candles.length < getSettings().strategy.lookbackBars + 20) {
-        return res.status(502).json({ error: `Binance returned only ${candles.length} closed candles; need more history to backtest ${symbol}` });
-      }
-      const result = runLiquidityBacktest(
-        candles,
-        getSettings().strategy,
-        {
-          startingBalance,
-          riskPercent,
-          feeRate,
-          slippageBps,
-          dataSource: 'Binance USD-M public 5m klines (OHLCV backtest; no orders)',
-        },
-        symbol,
-      );
-      res.json(result);
-    } catch (e: any) {
-      res.status(502).json({ error: `Backtest candle fetch failed: ${e?.message || e}` });
-    }
+  r.get('/logs', (req, res) => {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+    res.json(getLogs(limit));
   });
-
-  r.post('/scanner/scan', mutate, async (_req, res) => {
-    const result = await scanner.scan();
-    res.json(result ?? { error: 'scan failed — check the activity log' });
-  });
-
-  // ---------------- settings / control ----------------
 
   r.get('/settings', (_req, res) => res.json(publicSettings()));
-
-  /**
-   * Update settings. Switching to LIVE (real money) needs an explicit
-   * `confirmLive: true` in the body — a stray click, a stale tab or a scripted
-   * POST can no longer move real funds by accident.
-   */
   r.post('/settings', mutate, (req, res) => {
     const before = getSettings();
-    const patch = req.body || {};
-    const wantsLive = patch.mode === 'live' && before.mode !== 'live';
-    const resultingMode = patch.mode ?? before.mode;
-    const armsLiveViaSettings = resultingMode === 'live' && patch.autoTrade === true && before.autoTrade !== true;
+    const input = req.body && typeof req.body === 'object' ? req.body : {};
+    const patch: any = {};
 
-    if (patch.mode !== undefined && !['testnet', 'live'].includes(patch.mode)) {
-      return res.status(400).json({ error: 'mode must be testnet | live — simulation was removed' });
-    }
-    if (patch.autoTrade !== undefined && typeof patch.autoTrade !== 'boolean') {
-      return res.status(400).json({ error: 'autoTrade must be true or false' });
-    }
-    if (patch.mode !== undefined && patch.mode !== before.mode && openTrades().length > 0) {
-      // Open trades live on the exchange of THEIR environment; once the mode
-      // flips nothing could monitor, protect or close them.
-      return res.status(409).json({
-        error: `${openTrades().length} bot position(s) are still open in ${before.mode.toUpperCase()} mode — close them (Kill) before switching to ${String(patch.mode).toUpperCase()}`,
-      });
-    }
-    if (resultingMode === 'live' && patch.autoTrade === true && before.autoTrade !== true && !liveControlProtected()) {
-      return res.status(403).json({ error: LIVE_CONTROL_MESSAGE });
-    }
-    if (wantsLive && patch.confirmLive !== true) {
-      return res.status(400).json({
-        error: 'Switching to LIVE places real orders — resend with confirmLive: true after testing on Binance testnet',
-      });
-    }
-    if (armsLiveViaSettings && !wantsLive && patch.confirmLive !== true) {
-      return res.status(400).json({
-        error: 'Arming LIVE auto-trade requires confirmLive: true (normally use POST /api/autotrade)',
-      });
-    }
-    if (patch.symbol !== undefined && !/^[A-Z0-9]{4,24}$/.test(String(patch.symbol).toUpperCase())) {
-      return res.status(400).json({ error: 'symbol must be a Binance USD-M symbol like BTCUSDT' });
-    }
-    if (wantsLive) {
-      // Entering LIVE always lands DISARMED: auto-trade must be switched on
-      // again deliberately (with its own confirmation) before any order is sent.
-      patch.autoTrade = false;
-    }
-
-    const s = updateSettings(patch);
-    if (patch.symbol && patch.symbol !== before.symbol) {
-      emit('log', { level: 'info', msg: `Primary symbol changed to ${s.symbol}` });
-    }
-    const modeChanged = !!patch.mode && patch.mode !== before.mode;
-    if (modeChanged) {
-      if (s.keys[s.mode]?.key && s.keys[s.mode]?.secret) {
-        accountService.invalidate();
-        userStream.start();
-        void accountService.refresh();
-        emit('log', {
-          level: s.mode === 'live' ? 'error' : 'info',
-          msg:
-            s.mode === 'live'
-              ? 'Mode switched to LIVE — real mainnet account armed with auto-trade OFF; enable auto-trade to start executing'
-              : `Mode switched to ${s.mode.toUpperCase()}`,
-        });
-      } else {
-        emit('error', { message: `No API keys configured for ${s.mode} mode` });
-        updateSettings({ mode: before.mode });
-        return res.status(400).json({ error: `No API keys configured for ${s.mode} mode` });
+    if (input.mode !== undefined) {
+      if (!['testnet', 'live'].includes(input.mode)) {
+        return res.status(400).json({ error: 'mode must be testnet or live' });
       }
+      if (input.mode === 'live' && before.mode !== 'live') {
+        if (input.confirmLive !== true) {
+          return res.status(400).json({ error: 'Switching to the LIVE account requires confirmLive: true.' });
+        }
+      }
+      patch.mode = input.mode;
     }
-    const activeKeysChanged =
-      before.keys[s.mode]?.key !== s.keys[s.mode]?.key ||
-      before.keys[s.mode]?.secret !== s.keys[s.mode]?.secret;
-    if (!modeChanged && activeKeysChanged) {
-      // User-stream listen keys and cached account data belong to one API
-      // credential. Replace both atomically from the dashboard's perspective.
+
+    if (input.symbol !== undefined) {
+      if (!/^[A-Z0-9]{4,24}$/.test(String(input.symbol).toUpperCase())) {
+        return res.status(400).json({ error: 'symbol must be a valid USD-M symbol, for example BTCUSDT' });
+      }
+      patch.symbol = String(input.symbol).toUpperCase();
+    }
+    if (input.historyDays !== undefined) patch.historyDays = input.historyDays;
+    if (input.keys !== undefined) patch.keys = input.keys;
+
+    const updated = updateSettings(patch);
+    const modeChanged = updated.mode !== before.mode;
+    const keysChanged = JSON.stringify(updated.keys[updated.mode]) !== JSON.stringify(before.keys[before.mode]);
+    if (modeChanged || keysChanged) {
       accountService.invalidate();
       userStream.stop();
-      userStream.start();
-      if (s.keys[s.mode]?.key && s.keys[s.mode]?.secret) void accountService.refresh();
-      emit('log', {
-        level: 'info',
-        msg: `${s.mode.toUpperCase()} credentials changed — execution stream and account snapshot refreshed`,
-      });
+      if (updated.keys[updated.mode].key && updated.keys[updated.mode].secret) {
+        userStream.start();
+        void accountService.refresh();
+      }
     }
-    if (patch.scanner && JSON.stringify(patch.scanner) !== JSON.stringify(before.scanner)) {
-      // Threshold changes invalidate authorization immediately; a fresh batch
-      // must re-qualify every retained zone under the new contract.
-      scanner.clearOpportunities();
-      scanner.restart();
-      emit('log', {
-        level: 'info',
-        msg: s.scanner.enabled ? 'Scanner settings applied — rescanning the market' : 'Scanner disabled — manual symbol mode only',
-      });
-      if (s.scanner.enabled) void scanner.scan();
-      else scanner.clearOpportunities();
-    }
-    if (patch.autoScan === false && before.autoScan !== false) scanner.clearOpportunities();
-    if (patch.autoScan === true && before.autoScan === false && s.scanner.enabled) void scanner.scan();
-    if (patch.strategy && JSON.stringify(patch.strategy) !== JSON.stringify(before.strategy)) {
-      engine.resetStrategy();
-      emit('log', { level: 'info', msg: 'Liquidity strategy settings changed — rebuilding pending 5m setup state without replaying entries' });
-    }
-    if (patch.autoTrade !== undefined && patch.autoTrade !== before.autoTrade) {
-      emit('log', { level: patch.autoTrade ? 'win' : 'error', msg: `Auto-trade ${patch.autoTrade ? 'ENABLED' : 'DISABLED'}` });
+    if (updated.symbol !== before.symbol) {
+      emit('log', { level: 'info', msg: `Market display symbol changed to ${updated.symbol}` });
+      marketStream.subscribe(engine.activeSymbols());
+      void accountService.refresh();
     }
     res.json(publicSettings());
   });
 
-  /**
-   * Auto-trade master switch. Enabling it while LIVE is a real-money action and
-   * therefore needs `confirmLive: true` too.
-   */
-  r.post('/autotrade', mutate, (req, res) => {
-    if (typeof req.body?.enabled !== 'boolean') {
-      return res.status(400).json({ error: 'enabled must be true or false' });
-    }
-    const enabled: boolean = req.body.enabled;
-    const mode = getSettings().mode;
-    if (enabled && mode === 'live' && !liveControlProtected()) {
-      return res.status(403).json({ error: LIVE_CONTROL_MESSAGE });
-    }
-    if (enabled && mode === 'live' && req.body?.confirmLive !== true) {
-      return res.status(400).json({
-        error: 'Enabling auto-trade in LIVE mode executes real orders — resend with confirmLive: true',
-      });
-    }
-    updateSettings({ autoTrade: enabled });
-    emit('log', {
-      level: enabled ? (mode === 'live' ? 'error' : 'win') : 'info',
-      msg: `Auto-trade ${enabled ? 'ENABLED' : 'DISABLED'}${enabled && mode === 'live' ? ' in LIVE mode — real orders active' : ''}`,
-    });
-    emit('status', { autoTrade: enabled });
-    res.json({ autoTrade: enabled, execution: currentExecutionReadiness() });
-  });
-
-  /** Close ONE bot-owned position at market (external positions are never touched). */
-  r.post('/positions/close', mutate, async (req, res) => {
-    const id = String(req.body?.id || '');
-    const trade = openTrades().find((t) => t.id === id);
-    if (!trade) return res.status(404).json({ error: 'No open bot position with that id' });
-    const confirmed = await trader.closeByMarket(trade, 'KILL');
-    void accountService.refresh();
-    const payload = {
-      ok: confirmed,
-      id,
-      closed: allTrades().find((t) => t.id === id) || null,
-      openTrades: openTrades(),
-      error: confirmed ? undefined : 'Binance did not confirm the close; the trade remains managed and protected',
-    };
-    // Never tell the frontend a real close succeeded when Binance did not
-    // confirm the expected position delta.
-    res.status(confirmed ? 200 : 502).json(payload);
-  });
-
-  /**
-   * Emergency stop: DISARM first, then flatten. Closing positions while
-   * auto-trade stays armed would let the very next signal re-enter within
-   * minutes; re-arm deliberately once the situation is understood.
-   */
-  r.post('/kill', mutate, async (_req, res) => {
-    if (getSettings().autoTrade) {
-      updateSettings({ autoTrade: false });
-      emit('log', { level: 'error', msg: 'KILL — auto-trade DISARMED; closing every bot position' });
-      emit('status', { autoTrade: false });
-    }
-    const attempted = openTrades().length;
-    const closed = await trader.kill();
-    void accountService.refresh();
-    const ok = closed === attempted;
-    res.status(ok ? 200 : 502).json({
-      ok,
-      attempted,
-      closed,
-      openTrades: openTrades(),
-      error: ok ? undefined : `${attempted - closed} bot position(s) were not confirmed closed and remain managed`,
-    });
-  });
-
-  // ---------------- history / stats ----------------
-
-  r.get('/trades', (req, res) => {
-    const limit = Math.min(500, Number(req.query.limit) || 100);
-    res.json(allTrades().slice(0, limit));
-  });
-
-  r.get('/signals', (req, res) => {
-    const limit = Math.min(500, Number(req.query.limit) || 100);
-    const sym = String(req.query.symbol || '').toUpperCase();
-    const rows = allSignals();
-    res.json((sym ? rows.filter((x) => x.symbol === sym) : rows).slice(0, limit));
-  });
-
-  r.get('/stats', (_req, res) => {
-    const stats = computeStats();
-    const view = accountService.get();
+  // No order, close, kill, strategy, scanner, signal, or backtest mutation routes
+  // are installed. Existing exchange positions/orders are untouched and require
+  // manual review in Binance after legacy journal migration.
+  r.get('/limits', (_req, res) => res.json({ limiter: limiter.status(), telemetry: api.telemetry, candles: candleStore.stats() }));
+  r.get('/diagnostics', (_req, res) => {
+    const market = engine.state();
     res.json({
-      ...stats,
-      // Binance-verified account figures (fees / funding / realised PnL)
-      binance: view
-        ? {
-            source: view.source,
-            equity: view.equity,
-            walletBalance: view.walletBalance,
-            unrealizedPnl: view.unrealizedPnl,
-            roiPct: view.roiPct,
-            fees: view.bot.fees,
-            funding: view.bot.funding,
-            realizedPnlBot: view.bot.realizedPnl,
-            income: view.income,
-          }
-        : null,
-    });
-  });
-
-  r.get('/mtf', async (req, res) => {
-    try {
-      const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase() : undefined;
-      res.json(await mtfDashboard(symbol));
-    } catch (e: any) {
-      res.status(500).json({ error: e?.message });
-    }
-  });
-
-  // ---------------- diagnostics & limits ----------------
-
-  r.get('/limits', (_req, res) => {
-    res.json({
-      limiter: limiter.status(),
-      telemetry: api.telemetry,
-      candles: candleStore.stats(),
-      note: 'Binance USD-M weight limit 2400/min — VelocityX plans at 95% and distributes it across work areas',
-    });
-  });
-
-  r.get('/diagnostics', async (_req, res) => {
-    const ping = await api.ping();
-    const s = getSettings();
-    const st = engine.state();
-    res.json({
+      mode: getSettings().mode,
+      entriesEnabled: false,
       feed: feedInfo(),
-      ping,
-      ws: {
+      streams: {
         market: { connected: marketStream.isConnected, lastMessageAt: marketStream.lastMessage() },
-        user: { connected: userStream.isConnected, lastMessageAt: userStream.lastMessage(), mode: s.mode },
+        user: { connected: userStream.isConnected, lastMessageAt: userStream.lastMessage() },
       },
-      engine: {
-        activeSymbols: engine.activeSymbols(),
-        lastTickAt: engine.lastTick(),
-        lastClosedCandleTime: st?.lastClosedCandleTime ?? 0,
-      },
-      scanner: {
-        at: scanner.result()?.at ?? 0,
-        universe: scanner.result()?.universe ?? 0,
-        target: scanner.result()?.target ?? scanner.progress().target,
-        analysed: scanner.result()?.analysed ?? 0,
-        selected: scanner.activeSymbols(),
-        opportunities: scanner.opportunities(),
-        progress: scanner.progress(),
-      },
-      execution: currentExecutionReadiness(),
+      engine: { activeSymbols: engine.activeSymbols(), lastTickAt: engine.lastTick(), lastClosedCandleTime: market?.lastClosedCandleTime ?? 0 },
+      openTrades: openTrades().length,
+      accountAt: accountService.get()?.at ?? 0,
       limiter: limiter.status(),
-      account: { source: accountService.get()?.source ?? null, at: accountService.get()?.at ?? 0, errors: accountService.get()?.errors ?? [] },
       now: Date.now(),
     });
   });
 
-  // Unknown API route → JSON 404 (never the SPA fallback).
   r.use((_req, res) => res.status(404).json({ error: 'Unknown API endpoint' }));
-
   return r;
 }

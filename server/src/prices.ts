@@ -1,10 +1,8 @@
 /**
  * Last market price per symbol.
  *
- * A tiny leaf module (no imports) so every part of the server can read the
- * freshest price the feed produced without importing the trader (which would
- * create a dependency cycle with the account/PnL layer). Written by the market
- * stream, read by the executor, the account service and the dashboard.
+ * A tiny leaf module so every part of the read-only server can use the latest
+ * market price without a dependency on exchange sockets.
  */
 
 const prices = new Map<string, number>();

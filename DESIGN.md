@@ -1,155 +1,44 @@
-# 🌊 VelocityX — Dashboard UI/UX system
+# Architecture — read-only baseline
 
-This document describes the VelocityX dashboard layout, retained P&L chart, calm realtime updates, accessibility, and responsive behaviour.
+## Process shape
 
----
+- **Server (`server/src`)** — Express REST API, a WebSocket broadcast hub, public market data, read-only signed Binance account reads, and small file-backed settings/trade archive.
+- **Client (`client/src`)** — React dashboard for market status, account values, open exchange positions, archive records and connection settings.
+- **No execution layer** — strategy, signals, scanner, sizing, order writing, conditional-order management, position reconciliation and backtesting are absent.
 
-## 1. Design principles
+## Server modules
 
-| # | Principle | How it appears |
-|---|---|---|
-| 1 | **Metrics before market charts** | Dashboard cards show account, risk, scanner, trend and execution data without a BTCUSDT candlestick stage. |
-| 2 | **Keep the useful P&L chart** | The cumulative bot P&L rail remains sticky on desktop and becomes a collapsible sheet on smaller screens. |
-| 3 | **Calm by default** | Motion is off on first load. Existing legacy `vx.motion` preferences are ignored through the new `vx.motion.v2` key. |
-| 4 | **Realtime without blinking** | Values update in place, do not colour-flash, and stale HTTP responses cannot overwrite newer WebSocket/account data. |
-| 5 | **Never blank the desk** | Each active view and the P&L dock are isolated by an `ErrorBoundary`. |
-| 6 | **Truthful data** | Live and unreachable feeds are labelled; historical OHLCV backtests and synthetic test fixtures are explicitly identified and never enter live execution or bot P&L. |
-
----
-
-## 2. Information architecture
-
-```
-Topbar       brand · mode · feed · price · equity · open P&L · KILL
-Nav row      Dashboard | Scanner | Positions | Trades | Settings
-Ticker       scanner ranking marquee
-Shell        responsive content + retained P&L rail/sheet
-Footer       connection state + risk reminder
-```
-
-The previous **Chart** navigation item and its BTCUSDT candlestick/EMA stage were removed. The client no longer imports `lightweight-charts` or requests `/api/chart`. Signal history remains available under **Trades**.
-
-Views:
-
-* **Dashboard** — feed status, hero, KPIs, managed positions, scanner, rolling realized-journal statistics, **MTF context gauge** (EMA11/EMA34 across configured intervals; not an entry gate), **five-R execution rules**, engine health and activity. A full-width alert banner (`role="alert"`) appears only while LIVE auto-trading is armed.
-* **Scanner** — live market-batch progress, retained liquid-symbol monitor, backend execution-readiness bridge, activity ranking, trade gates and dedicated two-sided 5m sweep monitor.
-* **Positions** — Binance account ledger, bot positions with the active 3TP/5R ladder, external read-only positions, closed trades, fees and funding.
-* **Trades** — journal, signals and executor activity.
-* **Settings** — connection (mode, keys, **API token**), sizing, scanner, liquidity strategy / historical backtest, guardrail and motion controls. Arming LIVE asks for an explicit confirmation before the request is sent.
-
----
-
-## 3. Retained P&L chart
-
-`client/src/components/PnlDock.tsx`, `PnlChart.tsx`, and `client/src/pnl.ts`
-
-The chart is bot-specific:
-
-```
-start equity = current equity − live unrealised − recorded realised P&L
-closed trade = one realised step
-open managed position = live unrealised tail
-external position = excluded
-```
-
-It retains:
-
-* 24H / 7D / 30D / ALL ranges;
-* realised and unrealised totals;
-* trade histogram and cumulative curve;
-* win rate, average R, best/worst result and maximum drawdown;
-* crosshair details when motion is explicitly enabled;
-* an explanatory empty state before the first closed trade.
-
-Responsive behaviour:
-
-| Viewport | P&L behaviour |
+| Module | Responsibility |
 |---|---|
-| Desktop (`>1080px`) | Sticky side rail beside the active view. |
-| Tablet / phone | Fixed bottom sheet, collapsed by default; tap the P&L control or sheet header to open it. |
+| `index.ts` | Server bootstrap, market/account streams and shutdown |
+| `api.ts` | Read-only dashboard routes and connection settings |
+| `auth.ts` | Optional dashboard token and settings mutation rate limiting |
+| `binance.ts` | Public klines/time and signed account, positions, income and listen-key reads |
+| `streams.ts` | Market WebSockets and read-only account updates |
+| `candles.ts` | In-memory OHLCV cache |
+| `engine.ts` | Market-data refresh heartbeat only; no signal generation |
+| `account.ts` | Binance account, position and income snapshots |
+| `settings.ts` | Mode, display symbol, account keys and income-history range; migrates away old keys |
+| `store.ts` | Strategy-neutral trade archive; strips obsolete strategy/order fields on load |
+| `ratelimit.ts` | Conservative request-weight budget for data reads |
+| `broadcast.ts` | Server activity and realtime dashboard events |
+| `prices.ts` | Latest market price per symbol |
 
-The default motion-off state makes chart updates immediate and static instead of morphing or pulsing.
+## Data and migration
 
----
+- `settings.json` is rewritten to a small allowlisted shape at startup. Old scanner, strategy, auto-trade, sizing, target/stop and execution-policy values are not retained.
+- `trades.json` is migrated to a strategy-neutral archive with identity, side, status, quantity, entry/close timestamps, P&L, fees, funding and account mode. Legacy target, stop, signal, order-ID and strategy fields are stripped.
+- Trade history is not used to authorize exchange activity. Open legacy rows remain archival and are shown with a manual-review warning.
+- `signals.json`, if present from an old release, is not read or written by this build.
+- Existing exchange positions and conditional orders are never touched. This build will not monitor, reconcile, cancel, restore or close them.
+- Keys supplied through environment variables are not written into the settings file. Dashboard values are masked before serialization.
 
-## 4. Stable realtime updates
+## API surface
 
-`client/src/App.tsx` separates data transport from presentation:
+The API provides health/status, settings, account, positions, income, trade archive, logs, limits and diagnostics. Removed scanner, strategy, signal, backtest, auto-trade, order, close and kill routes return JSON 404 responses.
 
-* loaders return real promises, so actions wait for refresh completion;
-* account snapshots merge by `at`, and older snapshots are ignored;
-* compact `/status.account` data cannot erase fields from the full `/account` response;
-* unchanged account, position, scanner, trade, signal, statistics and log payloads preserve their previous state object;
-* a WebSocket price received while `/status` is in flight wins over that stale HTTP price;
-* status logs merge by stable identity instead of disappearing during a poll;
-* the client makes no `/api/chart` request.
+`VX_API_TOKEN` protects every API route except `/api/health`, and the WebSocket hub. Bind and reverse-proxy configuration should be chosen for the installation environment.
 
-The server’s `/status.account` snapshot includes `mode`, maintenance margin and latency fields required by the client.
+## Deliberate extension boundary
 
----
-
-## 5. Motion and blink prevention
-
-Motion state is initialized before React paints:
-
-```html
-<html data-motion="off">
-```
-
-The application stores explicit choices under `vx.motion.v2`, defaulting to `false`. Therefore an older browser value that previously forced motion on cannot keep the dashboard blinking after this update.
-
-When motion is off:
-
-* CSS animation and transition durations collapse to a no-op;
-* animated numbers paint their target immediately;
-* the liquid canvas renders one static frame;
-* P&L curve updates render immediately;
-* live values have no up/down flash classes;
-* the boot indicator is static.
-
-The background canvas persists through tab visibility changes instead of being cleared and recreated. Users who want ambient animation can enable it from the header.
-
----
-
-## 6. Glass and tokens
-
-`client/src/styles/tokens.css` defines surfaces, strokes, radii, colours, gradients, shadows, timing and layout dimensions. `glass.css` composes each panel from a translucent tint, blur/saturation, border and depth shadows.
-
-`prefers-reduced-transparency` swaps blurred panels for more opaque surfaces. `prefers-reduced-motion` remains authoritative even if the in-app Motion switch is enabled.
-
----
-
-## 7. Accessibility and robustness
-
-* Tabs expose `role="tablist"` and `aria-selected`.
-* Interactive controls have visible `:focus-visible` styling.
-* The mobile P&L sheet header supports Enter and Space as well as pointer input.
-* Numeric fields use tabular numerals and layouts use `minmax(0, 1fr)`.
-* Feed labels never claim Binance is live while the exchange is unreachable.
-* UI smoke tests assert five navigation items, absence of the BTCUSDT chart and `/api/chart` requests, presence of the P&L chart, market-context MTF gauge, five-R execution rules, absence of the live banner in testnet mode, the API-token field on the connection tab, default motion-off state, no flash classes, and no `NaN` / `Infinity` output. The Strategy & Backtest tab labels the historical simulator as no-orders and discloses OHLCV/fee assumptions.
-
----
-
-## 8. Production hardening (UI contract)
-
-| Surface | Behaviour |
-|---|---|
-| Live trading | Red `role="alert"` banner while LIVE auto-trading is armed; the auto-trade switch asks for confirmation in LIVE mode and sends `confirmLive`. Entering LIVE always lands disarmed (server forces `autoTrade: false`), so arming execution is a second, deliberate action. |
-| Auth | The API token is stored in browser storage and attached to REST (`X-VX-Token`) and WS (`?token=`) calls; a 401 renders a single actionable toast. |
-| Errors | Every panel is inside an `ErrorBoundary`; server-side failures arrive as `error` events and become toasts plus activity-feed rows. |
-| Data honesty | Testnet/live/unreachable states are labelled and every account number is read from Binance; external positions are shown read-only and never merged into bot numbers. |
-
-## 9. Extending
-
-```tsx
-<Panel title="My module" icon={<IconPulse />} meta="live">
-  <div className="grid-4" data-reveal-group>
-    <article className="panel kpi tone-violet">…</article>
-  </div>
-</Panel>
-```
-
-* New tokens → `tokens.css`; surfaces → `glass.css`; responsive layout → `layout.css`.
-* Reusable elements live in `motion/primitives.tsx`.
-* P&L/sparkline path helpers live in `motion/chart.ts`.
-* Do not attach an animation to ordinary polling updates. Continuous motion must remain opt-in.
+A future strategy should be introduced only after the operator supplies its rules. Nothing in this baseline provides defaults for market selection, signals, entries, position sizing, leverage, protective orders, exits, retries or reversals.

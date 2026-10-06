@@ -5,22 +5,18 @@
  *           over TWO sockets that are managed as one stream:
  *             /public/stream  <symbol>@bookTicker → live prices (PnL, dashboard)
  *             /market/stream  <symbol>@kline_5m   → candles into the candle store
- *           for every symbol the engine watches (scanner picks + open trades).
- *           Re-subscribed automatically when the watched set changes. The
- *           stream only counts as connected when BOTH sockets are up, and as
- *           fresh when the quieter one is.
+ *           for the selected dashboard symbol. Re-subscribed automatically
+ *           when the watched set changes. The stream only counts as connected
+ *           when BOTH sockets are up, and as fresh when the quieter one is.
  *
- *  user   : listenKey user-data stream (testnet/live) →
- *             ORDER_TRADE_UPDATE → market entry / exit fills, commission, PnL
- *             ALGO_UPDATE        → stop-loss / take-profit trigger results
- *             ACCOUNT_UPDATE     → realtime equity / margin balance
- *             MARGIN_CALL / listenKey expiry handled with backoff + keepalive.
+ *  user   : listenKey stream (testnet/live) → account updates and margin alerts.
+ *           It is read-only: order/fill events are not acted upon.
  */
 import WebSocket from 'ws';
 import { api, MarketChannel, marketStreamUrl, userStreamUrls } from './binance';
 import { getSettings } from './settings';
-import { trader } from './trader';
 import { accountService } from './account';
+import { setPrice } from './prices';
 import { candleStore } from './candles';
 import { emit } from './broadcast';
 
@@ -202,7 +198,7 @@ export class MarketStream {
           const price = Number(d.b) || Number(d.a);
           if (Number.isFinite(price) && price > 0) {
             this.prices.set(symbol, price);
-            trader.onPrice(price, symbol);
+            setPrice(symbol, price);
             const now = Date.now();
             if (now - (this.lastEmit.get(symbol) ?? 0) > 400) {
               this.lastEmit.set(symbol, now);
@@ -353,8 +349,6 @@ export class UserDataStream {
         console.log(`[ws] user stream connected (${mode})`);
         emit('stream', { user: true, mode });
         this.armTimers(generation, ws);
-        // Fills may have happened while the socket was down — settle every open trade now.
-        void trader.reconcile().catch(() => {});
       });
       ws.on('ping', () => { this.lastActivityAt = Date.now(); });
       ws.on('message', (raw) => {
@@ -365,13 +359,6 @@ export class UserDataStream {
           const m = parsed?.data && parsed?.stream ? parsed.data : parsed;
           this.lastMessageAt = this.lastActivityAt = Date.now();
           switch (m.e) {
-            case 'ORDER_TRADE_UPDATE':
-              trader.onOrderUpdate(m);
-              break;
-            case 'ALGO_UPDATE':
-              // a stop-loss / take-profit conditional order fired (or died)
-              trader.onAlgoUpdate(m);
-              break;
             case 'ACCOUNT_UPDATE':
               // realtime wallet balance / unrealised PnL straight from Binance
               accountService.onUserStreamAccount(m);
