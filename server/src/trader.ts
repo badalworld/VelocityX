@@ -134,9 +134,14 @@ class Trader {
   private ladderFailures = 0;
   /** Production runtime gate (feed/account/stream freshness), wired at boot. */
   private runtimeGate: (() => ExecutionGate) | null = null;
+  /** Cooldown hook wired by engine so stop-outs suppress immediate revenge re-entries. */
+  private cooldownHook: ((symbol: string) => void) | null = null;
 
   setRuntimeGate(fn: (() => ExecutionGate) | null): void {
     this.runtimeGate = fn;
+  }
+  setCooldownHook(fn: ((symbol: string) => void) | null): void {
+    this.cooldownHook = fn;
   }
 
   private gate(): ExecutionGate {
@@ -895,6 +900,9 @@ class Trader {
     if (reason !== 'EXTERNAL' && t.realizedPnl !== 0) t.result = t.realizedPnl > 0 ? 'WIN' : 'LOSS';
     else if (reason === 'SL_PARTIAL' || reason === 'TP3' || reason === 'TP5') t.result = 'WIN';
     else if (reason === 'SL') t.result = 'LOSS';
+    if (t.result === 'LOSS') {
+      try { this.cooldownHook?.(t.symbol); } catch { /* hook best-effort */ }
+    }
     await this.refreshFunding(t);
     saveTrade(t);
     await this.cancelLadder(t);

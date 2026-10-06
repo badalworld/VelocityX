@@ -399,10 +399,16 @@ export interface LiquidityStrategySettings {
   lookbackBars: number;
   profileBins: number;
   setupExpiryBars: number;
+  retestWindowBars: number;
   sweepMinAtr: number;
+  sweepVolumeMultiplier: number;
   retestToleranceAtr: number;
+  retestCloseStrength: number;
   stopBufferAtr: number;
   maxStopAtr: number;
+  trendFilterEma: number;
+  cooldownBarsAfterLoss: number;
+  pocVolumeMinRatio: number;
 }
 
 export interface BacktestTrade {

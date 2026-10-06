@@ -22,27 +22,43 @@ const config = {
   lookbackBars: 30,
   profileBins: 24,
   setupExpiryBars: 24,
+  retestWindowBars: 12,
   sweepMinAtr: 0.05,
-  retestToleranceAtr: 0.2,
+  sweepVolumeMultiplier: 0.5,      // permissive for synthetic fixture
+  retestToleranceAtr: 0.3,
+  retestCloseStrength: 0.5,
   stopBufferAtr: 0.1,
   maxStopAtr: 20,
+  trendFilterEma: 0,               // off for synthetic test
+  cooldownBarsAfterLoss: 0,
+  pocVolumeMinRatio: 0.5,          // permissive (uniform prior bars produce ratio ~1.0)
 };
 const BAR_MS = 5 * 60_000;
 function candle(i, open, high, low, close, volume = 100) {
   return { time: i * BAR_MS, closeTime: i * BAR_MS + BAR_MS - 1, open, high, low, close, volume };
 }
+// Tight-range prior bars create a flat profile (POC ~mid of range). The sweep
+// is a 0.3-ATR excursion; reclaim and retest candles never create a new sweep.
 function longPrefix() {
-  const bars = Array.from({ length: 30 }, (_, i) => candle(i, 101, 102, 100, 101, 100));
-  bars.push(candle(30, 101, 101.4, 99, 100.5, 140)); // sweep prior low; close back inside
-  bars.push(candle(31, 100.6, 101.4, 100.4, 101.2, 110)); // close above locked POC
-  bars.push(candle(32, 100.8, 101.3, 100, 101, 120)); // subsequent bullish POC retest
+  const bars = [];
+  for (let i = 0; i < 30; i++) bars.push(candle(i, 100.0, 100.2, 99.8, 100.0, 100));
+  // bar 30: sweep down (low 99.5 < 99.8 - 0.05*0.4; close 99.9 > 99.8 back inside)
+  bars.push(candle(30, 100.0, 100.15, 99.5, 99.9, 200));
+  // bar 31: reclaim above POC, no new sweep above 100.2
+  bars.push(candle(31, 99.9, 100.15, 99.85, 100.1, 120));
+  // bar 32: strong bullish retest — low 99.8 tags POC zone, close 100.2 (top of range)
+  bars.push(candle(32, 100.1, 100.2, 99.8, 100.2, 130));
   return bars;
 }
 function shortPrefix() {
-  const bars = Array.from({ length: 30 }, (_, i) => candle(i, 101, 102, 100, 101, 100));
-  bars.push(candle(30, 101, 103, 100.6, 101.5, 140)); // sweep prior high; close back inside
-  bars.push(candle(31, 101, 101.4, 99.5, 99.8, 110)); // close below locked POC
-  bars.push(candle(32, 100.2, 100.3, 99.5, 99.8, 120)); // bearish POC retest
+  const bars = [];
+  for (let i = 0; i < 30; i++) bars.push(candle(i, 100.0, 100.2, 99.8, 100.0, 100));
+  // bar 30: sweep up (high 100.5 > 100.2 + min excursion; close 100.1 < 100.2 back inside)
+  bars.push(candle(30, 100.0, 100.5, 99.85, 100.1, 200));
+  // bar 31: reclaim below POC (~99.81), no new sweep below 99.8
+  bars.push(candle(31, 100.1, 100.15, 99.7, 99.75, 120));
+  // bar 32: strong bearish retest — high 99.85 tags POC zone, close 99.65 in bottom of range
+  bars.push(candle(32, 99.75, 99.85, 99.6, 99.65, 130));
   return bars;
 }
 
@@ -74,11 +90,14 @@ function shortPrefix() {
   assert(shortSignal?.stopPrice > shortSignal?.sweepExtreme, 'short stop is beyond the sweep wick');
 
   const ambiguous = longPrefix();
-  ambiguous[30] = candle(30, 101, 103, 99, 101, 100); // sweeps both prior extrema
+  ambiguous[30] = candle(30, 100.0, 100.5, 99.5, 100.0, 200); // sweeps both prior extrema
+  // Ensure the reclaim/retest bars don't create additional fresh sweeps.
+  ambiguous[31] = candle(31, 100.0, 100.15, 99.85, 100.0, 120);
+  ambiguous[32] = candle(32, 100.0, 100.15, 99.85, 100.0, 130);
   assert(detectLiquiditySweep(ambiguous, 30, config) === null, 'ambiguous two-sided sweep is rejected');
 
   const invalid = longPrefix();
-  invalid[31] = candle(31, 100, 100.5, 98.7, 98.9, 100); // trades through stop and fails to reclaim prior low
+  invalid[31] = candle(31, 99.9, 99.95, 99.35, 99.4, 100); // trades through sweep low (99.5 - 0.1*ATR) and closes below swept level
   const invalidEngine = new LiquiditySweepStrategy();
   invalidEngine.process('INVALIDUSDT', invalid, 30, config);
   invalidEngine.process('INVALIDUSDT', invalid, 31, config);

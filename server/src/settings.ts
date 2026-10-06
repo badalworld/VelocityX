@@ -45,14 +45,26 @@ export interface LiquidityStrategySettings {
   profileBins: number;
   /** Pending setup expires this many bars after its sweep. */
   setupExpiryBars: number;
+  /** Maximum bars allowed between POC reclaim and the retest rejection. */
+  retestWindowBars: number;
   /** Minimum excursion beyond the prior high/low, in ATR units. */
   sweepMinAtr: number;
+  /** Sweep candle volume must exceed prior-lookback average volume by this multiple (1.0 = no filter). */
+  sweepVolumeMultiplier: number;
   /** Maximum distance from POC considered a retest, in ATR units. */
   retestToleranceAtr: number;
+  /** Retest candle must close at least this fraction of its range back in our direction (0..1). */
+  retestCloseStrength: number;
   /** Stop buffer beyond the sweep wick, in ATR units. */
   stopBufferAtr: number;
   /** Skip a retest if sweep-extreme risk is wider than this many ATRs. */
   maxStopAtr: number;
+  /** Optional higher-timeframe bias filter: only longs above EMA200, shorts below (0 = off). */
+  trendFilterEma: number;
+  /** Bars of trading pause after a stop-out to prevent revenge trades. */
+  cooldownBarsAfterLoss: number;
+  /** Minimum ratio: POC-bin volume / average bin volume in profile (1.0 = any POC accepted). */
+  pocVolumeMinRatio: number;
 }
 
 export interface Settings {
@@ -127,10 +139,16 @@ export const DEFAULT_SETTINGS: Settings = {
     lookbackBars: 30,
     profileBins: 24,
     setupExpiryBars: 24,
+    retestWindowBars: 8,
     sweepMinAtr: 0.05,
-    retestToleranceAtr: 0.2,
+    sweepVolumeMultiplier: 1.1,
+    retestToleranceAtr: 0.25,
+    retestCloseStrength: 0.55,
     stopBufferAtr: 0.1,
     maxStopAtr: 6,
+    trendFilterEma: 200,
+    cooldownBarsAfterLoss: 6,
+    pocVolumeMinRatio: 1.2,
   },
 
   emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
@@ -254,10 +272,16 @@ function sanitize(s: Settings): Settings {
   strategy.lookbackBars = Math.round(clamp(num(strategy.lookbackBars, 30), 10, 250));
   strategy.profileBins = Math.round(clamp(num(strategy.profileBins, 24), 8, 100));
   strategy.setupExpiryBars = Math.round(clamp(num(strategy.setupExpiryBars, 24), 1, 288));
+  strategy.retestWindowBars = Math.round(clamp(num(strategy.retestWindowBars, 8), 1, 48));
   strategy.sweepMinAtr = clamp(num(strategy.sweepMinAtr, 0.05), 0, 2);
-  strategy.retestToleranceAtr = clamp(num(strategy.retestToleranceAtr, 0.2), 0, 2);
+  strategy.sweepVolumeMultiplier = clamp(num(strategy.sweepVolumeMultiplier, 1.1), 0.5, 5);
+  strategy.retestToleranceAtr = clamp(num(strategy.retestToleranceAtr, 0.25), 0, 2);
+  strategy.retestCloseStrength = clamp(num(strategy.retestCloseStrength, 0.55), 0.2, 0.95);
   strategy.stopBufferAtr = clamp(num(strategy.stopBufferAtr, 0.1), 0, 2);
   strategy.maxStopAtr = clamp(num(strategy.maxStopAtr, 6), 0.1, 30);
+  strategy.trendFilterEma = Math.round(clamp(num(strategy.trendFilterEma, 200), 0, 1000));
+  strategy.cooldownBarsAfterLoss = Math.round(clamp(num(strategy.cooldownBarsAfterLoss, 6), 0, 144));
+  strategy.pocVolumeMinRatio = clamp(num(strategy.pocVolumeMinRatio, 1.2), 0.5, 5);
 
   // Simulation was removed as a trading mode: paper configs from env/file/API migrate
   // to LIVE. Historical backtesting is a separate, isolated, no-orders feature.

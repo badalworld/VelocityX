@@ -203,11 +203,20 @@ export function runLiquidityBacktest(
     return result;
   };
 
+  const cooldownBars = Math.max(0, Math.floor((strategy as any).cooldownBarsAfterLoss ?? 6));
+  const applyCooldownIfLoss = (pos: SimPosition, index: number, reason: BacktestTrade['closeReason']) => {
+    if ((reason === 'SL' || (reason === 'SL_PARTIAL' && pos.netPnl < 0)) && cooldownBars > 0) {
+      engine.setCooldown(symbol, index, cooldownBars);
+    }
+  };
+
   const managePosition = (pos: SimPosition, bar: Candle, index: number): boolean => {
     const stop = stopTouched(pos, bar);
     if (stop.hit) {
       bookExit(pos, pos.remainingQty, stop.basePrice, true);
-      closeTrade(pos, index, pos.tpHits.length ? 'SL_PARTIAL' : 'SL');
+      const reason: BacktestTrade['closeReason'] = pos.tpHits.length ? 'SL_PARTIAL' : 'SL';
+      closeTrade(pos, index, reason);
+      applyCooldownIfLoss(pos, index, reason);
       return true;
     }
 
@@ -215,6 +224,7 @@ export function runLiquidityBacktest(
       const level = pos.nextTarget;
       const target = pos.entryPrice + pos.direction * pos.riskDistance * level;
       if (!targetTouched(pos, bar, target)) break;
+      // 20% of original per leg; final leg is whatever remains.
       const tranche = level === 5 ? pos.remainingQty : Math.min(pos.qty * 0.2, pos.remainingQty);
       bookExit(pos, tranche, target, false);
       pos.tpHits.push(level);
@@ -232,6 +242,7 @@ export function runLiquidityBacktest(
       if (movedStopTouched) {
         bookExit(pos, pos.remainingQty, pos.currentStop, true);
         closeTrade(pos, index, 'SL_PARTIAL');
+        applyCooldownIfLoss(pos, index, 'SL_PARTIAL');
         return true;
       }
     }
