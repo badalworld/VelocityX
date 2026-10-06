@@ -133,7 +133,11 @@ export function saveTrade(t: Trade): void {
   const idx = trades.findIndex((x) => x.id === t.id);
   if (idx >= 0) trades[idx] = t;
   else trades.unshift(t);
-  if (trades.length > 1000) trades.length = 1000;
+  // Cap the journal, but only ever drop CLOSED history — an OPEN trade is the
+  // bot's record of a live exchange position and must never fall off the end.
+  for (let i = trades.length - 1; i >= 0 && trades.length > 1000; i--) {
+    if (trades[i].status !== 'OPEN') trades.splice(i, 1);
+  }
   writeJson(TRADES_FILE, trades);
 }
 
