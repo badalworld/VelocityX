@@ -150,7 +150,7 @@ export default function Overview({
           </h1>
           <p className="hero-sub">
             Equity, PNL, ROI, fees and funding come straight from Binance. The scanner ranks the whole USD-M universe by
-            volatility and only trending markets reach the executor — up to {maxPos} bot positions, nothing else.
+            active liquid markets enter the monitor; 5m sweep/POC retest conditions alone create signals — up to {maxPos} bot positions, nothing else.
           </p>
         </div>
 
@@ -251,7 +251,7 @@ export default function Overview({
           </div>
           <div className="kpi-foot">
             <span className="hint">
-              RR 1 : {fmt(stats?.rrRatio ?? 0, 2)} · break-even {fmt(stats?.breakevenRate ?? 0, 1)}%
+              {fmt(stats?.rrRatio ?? 5, 0)}R final target · staged exits
             </span>
           </div>
           <span className="kpi-glow" />
@@ -274,6 +274,8 @@ export default function Overview({
             <span className="chip green">TP1 {stats?.tp1Count ?? 0}</span>
             <span className="chip green">TP2 {stats?.tp2Count ?? 0}</span>
             <span className="chip green">TP3 {stats?.tp3Count ?? 0}</span>
+            <span className="chip green">TP4 {stats?.tp4Count ?? 0}</span>
+            <span className="chip cyan">TP5 {stats?.tp5Count ?? 0}</span>
             <span className="chip red">SL {stats?.slCount ?? 0}</span>
           </div>
           <span className="kpi-glow" />
@@ -288,14 +290,13 @@ export default function Overview({
         <ScannerPanel scan={scan} onScan={onScan} scanning={scanning} />
         <Panel
           title="Top Picks"
-          sub="trending · high volatility"
+          sub="liquid markets · sweep monitor"
           icon={<IconTrend />}
           meta={<span className="chip green">{(scan?.rows ?? []).filter((r) => r.tradable).length} tradable</span>}
         >
           <TopPicks scan={scan} />
           <div className="hint mt">
-            Scan runs every {scan?.gate ? '60' : '—'}s inside the 95% Binance weight budget — it never competes with the
-            engine, the account poller or the executor.
+            Scan runs every {scan?.gate ? '60' : '—'}s inside the 95% Binance weight budget — it only selects liquid markets to watch; it does not choose trade direction.
           </div>
         </Panel>
       </div>
@@ -303,7 +304,7 @@ export default function Overview({
       {/* ---------------- stats ---------------- */}
       <StatsPanel stats={stats} />
 
-      {/* ---------------- MTF trend + execution rules ---------------- */}
+      {/* ---------------- market context + execution rules ---------------- */}
       <div className="grid-2">
         <MtfPanel mtf={mtf} symbol={status?.symbol} />
         <Panel
@@ -315,51 +316,43 @@ export default function Overview({
           <div className="mini-grid">
             <div className="mini">
               <div className="k">Entry</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                EMA11 × EMA34 confirmed cross
-              </div>
+              <div className="v" style={{ fontSize: 12 }}>30-bar sweep → POC reclaim → retest</div>
             </div>
             <div className="mini">
-              <div className="k">Stop loss</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                ATR(14) × 2 · reduce-only
-              </div>
+              <div className="k">Initial stop</div>
+              <div className="v" style={{ fontSize: 12 }}>Past sweep wick + ATR buffer</div>
             </div>
             <div className="mini">
-              <div className="k">TP1</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                1.5R → 33% + SL to BE
-              </div>
+              <div className="k">TP1 · 1R</div>
+              <div className="v" style={{ fontSize: 12 }}>Close 20% · SL to breakeven</div>
             </div>
             <div className="mini">
-              <div className="k">TP2</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                3R → 50% rest + SL to TP1
-              </div>
+              <div className="k">TP2 · 2R</div>
+              <div className="v" style={{ fontSize: 12 }}>Close 20% · SL to 1R</div>
             </div>
             <div className="mini">
-              <div className="k">TP3</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                4.5R → full exit
-              </div>
+              <div className="k">TP3 · 3R</div>
+              <div className="v" style={{ fontSize: 12 }}>Close 20% · SL to 2R</div>
             </div>
             <div className="mini">
-              <div className="k">Opposite signal</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                close &amp; reverse
-              </div>
+              <div className="k">TP4 · 4R</div>
+              <div className="v" style={{ fontSize: 12 }}>Close 20% · SL to 3R</div>
+            </div>
+            <div className="mini">
+              <div className="k">TP5 · 5R</div>
+              <div className="v" style={{ fontSize: 12 }}>Close remaining position</div>
+            </div>
+            <div className="mini">
+              <div className="k">Opposite setup</div>
+              <div className="v" style={{ fontSize: 12 }}>Never reverses an open bot trade</div>
             </div>
             <div className="mini">
               <div className="k">Sizing</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                {status?.tradeSizePercent ?? 5}% × {status?.leverage ?? 10}x
-              </div>
+              <div className="v" style={{ fontSize: 12 }}>{status?.tradeSizePercent ?? 5}% margin × {status?.leverage ?? 10}x</div>
             </div>
             <div className="mini">
               <div className="k">Ownership</div>
-              <div className="v" style={{ fontSize: 12 }}>
-                only bot trades · max {maxPos}
-              </div>
+              <div className="v" style={{ fontSize: 12 }}>bot-owned only · max {maxPos}</div>
             </div>
           </div>
           <div className="hint warn mt" style={{ display: 'flex', gap: 7 }}>

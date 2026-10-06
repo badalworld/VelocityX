@@ -24,9 +24,9 @@ export function StatsBody({ stats }: { stats: Stats | null }) {
           glow={s.overallWinRate >= 50 ? 'rgba(35,221,138,.8)' : 'rgba(255,200,87,.8)'}
         />
         <Ring
-          pct={s.tp3Pct}
-          value={`${fmt(s.tp3Pct, 0)}%`}
-          label="Full TP3"
+          pct={s.tp5Pct}
+          value={`${fmt(s.tp5Pct, 0)}%`}
+          label="Reached 5R"
           color="var(--cyan)"
           glow="rgba(62,240,255,.8)"
           delay={90}
@@ -42,11 +42,12 @@ export function StatsBody({ stats }: { stats: Stats | null }) {
       </div>
 
       <div className="bars" data-reveal-group>
-        <BarRow label="TP1" pct={s.tp1Pct} value={`${fmt(s.tp1Pct, 1)}%`} tone="green" />
-        <BarRow label="TP2" pct={s.tp2Pct} value={`${fmt(s.tp2Pct, 1)}%`} tone="green" />
-        <BarRow label="TP3" pct={s.tp3Pct} value={`${fmt(s.tp3Pct, 1)}%`} tone="green" />
-        <BarRow label="SL" pct={s.slPct} value={`${fmt(s.slPct, 1)}%`} tone="red" />
-        <BarRow label="Break-even" pct={s.breakevenRate} value={`${fmt(s.breakevenRate, 1)}%`} tone="cyan" />
+        <BarRow label="TP1 · 1R" pct={s.tp1Pct} value={`${fmt(s.tp1Pct, 1)}%`} tone="green" />
+        <BarRow label="TP2 · 2R" pct={s.tp2Pct} value={`${fmt(s.tp2Pct, 1)}%`} tone="green" />
+        <BarRow label="TP3 · 3R" pct={s.tp3Pct} value={`${fmt(s.tp3Pct, 1)}%`} tone="green" />
+        <BarRow label="TP4 · 4R" pct={s.tp4Pct} value={`${fmt(s.tp4Pct, 1)}%`} tone="green" />
+        <BarRow label="TP5 · 5R" pct={s.tp5Pct} value={`${fmt(s.tp5Pct, 1)}%`} tone="cyan" />
+        <BarRow label="Initial stop" pct={s.slPct} value={`${fmt(s.slPct, 1)}%`} tone="red" />
       </div>
 
       <div className="mini-grid">
@@ -63,8 +64,8 @@ export function StatsBody({ stats }: { stats: Stats | null }) {
           </div>
         </div>
         <div className="mini">
-          <div className="k">RR ratio</div>
-          <div className="v">1 : {fmt(s.rrRatio, 2)}</div>
+          <div className="k">Final target</div>
+          <div className="v">{fmt(s.rrRatio, 0)}R</div>
         </div>
         <div className="mini">
           <div className="k">Closed trades</div>
@@ -91,8 +92,10 @@ export function StatsBody({ stats }: { stats: Stats | null }) {
           </div>
         </div>
         <div className="mini">
-          <div className="k">Verdict</div>
-          <div className={`v ${expPos ? 'up' : 'down'}`}>{expPos ? 'PROFITABLE' : 'UNDER WATER'}</div>
+          <div className="k">Journal status</div>
+          <div className={`v ${s.totalClosedTrades === 0 ? '' : expPos ? 'up' : 'down'}`}>
+            {s.totalClosedTrades === 0 ? 'NO CLOSED TRADES' : expPos ? 'POSITIVE EXPECTANCY' : 'NEGATIVE EXPECTANCY'}
+          </div>
         </div>
       </div>
     </div>

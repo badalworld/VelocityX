@@ -43,17 +43,22 @@ const openTrade = {
   side: 'LONG',
   status: 'OPEN',
   qty: 0.06,
-  q1: 0.02,
-  q2: 0.02,
-  q3: 0.02,
+  q1: 0.012,
+  q2: 0.012,
+  q3: 0.012,
+  q4: 0.012,
+  q5: 0.012,
+  exitPlan: 'LIQUIDITY_5R',
   entryPrice: 61200,
   atrAtEntry: 210,
   slInitial: 60780,
-  slCurrent: 61200,
-  slStage: 1,
-  tp1: 61515,
-  tp2: 61830,
-  tp3: 62145,
+  slCurrent: 62040,
+  slStage: 3,
+  tp1: 61620,
+  tp2: 62040,
+  tp3: 62460,
+  tp4: 62880,
+  tp5: 63300,
   notional: 3672,
   margin: 306,
   leverage: 10,
@@ -61,30 +66,32 @@ const openTrade = {
   closedAt: null,
   closeReason: null,
   tp1Filled: true,
-  tp2Filled: false,
-  tp3Filled: false,
+  tp2Filled: true,
+  tp3Filled: true,
+  tp4Filled: false,
+  tp5Filled: false,
   realizedPnl: 0,
   fees: 2.31,
   funding: -0.021,
   binanceRealizedPnl: 0,
   commissionOtherAsset: 0,
-  initialRisk: 210,
-  orders: { entry: 'VXt1E', sl: 'VXt1S', tp1: 'VXt11', tp2: 'VXt12', tp3: 'VXt13' },
+  initialRisk: 25.2,
+  orders: { entry: 'VXt1E', sl: 'VXt1S', tp1: 'VXt11', tp2: 'VXt12', tp3: 'VXt13', tp4: 'VXt14', tp5: 'VXt15' },
   mode: 'testnet',
   result: null,
   botOwned: true,
   unrealized: 12.75,
   markPrice: 62665.4,
-  remainingQty: 0.06,
+  remainingQty: 0.024,
   scan: { volatility: 71.2, adx: 27.5, atrPct: 0.34, rank: 1 },
 };
 
-const baseTrade = { ...openTrade, id: 't0', status: 'CLOSED', closedAt: now - 5 * HOUR, closeReason: 'TP3', tp1Filled: true, tp2Filled: true, tp3Filled: true, realizedPnl: 47.9, result: 'WIN' };
+const baseTrade = { ...openTrade, id: 't0', status: 'CLOSED', closedAt: now - 5 * HOUR, closeReason: 'TP5', tp1Filled: true, tp2Filled: true, tp3Filled: true, tp4Filled: true, tp5Filled: true, realizedPnl: 47.9, result: 'WIN' };
 
 const trades = [
   { ...baseTrade, openedAt: now - 26 * HOUR, closedAt: now - 22 * HOUR, realizedPnl: 18.4 },
-  { ...baseTrade, id: 't2', side: 'SHORT', slStage: 0, tp1Filled: false, closeReason: 'SL', result: 'LOSS', openedAt: now - 14 * HOUR, closedAt: now - 9 * HOUR, realizedPnl: -14.2, initialRisk: 14.4 },
-  { ...baseTrade, id: 't3', qty: 0.06, q1: 0.02, q2: 0.02, q3: 0.02, slStage: 2, tp1Filled: true, tp2Filled: true, tp3Filled: true, closeReason: 'TP3', openedAt: now - 5 * HOUR, closedAt: now - 2 * HOUR, realizedPnl: 43.7, initialRisk: 23.4 },
+  { ...baseTrade, id: 't2', side: 'SHORT', slStage: 0, tp1Filled: false, tp2Filled: false, tp3Filled: false, tp4Filled: false, tp5Filled: false, closeReason: 'SL', result: 'LOSS', openedAt: now - 14 * HOUR, closedAt: now - 9 * HOUR, realizedPnl: -14.2, initialRisk: 14.4 },
+  { ...baseTrade, id: 't3', qty: 0.06, q1: 0.012, q2: 0.012, q3: 0.012, q4: 0.012, q5: 0.012, slStage: 4, tp1Filled: true, tp2Filled: true, tp3Filled: true, tp4Filled: true, tp5Filled: true, closeReason: 'TP5', openedAt: now - 5 * HOUR, closedAt: now - 2 * HOUR, realizedPnl: 43.7, initialRisk: 25.2 },
 ];
 
 
@@ -111,7 +118,7 @@ const accountView = {
 };
 
 const positionsView = {
-  managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.06, notional: 3759.9, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'binance' } ],
+  managed: [ { trade: openTrade, markPrice: 62665.4, unrealized: 12.75, roiPct: 4.17, fees: 2.31, funding: -0.021, remainingQty: 0.024, notional: 1503.96, margin: 306, leverage: 10, liquidationPrice: 58100, source: 'binance' } ],
   external: [ { symbol: 'DOGEUSDT', side: 'LONG', qty: 1200, notional: 512.4, entryPrice: 0.42, markPrice: 0.4173, unrealized: -3.2, leverage: 5, margin: 102.5, source: 'binance', managed: false, note: 'opened outside the bot — never adopted, never counted' } ],
   slots: { used: 1, max: 8 },
   note: 'external positions are never adopted, managed, closed or counted in bot PnL',
@@ -128,12 +135,12 @@ const scannerView = {
   gate: { minQuoteVolume24h: 20_000_000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, minOpportunityScore: 65, maxEmaGapAtr: 0.45, zoneRetentionMin: 30, maxOpportunityZones: 16, maxPositions: 8 },
   selected: [symbol, 'SOLUSDT', 'BNBUSDT', 'DOGEUSDT'],
   rows: [
-    ['BTCUSDT', 'BTC', 71.2, 27.5, 0.34, 1.8, 1200, 'TRENDING', true, 88.1, 'high volatility + trending'],
-    ['SOLUSDT', 'SOL', 66.4, 24.1, 0.91, 3.2, 520, 'TRENDING', true, 81.4, 'high volatility + trending'],
-    ['BNBUSDT', 'BNB', 58.9, 21.7, 0.77, 2.4, 380, 'TRENDING', true, 74.2, 'high volatility + trending'],
-    ['DOGEUSDT', 'DOGE', 54.3, 19.8, 1.02, 4.1, 240, 'TRENDING', true, 71.6, 'high volatility + trending'],
-    ['XRPUSDT', 'XRP', 31.2, 15.4, 0.42, 0.9, 190, 'RANGING', false, 42.0, 'trend not aligned on 15m/1h'],
-    ['ADAUSDT', 'ADA', 22.4, 12.1, 0.31, 0.4, 120, 'RANGING', false, 30.1, 'ADX 12 < 18 (no trend)'],
+    ['BTCUSDT', 'BTC', 71.2, 27.5, 0.34, 1.8, 1200, 'TRENDING', true, 88.1, 'liquid, active market · watching 5m liquidity sweeps'],
+    ['SOLUSDT', 'SOL', 66.4, 24.1, 0.91, 3.2, 520, 'TRENDING', true, 81.4, 'liquid, active market · watching 5m liquidity sweeps'],
+    ['BNBUSDT', 'BNB', 58.9, 21.7, 0.77, 2.4, 380, 'TRENDING', true, 74.2, 'liquid, active market · watching 5m liquidity sweeps'],
+    ['DOGEUSDT', 'DOGE', 54.3, 19.8, 1.02, 4.1, 240, 'TRENDING', true, 71.6, 'liquid, active market · watching 5m liquidity sweeps'],
+    ['XRPUSDT', 'XRP', 31.2, 15.4, 0.42, 0.9, 190, 'RANGING', false, 42.0, 'ATR 0.42% < 0.6% activity threshold'],
+    ['ADAUSDT', 'ADA', 22.4, 12.1, 0.31, 0.4, 120, 'RANGING', false, 30.1, 'ATR 0.31% < 0.6% activity threshold'],
     ['USDCUSDT', 'USDC', 1.2, 5.0, 0.01, 0.0, 900, 'PEGGED', false, 2.0, 'pegged / stable / staked market — never traded'],
   ].map((r, i) => ({
     symbol: r[0], base: r[1], price: 61200, change24hPct: r[5], range24hPct: r[4] * 3, quoteVolume24h: r[6] * 1e6,
@@ -141,12 +148,12 @@ const scannerView = {
     trend: 'UP', alignment: 1, fundingRate: 0.0001, nextFundingTime: 1791000000000, volatility: r[2],
     trendScore: r[3] * 3, liquidityScore: 80, score: r[9], setupScore: r[8] ? 88 - i * 4 : 30,
     emaGapPct: 0.02, emaGapAtr: r[8] ? 0.2 + i * 0.03 : 1.4, approachAtr: 0.08,
-    opportunity: !!r[8] && i < 4, inOpportunityZone: !!r[8] && i < 4, opportunitySide: 'LONG',
-    marketType: r[7], tradable: r[8], reason: r[10], opportunityReason: r[8] ? 'LONG setup · 15m/1h aligned · EMA gap 0.20 ATR' : r[10],
+    opportunity: !!r[8] && i < 4, inOpportunityZone: !!r[8] && i < 4, opportunitySide: 'BOTH',
+    marketType: r[7], tradable: r[8], reason: r[10], opportunityReason: r[8] ? 'BOTH-side 5m sweep monitor · ranking does not trigger entries' : r[10],
   })),
 };
 scannerView.opportunities = scannerView.rows.slice(0, 4).map((r, i) => ({
-  symbol: r.symbol, base: r.base, side: 'LONG', state: i === 0 ? 'EXECUTED' : 'MONITORING', score: r.setupScore,
+  symbol: r.symbol, base: r.base, side: 'BOTH', state: i === 0 ? 'EXECUTED' : 'MONITORING', score: r.setupScore,
   rank: i + 1, price: r.price, adx: r.adx, atrPct: r.atrPct, atrPct5m: r.atrPct5m, emaGapPct: r.emaGapPct,
   emaGapAtr: r.emaGapAtr, enteredAt: now - (i + 1) * MIN, lastQualifiedAt: now, updatedAt: now,
   expiresAt: now + 29 * MIN, signalId: i === 0 ? 's3' : null, signalAt: i === 0 ? now - MIN : null,
@@ -172,8 +179,8 @@ const routes = {
     account: accountView,
     logs: [
       { t: now - 4000, level: 'info', msg: 'Scanner: 30 markets analysed · trading BTC, SOL, BNB, DOGE' },
-      { t: now - 3000, level: 'win', msg: 'BTCUSDT TP1 hit @ 61515 — closed 0.02, SL → breakeven' },
-      { t: now - 2000, level: 'info', msg: 'TESTNET LONG 0.06 BTCUSDT @ 61200 | SL 60780 | TP 61515/61830/62145' },
+      { t: now - 3000, level: 'win', msg: 'BTCUSDT TP1 hit @ 61620 — closed 0.012, SL → breakeven' },
+      { t: now - 2000, level: 'info', msg: 'TESTNET LONG 0.06 BTCUSDT @ 61200 | SL 60780 | TP 1R–5R 61620/62040/62460/62880/63300' },
       { t: now - 1000, level: 'info', msg: 'Binance weight 412/2280 (18%) — scanner 220, market 96' },
     ],
     streams: { market: true, user: true },
@@ -183,7 +190,7 @@ const routes = {
   },
   '/api/trades': trades,
   '/api/signals': signals,
-  '/api/stats': { totalSignals: 6, actedSignals: 4, totalClosedTrades: 1, winCount: 1, lossCount: 0, overallWinRate: 100, expectancy: 1.42, netPnl: 47.9, fees: 2.31, funding: -0.021, avgWin: 47.9, avgLoss: 0, profitFactor: 3.2, rrRatio: 1.5, breakevenRate: 40, tp1Count: 1, tp2Count: 1, tp3Count: 1, tp1Pct: 100, tp2Pct: 100, tp3Pct: 100, weekly: [ { label: 'W38', trades: 1, wins: 1, losses: 0, winRate: 100, netPnl: 47.9, expectancy: 1.42 } ], openTrades: 1, totalFunding: -0.021 },
+  '/api/stats': { totalSignals: 6, actedSignals: 4, totalClosedTrades: 1, winCount: 1, lossCount: 0, overallWinRate: 100, expectancy: 1.42, netPnl: 47.9, fees: 2.31, funding: -0.021, avgWin: 47.9, avgLoss: 0, profitFactor: 3.2, rrRatio: 3, breakevenRate: 25, tp1Count: 1, tp2Count: 1, tp3Count: 1, tp4Count: 1, tp5Count: 1, slCount: 0, tp1Pct: 100, tp2Pct: 100, tp3Pct: 100, tp4Pct: 100, tp5Pct: 100, slPct: 0, weekly: [ { label: 'W38', trades: 1, wins: 1, losses: 0, winRate: 100, netPnl: 47.9, expectancy: 1.42 } ], openTrades: 1, totalFunding: -0.021 },
   '/api/account': accountView,
   '/api/positions': positionsView,
   '/api/scanner': scannerView,
@@ -217,6 +224,7 @@ const routes = {
     historyDays: 30,
     dashboardTimeframes: ['5', '15', '30'],
     scanner: { enabled: true, intervalSec: 60, candidates: 50, minQuoteVolume24h: 20000000, minRange24hPct: 3, minAtrPct: 0.6, minAdx: 18, topN: 16, minOpportunityScore: 65, maxEmaGapAtr: 0.45, zoneRetentionMin: 30 },
+    strategy: { lookbackBars: 30, profileBins: 24, setupExpiryBars: 24, sweepMinAtr: 0.05, retestToleranceAtr: 0.2, stopBufferAtr: 0.1, maxStopAtr: 6 },
     keys: {
       testnet: { key: '', secret: '', configured: false },
       live: { key: '', secret: '', configured: false },
@@ -386,9 +394,9 @@ checkSoft(
 check('hero + equity sparkline', !!text('.hero-title') && !!doc.querySelector('.hero .kpi-spark svg path'));
 check('four KPI pods', doc.querySelectorAll('.kpi').length === 4);
 {
-  // one 4-level ladder (SL + TP1..TP3) per managed position
+  // one six-level ladder (SL + TP1..TP5) per new-strategy position
   const rungs = doc.querySelectorAll('.lad-row').length;
-  checkSoft(!LIVE || liveManaged > 0, 'position ladder (4 levels per position)', rungs >= 4 && rungs % 4 === 0, `${rungs} rungs`);
+  checkSoft(!LIVE || liveManaged > 0, 'position ladder (6 levels per 5R position)', rungs >= 6 && rungs % 6 === 0, `${rungs} rungs`);
   const fills = [...doc.querySelectorAll('.lad-fill')];
   const widthsOk =
     fills.length === rungs &&
@@ -436,10 +444,13 @@ checkSoft(
   'the scanner is still warming up',
 );
 checkSoft(!LIVE || liveManaged > 0, 'managed position card', doc.querySelectorAll('.pos-item').length >= 1);
-check(
-  'no simulation anywhere in the UI',
-  !/paper|demo feed|offline demo|simulated mode/i.test(doc.body.textContent) && !/enter .*(equity|assets)/i.test(doc.body.textContent),
-);
+{
+  const text = doc.body.textContent || '';
+  const paperModeOffered = /\bpaper mode\b|\bpaper order execution\b|\bdemo feed\b|\boffline demo\b|\bsimulated mode\b/i.test(text);
+  const editableBalance = [...doc.querySelectorAll('input')].some((input) =>
+    /equity|asset balance/i.test(`${input.getAttribute('aria-label') || ''} ${input.placeholder || ''} ${input.closest('label')?.textContent || ''}`));
+  check('no paper-order or synthetic-feed mode is offered', !paperModeOffered && !editableBalance);
+}
 check('activity feed', doc.querySelectorAll('.feed-line').length >= 3);
 check(
   'BTCUSDT candlestick chart removed',
@@ -543,6 +554,17 @@ check('settings inputs', doc.querySelectorAll('.input, .select, .textarea').leng
   );
 }
 check('scanner settings tab', (() => { const t = [...doc.querySelectorAll('.settings-sec h4')].some((h) => /market scanner/i.test(h.textContent || '')) || true; return t; })());
+{
+  const strategyTab = [...doc.querySelectorAll('.seg-item')].find((n) => /strategy & backtest/i.test(n.textContent || ''));
+  strategyTab?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  const strategyText = doc.body.textContent || '';
+  check('strategy & backtest settings tab renders', /5-minute liquidity sweep/i.test(strategyText));
+  check('historical backtest is explicitly no-orders, not a paper mode',
+    /historical backtest — no orders/i.test(strategyText) && /not paper trading or a profit forecast/i.test(strategyText));
+  check('backtest form exposes its default history window',
+    [...doc.querySelectorAll('.settings-sec button')].some((b) => /run 30-day backtest/i.test(b.textContent || '')));
+}
 check('guardrails panel', /execution guardrails/i.test(doc.body.textContent));
 
 const motionBtn = doc.querySelector('.motion-toggle');

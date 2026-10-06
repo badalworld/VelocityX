@@ -1,15 +1,15 @@
 /**
  * HTTP API for the dashboard UI.
  *
- * Every market/account number returned here comes from Binance (REST + WS).
- * When the exchange is unreachable the feed is flagged `binance-unreachable`
- * and payloads stay empty — nothing is ever simulated.
+ * Live account/position numbers come from Binance. Historical backtests are
+ * explicitly isolated OHLCV simulations and never place or journal orders.
  */
 import express from 'express';
 import { api } from './binance';
 import { authRequired, LIVE_CONTROL_MESSAGE, liveControlProtected, rateLimit, requireToken } from './auth';
 import { engine, mtfDashboard } from './engine';
 import { computeStats } from './stats';
+import { runLiquidityBacktest } from './liquidityBacktest';
 import { getSettings, publicSettings, updateSettings } from './settings';
 import { allSignals, allTrades, openTrades, remainingQtyOf } from './store';
 import { trader } from './trader';
@@ -293,6 +293,58 @@ export function apiRouter(): express.Router {
 
   r.get('/execution/readiness', (_req, res) => res.json(currentExecutionReadiness()));
 
+  /** Historical POC-strategy backtest. This route uses public candles only. */
+  r.post('/backtest/run', mutate, async (req, res) => {
+    const body = req.body || {};
+    const symbol = String(body.symbol || getSettings().symbol).toUpperCase().trim();
+    const days = Number(body.days ?? 30);
+    const startingBalance = Number(body.startingBalance ?? 10_000);
+    const riskPercent = Number(body.riskPercent ?? 1);
+    const feeRate = Number(body.feeRate ?? 0.0004);
+    const slippageBps = Number(body.slippageBps ?? 2);
+    if (!/^[A-Z0-9]{4,24}$/.test(symbol)) return res.status(400).json({ error: 'symbol must be a valid Binance USD-M symbol' });
+    if (!Number.isInteger(days) || days < 1 || days > 90) return res.status(400).json({ error: 'days must be an integer from 1 to 90' });
+    if (!Number.isFinite(startingBalance) || startingBalance < 1 || startingBalance > 1e9) return res.status(400).json({ error: 'startingBalance must be between 1 and 1,000,000,000 USDT' });
+    if (!Number.isFinite(riskPercent) || riskPercent < 0.1 || riskPercent > 5) return res.status(400).json({ error: 'riskPercent must be between 0.1 and 5' });
+    if (!Number.isFinite(feeRate) || feeRate < 0 || feeRate > 0.01) return res.status(400).json({ error: 'feeRate must be between 0 and 0.01' });
+    if (!Number.isFinite(slippageBps) || slippageBps < 0 || slippageBps > 100) return res.status(400).json({ error: 'slippageBps must be between 0 and 100' });
+
+    const endTime = Date.now();
+    const startTime = endTime - days * 86400000;
+    const candles = [] as Awaited<ReturnType<typeof api.historicalKlines>>;
+    let cursor = startTime;
+    let pages = 0;
+    try {
+      while (cursor < endTime && pages < 24) {
+        const page = await api.historicalKlines(symbol, '5m', cursor, endTime, 1500);
+        pages += 1;
+        if (!page.length) break;
+        candles.push(...page.filter((bar) => bar.time >= startTime && bar.closeTime <= endTime));
+        const next = page[page.length - 1].time + 5 * 60_000;
+        if (!(next > cursor)) break;
+        cursor = next;
+      }
+      if (candles.length < getSettings().strategy.lookbackBars + 20) {
+        return res.status(502).json({ error: `Binance returned only ${candles.length} closed candles; need more history to backtest ${symbol}` });
+      }
+      const result = runLiquidityBacktest(
+        candles,
+        getSettings().strategy,
+        {
+          startingBalance,
+          riskPercent,
+          feeRate,
+          slippageBps,
+          dataSource: 'Binance USD-M public 5m klines (OHLCV backtest; no orders)',
+        },
+        symbol,
+      );
+      res.json(result);
+    } catch (e: any) {
+      res.status(502).json({ error: `Backtest candle fetch failed: ${e?.message || e}` });
+    }
+  });
+
   r.post('/scanner/scan', mutate, async (_req, res) => {
     const result = await scanner.scan();
     res.json(result ?? { error: 'scan failed — check the activity log' });
@@ -401,6 +453,10 @@ export function apiRouter(): express.Router {
     }
     if (patch.autoScan === false && before.autoScan !== false) scanner.clearOpportunities();
     if (patch.autoScan === true && before.autoScan === false && s.scanner.enabled) void scanner.scan();
+    if (patch.strategy && JSON.stringify(patch.strategy) !== JSON.stringify(before.strategy)) {
+      engine.resetStrategy();
+      emit('log', { level: 'info', msg: 'Liquidity strategy settings changed — rebuilding pending 5m setup state without replaying entries' });
+    }
     if (patch.autoTrade !== undefined && patch.autoTrade !== before.autoTrade) {
       emit('log', { level: patch.autoTrade ? 'win' : 'error', msg: `Auto-trade ${patch.autoTrade ? 'ENABLED' : 'DISABLED'}` });
     }

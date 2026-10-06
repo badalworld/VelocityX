@@ -4,10 +4,9 @@ import { AnimatedNumber, Panel } from '../motion/primitives';
 import { IconRadar, IconTrend } from '../motion/Icons';
 
 /* ============================================================================
-   Market Scanner — volatility ranked, top to bottom, Binance data only.
-   Only **trending** high-volatility markets are ever marked TRADE; pegged /
-   stable / staked ("copy or stack") markets are rejected by name and by
-   behaviour and can never reach the executor.
+   Market Scanner — ranks liquid, active USD-M markets for dedicated monitoring.
+   It never predicts the entry side: closed 5m liquidity/POC rules create signals.
+   Pegged/stable/staked markets are rejected before they reach the monitor.
    ========================================================================== */
 
 export function VolatilityBar({ value }: { value: number }) {
@@ -21,11 +20,9 @@ export function VolatilityBar({ value }: { value: number }) {
 }
 
 export function VerdictChip({ row }: { row: ScannerRow }) {
-  if (row.inOpportunityZone) {
-    return <span className="chip green">ZONE · {row.opportunitySide === 'LONG' ? '▲ LONG' : '▼ SHORT'}</span>;
-  }
-  if (row.opportunity) return <span className="chip cyan">QUALIFIED</span>;
-  if (row.tradable) return <span className="chip">TREND · SCANNING</span>;
+  if (row.inOpportunityZone) return <span className="chip green">MONITOR · BOTH SIDES</span>;
+  if (row.opportunity) return <span className="chip cyan">MONITOR CANDIDATE</span>;
+  if (row.tradable) return <span className="chip">LIQUID · SCANNING</span>;
   if (row.marketType === 'PEGGED') return <span className="chip red">PEGGED</span>;
   if (row.marketType === 'RANGING') return <span className="chip amber">RANGING</span>;
   if (row.marketType === 'QUIET') return <span className="chip">QUIET</span>;
@@ -46,29 +43,22 @@ export function ScannerTable({ scan, limit = 14, compact = false }: { scan: Scan
             <th>#</th>
             <th>Market</th>
             <th style={{ minWidth: 80 }}>Volatility</th>
-            <th className="r">Setup</th>
-            <th className="r">EMA gap</th>
+            <th className="r">Monitor score</th>
             <th className="r">24h range</th>
-            <th className="r">ATR%</th>
-            <th className="r">ADX</th>
-            <th className="r">Trend</th>
+            <th className="r">ATR 15m</th>
             {!compact && <th className="r">Funding</th>}
             {!compact && <th className="r">24h volume</th>}
-            <th>Verdict</th>
+            <th>Status</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr
-              key={r.symbol}
-              className={selected.has(r.symbol) ? 'row-selected' : ''}
-              title={r.opportunityReason || r.reason}
-            >
+            <tr key={r.symbol} className={selected.has(r.symbol) ? 'row-selected' : ''} title={r.opportunityReason || r.reason}>
               <td style={{ color: 'var(--dim)' }}>{i + 1}</td>
               <td>
                 <span style={{ fontWeight: 800 }}>{r.base}</span>
                 <span style={{ color: 'var(--dim)', fontSize: 10, marginLeft: 4 }}>/USDT</span>
-                {selected.has(r.symbol) && <span className="chip cyan" style={{ marginLeft: 6 }}>zone</span>}
+                {selected.has(r.symbol) && <span className="chip cyan" style={{ marginLeft: 6 }}>watching</span>}
               </td>
               <td>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -76,19 +66,12 @@ export function ScannerTable({ scan, limit = 14, compact = false }: { scan: Scan
                   <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: 11 }}>{fmt(r.volatility, 1)}</span>
                 </div>
               </td>
-              <td className={`r ${(r.setupScore ?? 0) >= (scan?.gate?.minOpportunityScore ?? 65) ? 'pos' : ''}`}>
-                {fmt(r.setupScore, 0)}
-              </td>
-              <td className="r">{fmt(r.emaGapAtr, 2)} ATR</td>
+              <td className="r">{fmt(r.setupScore ?? r.score, 0)}</td>
               <td className="r">{fmt(r.range24hPct, 1)}%</td>
               <td className="r">{fmt(r.atrPct, 2)}%</td>
-              <td className="r">{fmt(r.adx, 1)}</td>
-              <td className={`r ${r.trend === 'UP' ? 'pos' : 'neg'}`}>{r.trend === 'UP' ? '▲ Bull' : '▼ Bear'}</td>
               {!compact && <td className={`r ${r.fundingRate >= 0 ? 'pos' : 'neg'}`}>{fmt(r.fundingRate * 100, 4)}%</td>}
               {!compact && <td className="r">{fmt(r.quoteVolume24h / 1e6, 0)}M</td>}
-              <td>
-                <VerdictChip row={r} />
-              </td>
+              <td><VerdictChip row={r} /></td>
             </tr>
           ))}
         </tbody>
@@ -102,7 +85,7 @@ export function ScannerPanel({ scan, onScan, scanning }: { scan: ScanResult | nu
   return (
     <Panel
       title="Market Scanner"
-      sub="volatility ranked · trending only"
+      sub="liquid markets · both directions"
       icon={<IconRadar />}
       meta={
         <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -119,10 +102,7 @@ export function ScannerPanel({ scan, onScan, scanning }: { scan: ScanResult | nu
     >
       <ScannerTable scan={scan} limit={10} compact />
       <div className="hint" style={{ padding: '10px 12px' }}>
-        <IconTrend style={{ width: 12, height: 12, color: 'var(--cyan)', verticalAlign: '-2px' }} /> Fifty assets are
-        analysed every cycle. Only <b>aligned, trending markets near a fresh 5m EMA cross</b> move into the retained
-        opportunity monitor: quality ≥ {scan?.gate?.minOpportunityScore ?? '—'} · gap ≤{' '}
-        {scan?.gate?.maxEmaGapAtr ?? '—'} ATR. The score is rules-based setup quality, not a profit guarantee.
+        <IconTrend style={{ width: 12, height: 12, color: 'var(--cyan)', verticalAlign: '-2px' }} /> Fifty liquid/activity-ranked assets are analysed each cycle. Zones only select symbols for the 5m engine; <b>neither EMA trend nor monitor score triggers an entry</b>. The signal itself requires a closed-candle sweep → POC reclaim → retest.
       </div>
     </Panel>
   );
@@ -181,7 +161,7 @@ export function ScannerSummary({ scan }: { scan: ScanResult | null }) {
 function zoneTone(zone: OpportunityZone): string {
   if (zone.state === 'EXECUTED') return 'executed';
   if (zone.state === 'TRIGGERED') return 'triggered';
-  return zone.side === 'LONG' ? 'long' : 'short';
+  return zone.side === 'LONG' ? 'long' : zone.side === 'SHORT' ? 'short' : 'both';
 }
 
 /** Persistent hand-off between the 50-asset scanner and the execution engine. */
@@ -202,8 +182,7 @@ export function OpportunityQueue({ scan }: { scan: ScanResult | null }) {
       )}
       {!zones.length ? (
         <div className="empty">
-          No asset is inside the opportunity zone right now. The 50-asset scan continues; no order is sent until a
-          qualified setup is retained and its confirmed 5m signal fires.
+          No symbols are retained for dedicated monitoring right now. The market scan continues; no order is sent until a later closed 5m candle confirms the sweep → POC reclaim → retest sequence.
         </div>
       ) : (
         <div className="opp-grid">
@@ -219,16 +198,16 @@ export function OpportunityQueue({ scan }: { scan: ScanResult | null }) {
                     {zone.state}
                   </span>
                 </div>
-                <div className={`opp-side ${zone.side === 'LONG' ? 'pos' : 'neg'}`}>
-                  {zone.side === 'LONG' ? '▲ LONG setup' : '▼ SHORT setup'}
+                <div className={`opp-side ${zone.side === 'LONG' ? 'pos' : zone.side === 'SHORT' ? 'neg' : 'both'}`}>
+                  {zone.side === 'LONG' ? '▲ LONG monitor' : zone.side === 'SHORT' ? '▼ SHORT monitor' : '↕ BOTH SIDES'}
                 </div>
                 <div className="opp-score">
-                  <span className="bar-track"><span className="bar-fill green" style={{ width: `${Math.max(0, Math.min(100, zone.score))}%` }} /></span>
-                  <b>{fmt(zone.score, 0)}</b><small>quality</small>
+                  <span className="bar-track"><span className="bar-fill cyan" style={{ width: `${Math.max(0, Math.min(100, zone.score))}%` }} /></span>
+                  <b>{fmt(zone.score, 0)}</b><small>monitor score</small>
                 </div>
                 <dl className="opp-meta">
-                  <div><dt>EMA gap</dt><dd>{fmt(zone.emaGapAtr, 2)} ATR</dd></div>
-                  <div><dt>ADX</dt><dd>{fmt(zone.adx, 1)}</dd></div>
+                  <div><dt>ATR 15m</dt><dd>{fmt(zone.atrPct, 2)}%</dd></div>
+                  <div><dt>ATR 5m</dt><dd>{fmt(zone.atrPct5m, 2)}%</dd></div>
                   <div><dt>Zone age</dt><dd>{timeAgo(zone.enteredAt)}</dd></div>
                   <div><dt>{zone.state === 'MONITORING' ? 'Retained' : 'Signal'}</dt><dd>{zone.state === 'MONITORING' ? `${mins}m` : zone.signalAt ? timeAgo(zone.signalAt) : '—'}</dd></div>
                 </dl>
@@ -247,17 +226,15 @@ export function TopPicks({ scan }: { scan: ScanResult | null }) {
     .filter((r) => r.tradable)
     .sort((a, b) => (b.setupScore ?? 0) - (a.setupScore ?? 0))
     .slice(0, 8);
-  if (!picks.length) return <div className="empty">No trending high-volatility market passed the gates right now.</div>;
+  if (!picks.length) return <div className="empty">No market passed the current liquidity and activity gates.</div>;
   return (
     <div className="scr-grid">
       {picks.map((r) => (
-        <div key={r.symbol} className={`scr-item ${r.trend === 'UP' ? 'bull' : 'bear'}`}>
+        <div key={r.symbol} className="scr-item">
           <span className="scr-sym">{r.base}</span>
-          <span className={`scr-state ${r.trend === 'UP' ? 'bull' : 'bear'}`}>
-            {r.trend === 'UP' ? '▲ LONG' : '▼ SHORT'}
-          </span>
+          <span className="scr-state neutral">MONITOR · BOTH SIDES</span>
           <span className="hint" style={{ fontSize: 10 }}>
-            quality {fmt(r.setupScore, 0)} · gap {fmt(r.emaGapAtr, 2)} ATR · {fmtPrice(r.price)}
+            score {fmt(r.setupScore ?? r.score, 0)} · range {fmt(r.range24hPct, 1)}% · {fmtPrice(r.price)}
           </span>
         </div>
       ))}

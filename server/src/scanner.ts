@@ -2,10 +2,10 @@
  * Continuous 50-asset market scanner + opportunity-zone queue.
  *
  * A scan cycle does two jobs without mixing their lifetimes:
- *   1. rank the USD-M universe and analyse the leading `candidates` markets
- *      (50 by default) in a bounded parallel batch; and
- *   2. promote only high-quality, pre-signal EMA11/EMA34 setups into a retained
- *      opportunity zone which the 5m engine monitors every two seconds.
+ *   1. rank liquid/active USD-M markets and analyse `candidates` (50 by default)
+ *      in a bounded parallel batch; and
+ *   2. retain eligible symbols in a direction-agnostic monitor queue for the
+ *      engine's closed-candle liquidity-sweep / POC-retest strategy.
  *
  * Retained zones do not consume places in the next scan batch. The scanner can
  * therefore keep moving through fifty assets while the engine continues to
@@ -20,7 +20,7 @@ import { candleStore } from './candles';
 
 export type MarketType = 'TRENDING' | 'RANGING' | 'QUIET' | 'PEGGED';
 export type OpportunityState = 'MONITORING' | 'TRIGGERED' | 'EXECUTED';
-export type OpportunitySide = 'LONG' | 'SHORT';
+export type OpportunitySide = 'LONG' | 'SHORT' | 'BOTH';
 
 export interface ScanProgress {
   id: string;
@@ -176,92 +176,33 @@ interface OpportunityAssessment {
 }
 
 /**
- * A zone is deliberately pre-signal, not a historical buy/sell call:
- *  • 15m + 1h direction and ADX/volatility gates already passed;
- *  • 5m EMA11 is close to EMA34 in ATR-normalised terms; and
- *  • the gap is moving toward the higher-timeframe direction (or has crossed
- *    on the latest closed candle, which the engine confirms on the next bar).
+ * The scanner now selects liquid markets to monitor; it does not predict a
+ * direction or gate entries with the retired EMA-crossover strategy. The
+ * per-symbol engine owns sweep/POC/retest state and may signal either side.
  */
 export function assessOpportunity(row: ScanRow, k5: Candle[], now = Date.now()): OpportunityAssessment {
-  const s = getSettings();
-  const side: OpportunitySide = row.trend === 'UP' ? 'LONG' : 'SHORT';
+  const config = getSettings().strategy;
   const closed = k5.filter((c) => c.closeTime <= now);
-  const bars = closed.length >= 40 ? closed : k5.slice(0, Math.max(0, k5.length - 1));
-  const fallback: OpportunityAssessment = {
-    setupScore: 0,
+  const enoughBars = closed.length >= config.lookbackBars + 2;
+  const bars = enoughBars ? closed : k5.slice(0, Math.max(0, k5.length - 1));
+  const atr5 = bars.length >= 2 ? lastFinite(atr(bars, getSettings().atrLength)) : NaN;
+  const price = bars[bars.length - 1]?.close || row.price;
+  const atrPct5m = Number.isFinite(atr5) && price > 0 ? (atr5 / price) * 100 : 0;
+  const opportunity = row.tradable && enoughBars;
+  const reason = !row.tradable
+    ? row.reason
+    : !enoughBars
+      ? `need ${config.lookbackBars + 2} closed 5m bars to monitor sweeps`
+      : 'liquid 5m market · monitoring both directions for a 30-bar sweep and POC retest';
+  return {
+    setupScore: row.tradable ? round(row.score) : 0,
     emaFast5m: 0,
     emaSlow5m: 0,
-    atrPct5m: 0,
-    emaGapPct: 0,
-    emaGapAtr: 999,
-    approachAtr: 0,
-    side,
-    opportunity: false,
-    reason: 'not enough closed 5m history',
-  };
-  if (bars.length < 40) return fallback;
-
-  const closes = bars.map((c) => c.close);
-  // Opportunity qualification and execution share this exact EMA11/EMA34
-  // contract, independent of how the configurable display ribbon is ordered.
-  const fast = ema(closes, 11);
-  const slow = ema(closes, 34);
-  const atr5 = atr(bars, s.atrLength);
-  const i = bars.length - 1;
-  const f = fast[i], sl = slow[i], prevF = fast[i - 1], prevSl = slow[i - 1], a = atr5[i];
-  const price = bars[i]?.close || row.price;
-  if (![f, sl, prevF, prevSl, a, price].every(Number.isFinite) || a <= 0 || price <= 0) return fallback;
-
-  const direction = side === 'LONG' ? 1 : -1;
-  const signedGap = (f - sl) * direction;
-  const previousSignedGap = (prevF - prevSl) * direction;
-  const emaGapAtr = Math.abs(signedGap) / a;
-  const approachAtr = (signedGap - previousSignedGap) / a;
-  const emaGapPct = (Math.abs(f - sl) / price) * 100;
-  const atrPct5m = (a / price) * 100;
-  const maxGap = s.scanner.maxEmaGapAtr;
-  const proximity = clamp(1 - emaGapAtr / maxGap, 0, 1) * 100;
-  const approach = clamp(approachAtr / 0.12, 0, 1) * 100;
-  const setupScore = clamp(
-    0.35 * row.score +
-      0.25 * row.trendScore +
-      0.15 * row.liquidityScore +
-      0.15 * proximity +
-      0.1 * approach,
-    0,
-    100,
-  );
-
-  const pending = signedGap <= 0;
-  const freshCross = signedGap > 0 && previousSignedGap <= 0;
-  const converging = approachAtr > 0 || emaGapAtr <= maxGap * 0.15;
-  const near = emaGapAtr <= maxGap;
-  const opportunity =
-    row.tradable &&
-    near &&
-    (freshCross || (pending && converging)) &&
-    setupScore >= s.scanner.minOpportunityScore;
-
-  let reason: string;
-  if (!row.tradable) reason = row.reason;
-  else if (!near) reason = `EMA gap ${emaGapAtr.toFixed(2)} ATR > ${maxGap.toFixed(2)} ATR`;
-  else if (!freshCross && !pending) reason = '5m EMA cross already passed — waiting for a fresh setup';
-  else if (!freshCross && !converging) reason = '5m EMA gap is moving away from the signal';
-  else if (setupScore < s.scanner.minOpportunityScore) {
-    reason = `setup quality ${setupScore.toFixed(0)} < ${s.scanner.minOpportunityScore}`;
-  } else {
-    reason = `${side} setup · 15m/1h aligned · EMA gap ${emaGapAtr.toFixed(2)} ATR`;
-  }
-
-  return {
-    setupScore: round(setupScore),
-    emaFast5m: f,
-    emaSlow5m: sl,
     atrPct5m: round(atrPct5m, 4),
-    emaGapPct: round(emaGapPct, 4),
-    emaGapAtr: round(emaGapAtr, 4),
-    approachAtr: round(approachAtr, 4),
-    side,
+    emaGapPct: 0,
+    emaGapAtr: 0,
+    approachAtr: 0,
+    side: 'BOTH',
     opportunity,
     reason,
   };
@@ -343,7 +284,7 @@ class MarketScanner {
     this.pruneExpiredZones();
     const z = this.zones.get(symbol);
     if (!z || z.state !== 'MONITORING' || z.expiresAt <= Date.now()) return false;
-    if (side && z.side !== side) return false;
+    if (side && z.side !== 'BOTH' && z.side !== side) return false;
     const s = getSettings();
     const maxScanAge = Math.max(180_000, s.scanner.intervalSec * 3_000);
     return !!this.last && Date.now() - this.last.at <= maxScanAge;
@@ -363,7 +304,7 @@ class MarketScanner {
   /** Move a monitored zone to TRIGGERED/EXECUTED after the engine handles its signal. */
   markSignal(symbol: string, side: OpportunitySide, signalId: string, tradeId: string | null): void {
     const z = this.zones.get(symbol);
-    if (!z || z.side !== side) return;
+    if (!z || (z.side !== 'BOTH' && z.side !== side)) return;
     const now = Date.now();
     z.state = tradeId ? 'EXECUTED' : 'TRIGGERED';
     z.signalId = signalId;
@@ -560,8 +501,8 @@ class MarketScanner {
     const ttl = s.scanner.zoneRetentionMin * 60_000;
     const bySymbol = new Map(rows.map((r, i) => [r.symbol, { row: r, rank: i + 1 }]));
 
-    // Hard invalidation: a refreshed market that loses the trend/liquidity gate
-    // or flips direction must not remain eligible merely because its TTL lives.
+    // Hard invalidation: a refreshed market that loses the activity/liquidity
+    // gate must not remain eligible merely because its TTL lives.
     for (const [symbol, zone] of this.zones) {
       const hit = bySymbol.get(symbol);
       if (this.holdsPosition(symbol)) {
@@ -569,7 +510,7 @@ class MarketScanner {
         zone.updatedAt = now;
         continue;
       }
-      if (hit && (!hit.row.tradable || hit.row.opportunitySide !== zone.side)) {
+      if (hit && !hit.row.tradable) {
         this.zones.delete(symbol);
         continue;
       }
@@ -700,7 +641,7 @@ export function analyse(
   else marketType = 'QUIET';
 
   let tradable = true;
-  let reason = 'high volatility + trending';
+  let reason = 'liquid, active market · watching 5m liquidity sweeps';
   if (isPeggedSymbol(sym)) {
     tradable = false;
     reason = 'pegged / stable / staked market — never traded';
@@ -716,12 +657,6 @@ export function analyse(
   } else if (atrPct < gate.minAtrPct) {
     tradable = false;
     reason = `ATR ${atrPct.toFixed(2)}% < ${gate.minAtrPct}%`;
-  } else if (adxVal < gate.minAdx) {
-    tradable = false;
-    reason = `ADX ${adxVal.toFixed(1)} < ${gate.minAdx} — choppy, not trending`;
-  } else if (trend !== trend1h) {
-    tradable = false;
-    reason = '15m and 1h trends disagree';
   }
 
   return {
@@ -752,7 +687,7 @@ export function analyse(
     approachAtr: 0,
     opportunity: false,
     inOpportunityZone: false,
-    opportunitySide: trend === 'UP' ? 'LONG' : 'SHORT',
+    opportunitySide: 'BOTH',
     marketType,
     tradable,
     reason,

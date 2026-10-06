@@ -13,7 +13,7 @@ This document describes the VelocityX dashboard layout, retained P&L chart, calm
 | 3 | **Calm by default** | Motion is off on first load. Existing legacy `vx.motion` preferences are ignored through the new `vx.motion.v2` key. |
 | 4 | **Realtime without blinking** | Values update in place, do not colour-flash, and stale HTTP responses cannot overwrite newer WebSocket/account data. |
 | 5 | **Never blank the desk** | Each active view and the P&L dock are isolated by an `ErrorBoundary`. |
-| 6 | **Truthful data** | Live and unreachable feeds are labelled (there is no synthetic feed); external positions stay read-only and never enter bot P&L. |
+| 6 | **Truthful data** | Live and unreachable feeds are labelled; historical OHLCV backtests and synthetic test fixtures are explicitly identified and never enter live execution or bot P&L. |
 
 ---
 
@@ -31,11 +31,11 @@ The previous **Chart** navigation item and its BTCUSDT candlestick/EMA stage wer
 
 Views:
 
-* **Dashboard** — feed status, hero, KPIs, managed positions, scanner, statistics, **MTF trend gauge** (EMA11/EMA34 across 5m/15m/30m with timeframe chips), **execution rules**, engine health and activity. A full-width alert banner (`role="alert"`) appears only while LIVE auto-trading is armed so real-money mode can never be mistaken for a safe environment.
-* **Scanner** — live 50-asset batch progress, retained Opportunity Zone cards, backend execution-readiness bridge, setup-quality/volatility ranking, trade gates and dedicated monitor.
-* **Positions** — Binance account ledger, bot positions, external read-only positions, closed trades, fees and funding.
+* **Dashboard** — feed status, hero, KPIs, managed positions, scanner, rolling realized-journal statistics, **MTF context gauge** (EMA11/EMA34 across configured intervals; not an entry gate), **five-R execution rules**, engine health and activity. A full-width alert banner (`role="alert"`) appears only while LIVE auto-trading is armed.
+* **Scanner** — live market-batch progress, retained liquid-symbol monitor, backend execution-readiness bridge, activity ranking, trade gates and dedicated two-sided 5m sweep monitor.
+* **Positions** — Binance account ledger, bot positions with the active 3TP/5R ladder, external read-only positions, closed trades, fees and funding.
 * **Trades** — journal, signals and executor activity.
-* **Settings** — connection (mode, keys, **API token**), sizing, scanner, indicator, guardrail and motion controls. Arming LIVE asks for an explicit confirmation before the request is sent.
+* **Settings** — connection (mode, keys, **API token**), sizing, scanner, liquidity strategy / historical backtest, guardrail and motion controls. Arming LIVE asks for an explicit confirmation before the request is sent.
 
 ---
 
@@ -126,7 +126,7 @@ The background canvas persists through tab visibility changes instead of being c
 * The mobile P&L sheet header supports Enter and Space as well as pointer input.
 * Numeric fields use tabular numerals and layouts use `minmax(0, 1fr)`.
 * Feed labels never claim Binance is live while the exchange is unreachable.
-* UI smoke tests assert five navigation items, absence of the BTCUSDT chart and `/api/chart` requests, presence of the P&L chart, the MTF gauge with timeframe chips, the execution-rules panel, absence of the live banner in testnet mode, no simulation copy anywhere, the API-token field on the connection tab, default motion-off state, no flash classes, and no `NaN` / `Infinity` output.
+* UI smoke tests assert five navigation items, absence of the BTCUSDT chart and `/api/chart` requests, presence of the P&L chart, market-context MTF gauge, five-R execution rules, absence of the live banner in testnet mode, the API-token field on the connection tab, default motion-off state, no flash classes, and no `NaN` / `Infinity` output. The Strategy & Backtest tab labels the historical simulator as no-orders and discloses OHLCV/fee assumptions.
 
 ---
 
