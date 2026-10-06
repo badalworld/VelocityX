@@ -1,8 +1,8 @@
 /**
- * Technical indicator math — exact ports of the TradingView SUPER INDIBOT script.
+ * Technical indicator helpers retained for dashboard context and legacy tests.
+ * Active strategy entries come from liquidityStrategy.ts, using closed 5m OHLCV.
  *  - ta.ema  -> EMA seeded with SMA of the first `length` values (Pine behaviour)
  *  - ta.atr  -> Wilder's RMA of True Range (Pine ta.atr)
- *  - Signals use *confirmed* values (close[1] based) so they never repaint.
  */
 
 export interface Candle {
@@ -61,9 +61,8 @@ export function atr(candles: Candle[], length: number): number[] {
 }
 
 /**
- * Wilder ADX(length) — trend-strength gate used by the market scanner so the
- * bot only trades *trending* markets (chop/range/pegged pairs are rejected).
- * Returns an array aligned with the candles; values before 2×length are NaN.
+ * Wilder ADX(length) — retained as scanner ranking metadata, not an entry
+ * gate. Returns an array aligned with the candles; values before 2×length are NaN.
  */
 export function adx(candles: Candle[], length = 14): number[] {
   const n = candles.length;
@@ -125,7 +124,7 @@ export type SignalSide = 'LONG' | 'SHORT';
  * Evaluated at closed bar index i (i >= 2):
  *   LONG  <=> EMA_fast[i-1] >  EMA_slow[i-1]  &&  EMA_fast[i-2] <= EMA_slow[i-2]
  *   SHORT <=> EMA_fast[i-1] <  EMA_slow[i-1]  &&  EMA_fast[i-2] >= EMA_slow[i-2]
- * where fast = EMA11 and slow = EMA34 (the scanner and engine use the same pair).
+ * where fast = EMA11 and slow = EMA34. This helper remains for dashboard and legacy tests; the active engine uses the liquidity/POC strategy.
  */
 export function signalAt(fast: number[], slow: number[], i: number): SignalSide | null {
   if (i < 2) return null;

@@ -2,8 +2,8 @@ import fs from 'fs';
 import path from 'path';
 
 /**
- * Execution environment. There is NO simulated mode: every mode sends real
- * orders to Binance (testnet = Binance's test exchange, live = mainnet money).
+ * Order-execution environment. Testnet targets Binance Demo and live targets
+ * mainnet; the separate historical backtester never submits orders.
  */
 export type Mode = 'testnet' | 'live';
 
@@ -12,7 +12,7 @@ export interface ApiKeys {
   secret: string;
 }
 
-/** Market-scanner gate: only high-volatility *trending* markets are traded. */
+/** Scanner thresholds select active liquid markets for monitoring; strategy signals remain direction-agnostic. */
 export interface ScannerSettings {
   /** Scan the whole USD-M universe and drive the engine (auto symbol selection). */
   enabled: boolean;
@@ -26,16 +26,33 @@ export interface ScannerSettings {
   minRange24hPct: number;
   /** Minimum ATR(14) on 15m (% of price) — volatility gate. */
   minAtrPct: number;
-  /** Minimum ADX(14) on 15m — "trending, not chop" gate. */
+  /** Legacy diagnostic only; not used to gate monitoring or entries. */
   minAdx: number;
   /** Maximum high-quality opportunity zones monitored by the 5m signal engine. */
   topN: number;
-  /** Minimum deterministic setup-quality score (0..100) for an opportunity zone. */
+  /** Legacy ranking threshold retained for settings migration; not an entry gate. */
   minOpportunityScore: number;
-  /** Maximum EMA11/EMA34 distance measured in 5m ATR units. */
+  /** Legacy indicator threshold retained for settings migration; not used by the liquidity strategy. */
   maxEmaGapAtr: number;
   /** Keep a qualified zone under dedicated monitoring for this many minutes. */
   zoneRetentionMin: number;
+}
+
+export interface LiquidityStrategySettings {
+  /** Prior closed 5m candles used for both the sweep and volume profile. */
+  lookbackBars: number;
+  /** Price bins for the OHLCV-estimated fixed-range volume profile. */
+  profileBins: number;
+  /** Pending setup expires this many bars after its sweep. */
+  setupExpiryBars: number;
+  /** Minimum excursion beyond the prior high/low, in ATR units. */
+  sweepMinAtr: number;
+  /** Maximum distance from POC considered a retest, in ATR units. */
+  retestToleranceAtr: number;
+  /** Stop buffer beyond the sweep wick, in ATR units. */
+  stopBufferAtr: number;
+  /** Skip a retest if sweep-extreme risk is wider than this many ATRs. */
+  maxStopAtr: number;
 }
 
 export interface Settings {
@@ -50,23 +67,24 @@ export interface Settings {
   leverage: number;
   /** Max simultaneous bot positions — hard cap 8 (your spec). */
   maxPositions: number;
-  /** Follow the scanner's top high-volatility trending markets. */
+  /** Use scanner-selected liquid symbols as the two-sided strategy's watch set. */
   autoScan: boolean;
 
   scanner: ScannerSettings;
+  strategy: LiquidityStrategySettings;
 
-  // ---- SUPER INDIBOT indicator parameters (defaults preserved) ----
+  // ---- legacy indicator display settings (not used to create trade signals) ----
   emaLengths: number[]; // [5,11,15,18,21,24,28,34]
   emaExtraLength: number; // 200
   atrLength: number; // 14
   atrSlMultiplier: number; // 2
-  tpRrFactor: number; // 1.5  (TP1 = 1.5R, TP2 = 3R, TP3 = 4.5R)
+  tpRrFactor: number; // legacy three-target formula for compatibility-only signals
 
-  // ---- scale-out ladder (your spec) ----
-  /** TP1 closes 33% of position, SL -> breakeven */
-  tp1ClosePct: number; // 33
-  /** TP2 closes 50% of REMAINING, SL -> TP1 */
-  tp2ClosePct: number; // 50
+  // ---- legacy scale-out settings (used only by compatibility signals) ----
+  /** Legacy TP1 percentage; new liquidity trades use fixed ~20% tranches. */
+  tp1ClosePct: number;
+  /** Legacy TP2 percentage; new liquidity trades use fixed ~20% tranches. */
+  tp2ClosePct: number;
 
   // ---- UI / analytics ----
   historyDays: number; // rolling stats window (indicator default 7)
@@ -98,11 +116,21 @@ export const DEFAULT_SETTINGS: Settings = {
     minQuoteVolume24h: 20_000_000,
     minRange24hPct: 3,
     minAtrPct: 0.6,
-    minAdx: 18,
+    minAdx: 18, // retained for settings migration; no longer an entry gate
     topN: 16,
-    minOpportunityScore: 65,
-    maxEmaGapAtr: 0.45,
+    minOpportunityScore: 65, // retained for settings migration; no longer an entry gate
+    maxEmaGapAtr: 0.45, // retained for settings migration; no longer an entry gate
     zoneRetentionMin: 30,
+  },
+
+  strategy: {
+    lookbackBars: 30,
+    profileBins: 24,
+    setupExpiryBars: 24,
+    sweepMinAtr: 0.05,
+    retestToleranceAtr: 0.2,
+    stopBufferAtr: 0.1,
+    maxStopAtr: 6,
   },
 
   emaLengths: [5, 11, 15, 18, 21, 24, 28, 34],
@@ -151,7 +179,7 @@ function envKeys(): Partial<Settings> {
     const m = process.env.BINANCE_MODE;
     if (m === 'testnet' || m === 'live') patch.mode = m;
     else if (m === 'paper') {
-      console.warn('[settings] BINANCE_MODE=paper was removed — VelocityX only trades for real (use testnet or live)');
+      console.warn('[settings] BINANCE_MODE=paper was removed — order execution uses Binance Demo or LIVE; use the separate historical backtest for no-orders simulation');
     }
   }
   if (process.env.BINANCE_SYMBOL) patch.symbol = process.env.BINANCE_SYMBOL;
@@ -222,7 +250,17 @@ function sanitize(s: Settings): Settings {
   sc.zoneRetentionMin = Math.round(clamp(num(sc.zoneRetentionMin, 30), 5, 240));
   sc.enabled = sc.enabled !== false;
 
-  // Simulation was removed: paper configs (from env, file or API) migrate to
+  const strategy = (s.strategy = { ...DEFAULT_SETTINGS.strategy, ...(s.strategy || {}) });
+  strategy.lookbackBars = Math.round(clamp(num(strategy.lookbackBars, 30), 10, 250));
+  strategy.profileBins = Math.round(clamp(num(strategy.profileBins, 24), 8, 100));
+  strategy.setupExpiryBars = Math.round(clamp(num(strategy.setupExpiryBars, 24), 1, 288));
+  strategy.sweepMinAtr = clamp(num(strategy.sweepMinAtr, 0.05), 0, 2);
+  strategy.retestToleranceAtr = clamp(num(strategy.retestToleranceAtr, 0.2), 0, 2);
+  strategy.stopBufferAtr = clamp(num(strategy.stopBufferAtr, 0.1), 0, 2);
+  strategy.maxStopAtr = clamp(num(strategy.maxStopAtr, 6), 0.1, 30);
+
+  // Simulation was removed as a trading mode: paper configs from env/file/API migrate
+  // to LIVE. Historical backtesting is a separate, isolated, no-orders feature.
   // LIVE. Order placement still requires an explicit arming step, so a legacy
   // paper setting can never start trading by itself.
   if (!['testnet', 'live'].includes(s.mode)) {

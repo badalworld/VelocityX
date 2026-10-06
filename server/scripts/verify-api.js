@@ -190,6 +190,10 @@ function wsProbe(query) {
     assert(readiness.status === 200 && ['READY', 'DISARMED', 'BLOCKED'].includes(readiness.json?.state), 'execution-readiness contract is available to the frontend');
     assert(typeof readiness.json?.checks?.engine === 'boolean' && Array.isArray(readiness.json?.reasons), 'readiness exposes server-enforced checks and reasons');
     assert(authed.json?.execution?.state === readiness.json?.state, 'status and readiness endpoint use the same execution contract');
+    const badBacktestDays = await req('POST', '/api/backtest/run', { token: TOKEN, body: { symbol: 'BTCUSDT', days: 1.5 } });
+    assert(badBacktestDays.status === 400, 'backtest rejects fractional/out-of-range history windows before fetching candles');
+    const badBacktestRisk = await req('POST', '/api/backtest/run', { token: TOKEN, body: { riskPercent: 99 } });
+    assert(badBacktestRisk.status === 400, 'backtest risk settings are bounded before simulation');
     const queryToken = await req('GET', `/api/status?token=${TOKEN}`);
     assert(queryToken.status === 200, 'token is also accepted as ?token= (WS/preview friendly)');
 
@@ -212,7 +216,7 @@ function wsProbe(query) {
     assert(stillTestnet.json?.mode === 'testnet', 'mode stayed testnet after the rejected switch');
 
     const paperRejected = await req('POST', '/api/settings', { token: TOKEN, body: { mode: 'paper' } });
-    assert(paperRejected.status === 400 && /testnet \| live/i.test(paperRejected.json?.error || ''), 'removed paper mode is rejected by the API (simulation is gone)');
+    assert(paperRejected.status === 400 && /testnet \| live/i.test(paperRejected.json?.error || ''), 'paper order-execution mode is rejected; only Binance Demo and LIVE are execution environments');
 
     const liveNoKeys = await req('POST', '/api/settings', { token: TOKEN, body: { mode: 'live', confirmLive: true } });
     assert(liveNoKeys.status === 400, 'LIVE is refused when no live keys are configured');

@@ -1,16 +1,15 @@
 /**
- * Signal engine — multi-symbol.
+ * Per-symbol signal engine for the closed-candle 5m liquidity-sweep / POC-retest strategy.
  *
- * Watches every retained Opportunity Zone plus the primary symbol and every
- * bot-managed position, and fires signals from the indicator's non-repaint
- * rule (EMA11/EMA34 confirmed cross)
- * on closed 5m candles.
- *
- * Only candles that CLOSE AFTER a symbol was first watched are acted on — no
- * backfill, no repainting, no acting on historical crossovers.
+ * Watches retained liquid scanner symbols, the primary symbol and every
+ * bot-managed position. On first watch/restart it primes pending setup state
+ * from historical closed bars but never executes a historical signal. New
+ * setup signals require a prior 30-bar sweep, locked approximate POC reclaim,
+ * and a later directional retest/rejection. The EMA ribbon is dashboard-only.
  */
 import { api } from './binance';
-import { computeSnapshot, signalAt, SignalSide, ema } from './indicators';
+import { computeSnapshot, ema } from './indicators';
+import { LiquiditySweepStrategy } from './liquidityStrategy';
 import { getSettings } from './settings';
 import { saveSignal, SignalRecord } from './store';
 import { trader, OpenSignal } from './trader';
@@ -43,13 +42,12 @@ class Engine {
   private lastProcessed = new Map<string, number>();
   private baselined = new Set<string>();
   /** Current continuous watch session. Leaving and later re-entering a zone must
-   *  establish a new baseline, never replay a crossover that happened away. */
+   * establish a new baseline, never replay a signal that happened away. */
   private watched = new Set<string>();
   private lastSignalRec: SignalRecord | null = null;
+  private liquidity = new LiquiditySweepStrategy();
   private lastTickAt = 0;
-  /** Throttle "candles fetch failed" per symbol so an exchange outage does not
-   *  flood the log every 2 s tick (the state change itself is logged by
-   *  binance.ts when reachability flips). */
+  /** Throttle candle-fetch errors per symbol during exchange outages. */
   private lastCandleErrorAt = new Map<string, number>();
 
   start(): void {
@@ -69,12 +67,20 @@ class Engine {
     const s = getSettings();
     const set = new Set<string>([s.symbol]);
     if (s.autoScan) for (const sym of scanner.activeSymbols()) set.add(sym);
-    for (const sym of trader.managedSymbols()) set.add(sym); // never lose sight of an open position
+    for (const sym of trader.managedSymbols()) set.add(sym);
     return [...set];
   }
 
   lastTick(): number {
     return this.lastTickAt;
+  }
+
+  /** Rebaseline all watchers after strategy parameters change; never replay an old entry. */
+  resetStrategy(): void {
+    this.liquidity.reset();
+    this.baselined.clear();
+    this.lastProcessed.clear();
+    this.lastSignalRec = null;
   }
 
   private async tick(first = false): Promise<void> {
@@ -88,6 +94,7 @@ class Engine {
         if (!nextWatched.has(symbol)) {
           this.baselined.delete(symbol);
           this.lastProcessed.delete(symbol);
+          this.liquidity.reset(symbol);
         }
       }
       this.watched = nextWatched;
@@ -105,68 +112,63 @@ class Engine {
           }
           continue;
         }
-        const candles = candleStore.get(symbol, s.interval);
-        if (candles.length < 60) continue;
 
-        const snap = computeSnapshot(candles, s.emaLengths, s.emaExtraLength, s.atrLength);
-
-        const now = Date.now();
-        let idx = candles.length - 1;
-        if (candles[idx].closeTime > now) idx -= 1;
-        if (idx < 5) continue;
-        const closed = candles[idx];
+        const allCandles = candleStore.get(symbol, s.interval);
+        const closed = candleStore.closed(symbol, s.interval);
+        if (closed.length < Math.max(60, s.strategy.lookbackBars + 2)) continue;
+        // The EMA ribbon remains a dashboard-only indicator. It no longer
+        // generates trade entries; those come exclusively from the POC strategy.
+        computeSnapshot(allCandles, s.emaLengths, s.emaExtraLength, s.atrLength);
 
         if (!this.baselined.has(symbol)) {
           this.baselined.add(symbol);
-          this.lastProcessed.set(symbol, closed.time);
-          if (first) console.log(`[engine] ${symbol}: baseline candle ${new Date(closed.time).toISOString()} — waiting for next close`);
+          this.liquidity.prime(symbol, closed, s.strategy, s.atrLength);
+          this.lastProcessed.set(symbol, closed[closed.length - 1].time);
+          if (first) console.log(`[engine] ${symbol}: strategy state restored from closed 5m candles — waiting for a fresh retest`);
           continue;
         }
-        const prev = this.lastProcessed.get(symbol) ?? 0;
-        if (closed.time <= prev) continue;
-        this.lastProcessed.set(symbol, closed.time);
 
-        const fastIndex = s.emaLengths.indexOf(11);
-        const slowIndex = s.emaLengths.indexOf(34);
-        if (fastIndex < 0 || slowIndex < 0) continue; // settings sanitizer normally guarantees both
-        const sig: SignalSide | null = signalAt(snap.emas[fastIndex], snap.emas[slowIndex], idx);
-        const atrVal = snap.atrSeries[idx];
-        if (!sig || !Number.isFinite(atrVal)) continue;
-        // In auto-scan mode, dashboard-only symbols do not create actionable
-        // noise. A signal is journalled only for a live zone or for an already
-        // managed trade (which still needs opposite-signal exit handling).
-        if (
-          s.autoScan &&
-          !scanner.isExecutionEligible(symbol, sig) &&
-          !trader.managedSymbols().includes(symbol)
-        ) continue;
+        const lastProcessed = this.lastProcessed.get(symbol) ?? 0;
+        const firstNew = closed.findIndex((c) => c.time > lastProcessed);
+        if (firstNew < 0) continue;
 
-        const record: SignalRecord = {
-          id: rndId(),
-          symbol,
-          time: closed.time,
-          detectedAt: Date.now(),
-          side: sig,
-          price: closed.close,
-          atr: atrVal,
-          acted: false,
-          tradeId: null,
-        };
-        saveSignal(record);
-        if (symbol === s.symbol) this.lastSignalRec = record;
-        console.log(`[engine] SIGNAL ${sig} ${symbol} @ ${closed.close} (ATR ${atrVal.toFixed(4)}) candle=${new Date(closed.time).toISOString()}`);
-        emit('signal', { signal: record });
-        emit('log', {
-          level: sig === 'LONG' ? 'win' : 'loss',
-          msg: `${symbol} signal ${sig} @ ${closed.close} — ATR ${atrVal.toFixed(4)}`,
-        });
+        // Process newly closed bars in order to keep setup state correct across
+        // delayed ticks, but never execute a stale retest after an outage.
+        for (let i = firstNew; i < closed.length; i++) {
+          const bar = closed[i];
+          const hit = this.liquidity.process(symbol, closed, i, s.strategy, s.atrLength);
+          this.lastProcessed.set(symbol, bar.time);
+          if (!hit) continue;
 
-        // Capture zone eligibility before execution. A handled signal consumes
-        // the zone (TRIGGERED when disarmed/failed, EXECUTED when a trade was
-        // opened), so it can never be replayed after auto-trade is enabled.
-        const zoneEligible = s.autoScan && scanner.isExecutionEligible(symbol, sig);
-        await trader.onSignal({ record, side: sig, price: closed.close, atr: atrVal } as OpenSignal);
-        if (zoneEligible) scanner.markSignal(symbol, sig, record.id, record.tradeId);
+          const record: SignalRecord = {
+            id: rndId(), symbol, time: bar.time, detectedAt: Date.now(), side: hit.side,
+            price: hit.entryPrice, atr: hit.atr, acted: false, tradeId: null,
+            strategy: 'LIQUIDITY_SWEEP_POC_RETEST', pocPrice: hit.pocPrice,
+            sweptLevel: hit.sweptLevel, sweepExtreme: hit.sweepExtreme,
+            stopPrice: hit.stopPrice, riskDistance: hit.riskDistance, sweepTime: hit.sweepTime,
+          };
+          saveSignal(record);
+          if (symbol === s.symbol) this.lastSignalRec = record;
+          console.log(`[engine] SIGNAL ${hit.side} ${symbol} @ ${hit.entryPrice} · POC ${hit.pocPrice} · stop ${hit.stopPrice} · retest=${new Date(bar.time).toISOString()}`);
+          emit('signal', { signal: record });
+          emit('log', {
+            level: hit.side === 'LONG' ? 'win' : 'loss',
+            msg: `${symbol} ${hit.side} POC retest @ ${hit.entryPrice} · POC ${hit.pocPrice} · sweep ${hit.sweptLevel}`,
+          });
+
+          const ageMs = Date.now() - bar.closeTime;
+          if (ageMs > 120_000) {
+            emit('log', { level: 'info', msg: `${symbol} POC retest was ${Math.round(ageMs / 1000)}s old — recorded, not executed` });
+            continue;
+          }
+          // Auto-scan requires a live monitor zone; manual mode watches the
+          // primary symbol without needing a scanner zone.
+          const zoneEligible = s.autoScan && scanner.isExecutionEligible(symbol, hit.side);
+          if (s.autoScan && !zoneEligible && !trader.managedSymbols().includes(symbol)) continue;
+
+          await trader.onSignal({ record, side: hit.side, price: hit.entryPrice, atr: hit.atr, stopPrice: hit.stopPrice } as OpenSignal);
+          if (zoneEligible) scanner.markSignal(symbol, hit.side, record.id, record.tradeId);
+        }
       }
     } catch (e: any) {
       console.error('[engine]', e?.message || e);
@@ -190,20 +192,15 @@ class Engine {
     const slowIndex = s.emaLengths.indexOf(34);
     const bull = fastIndex >= 0 && slowIndex >= 0 && vals[slowIndex] < vals[fastIndex];
     return {
-      symbol: sym,
-      interval: s.interval,
-      lastPrice: last.close,
+      symbol: sym, interval: s.interval, lastPrice: last.close,
       atr: Number.isFinite(snap.atrSeries[i]) ? snap.atrSeries[i] : snap.atrSeries[i - 1] || 0,
-      ribbonBull: bull,
-      emas: vals,
-      emaExtra: snap.emaExtra[i],
+      ribbonBull: bull, emas: vals, emaExtra: snap.emaExtra[i],
       lastSignal: this.lastSignalRec && this.lastSignalRec.symbol === sym ? this.lastSignalRec : null,
       lastClosedCandleTime: candleStore.closed(sym, s.interval).slice(-1)[0]?.time ?? 0,
       engineStartedAt: this.startedAt,
       tradable: scanner.result() ? scanner.isTradable(sym) : undefined,
     };
   }
-
 }
 
 export const engine = new Engine();
@@ -214,7 +211,7 @@ export const engine = new Engine();
 
 let mtfCache: { at: number; data: any } | null = null;
 
-/** Port of the indicator's TREND ANALYSIS dashboard. */
+/** Port of the indicator's TREND ANALYSIS dashboard; informational only, not a strategy entry gate. */
 export async function mtfDashboard(symbol?: string): Promise<any> {
   const s = getSettings();
   const sym = symbol ?? s.symbol;

@@ -277,6 +277,38 @@ export class BinanceApi {
     }
   }
 
+  /** Historical public candles for isolated backtests; never sends an order. */
+  async historicalKlines(
+    symbol: string,
+    interval: string,
+    startTime: number,
+    endTime: number,
+    limit = 1500,
+  ): Promise<Candle[]> {
+    const safeLimit = Math.max(1, Math.min(1500, Math.floor(limit)));
+    try {
+      const raw = (await this.publicGet(
+        '/fapi/v1/klines',
+        { symbol, interval, startTime, endTime, limit: safeLimit },
+        'market',
+        klineWeight(safeLimit),
+      )) as any[];
+      this.goOnline();
+      return raw.map((k) => ({
+        time: Number(k[0]),
+        closeTime: Number(k[6]),
+        open: Number(k[1]),
+        high: Number(k[2]),
+        low: Number(k[3]),
+        close: Number(k[4]),
+        volume: Number(k[5]),
+      }));
+    } catch (e) {
+      this.markUnreachable();
+      throw e;
+    }
+  }
+
   /** One call for the whole universe: 24h stats (weight 40) — scanner step 1. */
   async ticker24hrAll(): Promise<
     { symbol: string; lastPrice: number; priceChangePercent: number; highPrice: number; lowPrice: number; quoteVolume: number; volume: number }[]

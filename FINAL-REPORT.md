@@ -70,6 +70,13 @@ Please do not skip the preflight: it takes seconds and answers the questions I c
 | Soak: real server with no egress (every call fails) for 28 s, then SIGTERM | no crash, honest `BLOCKED` readiness, retries with backoff, exit in 9 ms |
 | **Mutation check:** 32 defects injected into the compiled output, one at a time | **31 caught**; the survivor is an equivalent mutant (a second redundant guard covers it) |
 
+### Strategy/backtest verification update (2026-10-06)
+
+- The completed 5m liquidity-sweep/POC-retest implementation, execution ladder, API, docs and UI were rebuilt; `npm run test:all --prefix server` completed successfully, including deterministic strategy/simulation checks, authenticated mocked backtest-route integration and updated execution, realtime, wire and API suites.
+- `npm run build --prefix client` completed successfully; the UI smoke suite passed **61/61**, including the five-R position ladder and Strategy & Backtest tab.
+- The synthetic fixture was actually executed: **1 closed fixture trade, +$300, +3.00R** from $10,000 at 1% risk with fees/slippage disabled. This is a designed unit-test path, not historical market data or a profitability result.
+- Historical Binance candles could not be fetched from this sandbox: the alternate Binance Vision archive endpoint failed TLS and the external page fetch failed HTTP 500. No historical simulation result is available; use the authenticated Settings/API backtest on a host with Binance data access.
+
 I deliberately attacked the tests as well as the code: every new guard above has a mutant that makes a named check fail, including re-introducing the original `request()` and WebSocket-crash bugs.
 
 ## 6. What I could NOT verify — and how to close it
@@ -79,7 +86,7 @@ This sandbox has **no network path to Binance**, so these rest on the published 
 1. That the live/demo exchange accepts the exact `algoOrder` parameters (`algoType`, `triggerPrice`, `clientAlgoId`, `reduceOnly`/`positionSide`) and replies as documented.
 2. **Which user-data WebSocket URL form and host your environment accepts.** Binance's docs show `/private/ws/<listenKey>` and `/private/ws?listenKey=…&events=…`; for demo trading two documents disagree on the host (`demo-fstream.binance.com` vs `fstream.binancefuture.com`). The bot tries them all, in order, and remembers the one that works.
 3. Whether a triggered algo order's engine order keeps the `clientAlgoId` (the code never relies on it) and whether `ALGO_UPDATE.aq` is populated (if not, the REST reconcile books the fill instead).
-4. Strategy profitability — not assessed; there is no backtest in the repo. Real money can be lost.
+4. Strategy profitability — not assessed. The repository now includes a separate public-5m-OHLCV backtester, but this sandbox cannot reach Binance, so no historical result was obtained. The executed synthetic fixture verifies ladder arithmetic only; it is not market history or evidence of profitability. Real money can be lost.
 
 `npm run preflight --prefix server` answers 1–3 **from your host, with your keys, without sending any order** (key/IP/`canTrade`, one-way vs hedge, the Algo endpoint, every user-stream URL form against a real listenKey, both market sockets). Add `-- --algo-roundtrip` to place and immediately cancel one far-from-market conditional order — it proves item 1 end-to-end (run it on the demo environment first).
 
@@ -91,12 +98,12 @@ Known limitation: a take-profit leg that was cancelled externally *and* whose pr
 2. **Binance key:** Futures enabled, **withdrawals disabled**, **IP-restricted** to the server. A symbol that already holds a position is never traded by the bot.
 3. **Environment:** `VX_API_TOKEN=<long random>` (required for LIVE), `BINANCE_LIVE_KEY/SECRET`, `BINANCE_MODE`. `VX_ALLOW_LIVE=1` **only** if a restart should resume armed LIVE trading (unset = every restart comes back disarmed).
 4. **Preflight:** `BINANCE_MODE=testnet npm run preflight --prefix server -- --algo-roundtrip` → must end `PREFLIGHT: ALL CHECKS PASSED`; then the read-only run with `BINANCE_MODE=live`.
-5. **Demo session:** auto-trade ON in TESTNET for a full session; confirm entry, the stop and three take-profits resting under *Conditional Orders* in the Binance UI, TP1 → breakeven, TP2 → stop at TP1, TP3, the Kill switch.
-6. **LIVE, small:** switch to LIVE (confirmation; it lands disarmed), set a small `tradeSizePercent`, arm, and watch the first trade from entry to exit.
+5. **Demo session:** auto-trade ON in TESTNET for a full session; confirm the sweep/POC-retest entry, stop and five take-profits resting under *Conditional Orders*, TP1 → breakeven, TP2 → 1R, TP3 → 2R, TP4 → 3R, TP5 remainder, and the Kill switch.
+6. **LIVE, small:** switch to LIVE (confirmation; it lands disarmed), set a conservative `tradeSizePercent`, arm, and watch the first five-target trade from entry to exit.
 7. Watch the activity feed for `Protective ladder failed`, `AUTO-TRADE DISARMED`, `could not cancel leftover conditional order`, `reconcile error`, `MARGIN_CALL`.
 
 ## 8. Notes
 
-- Nothing was committed or pushed; the changes are in the working tree of branch `arena/89cabb3b-velocityx`.
+- The work is uncommitted in the current working tree on `arena/5891691b-velocityx`.
 - The 2400/min weight assumption is the default VIP-0 IP limit (`server/src/ratelimit.ts` is the one place to change it).
 - The dashboard is single-operator (one shared token): put it behind a VPN or an authenticating reverse proxy if exposed.

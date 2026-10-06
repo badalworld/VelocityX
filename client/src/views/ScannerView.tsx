@@ -5,7 +5,7 @@ import { OpportunityQueue, ScannerSummary, ScannerTable, TopPicks } from '../com
 import { IconAlert, IconRadar, IconShield, IconTrend } from '../motion/Icons';
 
 /* ============================================================================
-   Scanner view — the whole ranked market, top volatility first.
+   Scanner view — liquid markets and their dedicated 5m sweep monitors.
    ========================================================================== */
 
 export default function ScannerView({
@@ -34,12 +34,9 @@ export default function ScannerView({
             </span>
             <span className="chip green">binance USD-M universe</span>
           </span>
-          <h1 className="hero-title">50 assets scanned. Best setups retained until the signal.</h1>
+          <h1 className="hero-title">Liquid markets watched. Sweeps confirmed before any entry.</h1>
           <p className="hero-sub">
-            Each cycle analyses fifty liquid USD-M markets in parallel. Aligned, high-quality setups near a fresh 5m
-            EMA11/EMA34 cross move into the <b>Opportunity Zone</b>, where the realtime engine keeps monitoring them while
-            the scanner continues through the next batch. A real order is possible only after the confirmed signal and
-            every server-side execution check passes.
+            Each cycle ranks up to fifty active USD-M markets for monitoring. The 5m engine independently waits for a 30-bar liquidity sweep, close back inside, POC reclaim and later retest/rejection. No EMA crossover or scanner score triggers an entry; orders still require the server-side execution gate.
           </p>
         </div>
         <div className="hero-metrics">
@@ -98,18 +95,15 @@ export default function ScannerView({
       >
         <OpportunityQueue scan={scan} />
         <div className="hint mt">
-          Zone assets stay on the dedicated 5m stream while the next 50-asset scan runs. A setup-quality score ranks
-          rule alignment; it is not a promised win rate. Execution still requires auto-trade, a fresh signal, available
-          position capacity and a successful Binance account preflight.
+          Watched symbols stay on the 5m engine while the next market scan runs. Scanner score only ranks monitoring priority and is not a setup probability. Execution still requires a fresh sweep/POC signal, auto-trade, available position capacity and Binance preflight.
         </div>
       </Panel>
 
       <div className="grid-2">
-        <Panel title="Strongest Candidates" sub="quality ranked · not armed yet" icon={<IconTrend />} meta={`${(scan?.rows ?? []).filter((r) => r.tradable).length} trending`}>
+        <Panel title="Monitor Candidates" sub="activity ranked · no direction bias" icon={<IconTrend />} meta={`${(scan?.rows ?? []).filter((r) => r.tradable).length} liquid`}>
           <TopPicks scan={scan} />
           <div className="hint mt">
-            Candidates continue to be rescored. Only rows that also enter the Opportunity Zone are handed to the
-            confirmed-signal engine; at most {slots.max} real positions can run at once.
+            The score is for monitoring priority only. Both LONG and SHORT sweep/POC setups are evaluated; at most {slots.max} real positions can run at once.
           </div>
         </Panel>
 
@@ -120,7 +114,7 @@ export default function ScannerView({
 
       <Panel
         title="Full Ranking"
-        sub="50-asset batch · volatility ranked · setup scored"
+        sub="50-asset batch · liquidity/activity ranked · both sides monitored"
         icon={<IconRadar />}
         bodyClass="flush"
         meta={
@@ -136,42 +130,13 @@ export default function ScannerView({
       <div className="grid-2">
         <Panel title="Trade Gates" sub="your rules, enforced" icon={<IconShield />}>
           <div className="mini-grid">
-            <div className="mini">
-              <div className="k">Min 24h volume</div>
-              <div className="v">{fmt((scan?.gate?.minQuoteVolume24h ?? 0) / 1e6, 0)}M</div>
-            </div>
-            <div className="mini">
-              <div className="k">Min 24h range</div>
-              <div className="v">{fmt(scan?.gate?.minRange24hPct ?? 0, 1)}%</div>
-            </div>
-            <div className="mini">
-              <div className="k">Min ATR (15m)</div>
-              <div className="v">{fmt(scan?.gate?.minAtrPct ?? 0, 2)}%</div>
-            </div>
-            <div className="mini">
-              <div className="k">Min ADX (trend)</div>
-              <div className="v">{fmt(scan?.gate?.minAdx ?? 0, 0)}</div>
-            </div>
-            <div className="mini">
-              <div className="k">Min setup quality</div>
-              <div className="v">{fmt(scan?.gate?.minOpportunityScore ?? 0, 0)}</div>
-            </div>
-            <div className="mini">
-              <div className="k">Max 5m EMA gap</div>
-              <div className="v">{fmt(scan?.gate?.maxEmaGapAtr ?? 0, 2)} ATR</div>
-            </div>
-            <div className="mini">
-              <div className="k">Zone retention</div>
-              <div className="v">{scan?.gate?.zoneRetentionMin ?? 0} min</div>
-            </div>
-            <div className="mini">
-              <div className="k">Max positions</div>
-              <div className="v">{scan?.gate?.maxPositions ?? 8}</div>
-            </div>
-            <div className="mini">
-              <div className="k">Scan cadence</div>
-              <div className="v">{scan?.durationMs ? `${scan.durationMs} ms` : '—'}</div>
-            </div>
+            <div className="mini"><div className="k">Min 24h volume</div><div className="v">{fmt((scan?.gate?.minQuoteVolume24h ?? 0) / 1e6, 0)}M</div></div>
+            <div className="mini"><div className="k">Min 24h range</div><div className="v">{fmt(scan?.gate?.minRange24hPct ?? 0, 1)}%</div></div>
+            <div className="mini"><div className="k">Min ATR (15m)</div><div className="v">{fmt(scan?.gate?.minAtrPct ?? 0, 2)}%</div></div>
+            <div className="mini"><div className="k">Monitor-zone cap</div><div className="v">{scan?.gate?.maxOpportunityZones ?? '—'}</div></div>
+            <div className="mini"><div className="k">Zone retention</div><div className="v">{scan?.gate?.zoneRetentionMin ?? 0} min</div></div>
+            <div className="mini"><div className="k">Max positions</div><div className="v">{scan?.gate?.maxPositions ?? 8}</div></div>
+            <div className="mini"><div className="k">Scan duration</div><div className="v">{scan?.durationMs ? `${scan.durationMs} ms` : '—'}</div></div>
           </div>
           <div className="hint warn mt">
             <IconAlert style={{ width: 13, height: 13, verticalAlign: '-2px', marginRight: 4 }} />
@@ -181,15 +146,15 @@ export default function ScannerView({
           </div>
         </Panel>
 
-        <Panel title="Dedicated Monitor" sub="retained opportunity symbols" icon={<IconTrend />} meta={`${(status?.scanner?.selected ?? []).length} symbols`}>
+        <Panel title="Dedicated Monitor" sub="retained symbols · both directions" icon={<IconTrend />} meta={`${(status?.scanner?.selected ?? []).length} symbols`}>
           {(status?.scanner?.selected ?? []).length === 0 ? (
-            <div className="empty">No high-quality setup is inside the retained opportunity zone right now.</div>
+            <div className="empty">No symbols are currently retained for dedicated 5m sweep monitoring.</div>
           ) : (
             <div className="scr-grid">
               {(status?.scanner?.selected ?? []).map((s) => (
-                <div key={s} className="scr-item bull">
+                <div key={s} className="scr-item">
                   <span className="scr-sym">{s.replace('USDT', '')}</span>
-                  <span className="scr-state bull">opportunity zone</span>
+                  <span className="scr-state neutral">sweep monitor · both sides</span>
                 </div>
               ))}
               <div className="scr-item">

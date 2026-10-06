@@ -1,6 +1,6 @@
 /**
- * Execution environment. There is no simulated mode: orders always go to a real
- * Binance environment (testnet = Binance's test exchange, live = mainnet).
+ * Order-execution environment. Historical backtests are separate and cannot
+ * submit orders; execution always targets configured Binance Demo or LIVE.
  */
 export type Mode = 'testnet' | 'live';
 
@@ -13,16 +13,21 @@ export interface Trade {
   q1: number;
   q2: number;
   q3: number;
+  q4?: number;
+  q5?: number;
+  exitPlan?: 'LEGACY_3TP' | 'LIQUIDITY_5R';
   entryPrice: number;
   markPrice?: number;
   remainingQty?: number;
   atrAtEntry: number;
   slInitial: number;
   slCurrent: number;
-  slStage: 0 | 1 | 2;
+  slStage: number;
   tp1: number;
   tp2: number;
   tp3: number;
+  tp4?: number;
+  tp5?: number;
   notional: number;
   margin: number;
   leverage: number;
@@ -32,6 +37,8 @@ export interface Trade {
   tp1Filled: boolean;
   tp2Filled: boolean;
   tp3Filled: boolean;
+  tp4Filled?: boolean;
+  tp5Filled?: boolean;
   realizedPnl: number;
   fees: number;
   funding: number;
@@ -63,6 +70,13 @@ export interface SignalRecord {
   atr: number;
   acted: boolean;
   tradeId: string | null;
+  strategy?: 'LIQUIDITY_SWEEP_POC_RETEST';
+  pocPrice?: number;
+  sweptLevel?: number;
+  sweepExtreme?: number;
+  stopPrice?: number;
+  riskDistance?: number;
+  sweepTime?: number;
 }
 
 export interface IncomeSummary {
@@ -155,7 +169,7 @@ export type OpportunityState = 'MONITORING' | 'TRIGGERED' | 'EXECUTED';
 export interface OpportunityZone {
   symbol: string;
   base: string;
-  side: 'LONG' | 'SHORT';
+  side: 'LONG' | 'SHORT' | 'BOTH';
   state: OpportunityState;
   score: number;
   rank: number;
@@ -213,7 +227,7 @@ export interface ScannerRow {
   approachAtr: number;
   opportunity: boolean;
   inOpportunityZone: boolean;
-  opportunitySide: 'LONG' | 'SHORT';
+  opportunitySide: 'LONG' | 'SHORT' | 'BOTH';
   marketType: 'TRENDING' | 'RANGING' | 'QUIET' | 'PEGGED';
   tradable: boolean;
   reason: string;
@@ -342,8 +356,8 @@ export interface Stats {
   windowDays: number;
   totalSignals: number;
   totalClosedTrades: number;
-  tp1Count: number; tp2Count: number; tp3Count: number; slCount: number;
-  tp1Pct: number; tp2Pct: number; tp3Pct: number; slPct: number;
+  tp1Count: number; tp2Count: number; tp3Count: number; tp4Count: number; tp5Count: number; slCount: number;
+  tp1Pct: number; tp2Pct: number; tp3Pct: number; tp4Pct: number; tp5Pct: number; slPct: number;
   winCount: number; lossCount: number;
   overallWinRate: number;
   rrRatio: number;
@@ -381,6 +395,65 @@ export interface ScannerSettings {
   zoneRetentionMin: number;
 }
 
+export interface LiquidityStrategySettings {
+  lookbackBars: number;
+  profileBins: number;
+  setupExpiryBars: number;
+  sweepMinAtr: number;
+  retestToleranceAtr: number;
+  stopBufferAtr: number;
+  maxStopAtr: number;
+}
+
+export interface BacktestTrade {
+  side: 'LONG' | 'SHORT';
+  entryTime: number;
+  exitTime: number | null;
+  entryPrice: number;
+  exitPrice: number | null;
+  initialStop: number;
+  pocPrice: number;
+  sweptLevel: number;
+  sweepTime: number;
+  barsHeld: number;
+  tpHits: number[];
+  closeReason: string | null;
+  status: 'CLOSED' | 'OPEN';
+  grossPnl: number;
+  fees: number;
+  netPnl: number;
+  initialRiskCash: number;
+  rMultiple: number;
+}
+
+export interface BacktestResult {
+  symbol: string;
+  interval: '5m';
+  dataSource: string;
+  startTime: number | null;
+  endTime: number | null;
+  candles: number;
+  startingBalance: number;
+  endingEquity: number;
+  netPnl: number;
+  returnPct: number;
+  closedTrades: number;
+  wins: number;
+  losses: number;
+  winRatePct: number;
+  averageR: number;
+  expectancyR: number;
+  profitFactor: number | null;
+  maxDrawdown: number;
+  maxDrawdownPct: number;
+  fees: number;
+  stopExits: number;
+  tpHitCounts: { tp1: number; tp2: number; tp3: number; tp4: number; tp5: number };
+  openPosition: BacktestTrade | null;
+  trades: BacktestTrade[];
+  assumptions: string[];
+}
+
 export interface Settings {
   mode: Mode;
   autoTrade: boolean;
@@ -391,6 +464,7 @@ export interface Settings {
   maxPositions: number;
   autoScan: boolean;
   scanner: ScannerSettings;
+  strategy: LiquidityStrategySettings;
   emaLengths: number[];
   emaExtraLength: number;
   atrLength: number;

@@ -8,7 +8,7 @@
  *   1. Binance weight budget = 95% of 2400/min, distributed across work areas.
  *   2. Order-rate limiter = 95% of 300/10s and 1200/min.
  *   3. Pegged / stable / staked / index ("copy or stack") markets are rejected.
- *   4. Only trending markets pass: ADX + EMA alignment + volatility gates.
+ *   4. Scanner ranking/activity qualification stays separate from two-sided 5m entries.
  *   5. Volatility ranking is strictly descending (market scanned top → down).
  *   6. Bot positions: max 8, all bot-owned, external positions never adopted.
  */
@@ -104,7 +104,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
 
   /* ------------------------------------------------------------------ 4 */
-  console.log('\n— Trading gates: trend + volatility only —');
+  console.log('\n— Market monitoring gates: activity/liquidity; strategy is direction-agnostic —');
   const barMs = 15 * 60_000;
   const makeCandles = (fn, n = 140) =>
     Array.from({ length: n }, (_, i) => {
@@ -175,9 +175,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }));
   const opportunityRow = { ...rowTrend, score: 85, trendScore: 90, liquidityScore: 90, tradable: true, trend: 'UP' };
   const opportunity = __scanInternals.assessOpportunity(opportunityRow, k5, Date.now());
-  assert(opportunity.opportunity && opportunity.side === 'LONG', 'aligned 15m/1h market converging on the 5m cross enters the opportunity zone', opportunity.reason);
-  assert(opportunity.emaGapAtr <= scannerDefaults.maxEmaGapAtr, `opportunity gap is ATR-normalised (${opportunity.emaGapAtr.toFixed(2)} ATR)`);
-  assert(opportunity.setupScore >= scannerDefaults.minOpportunityScore, `setup quality clears the configured gate (${opportunity.setupScore.toFixed(0)})`);
+  assert(opportunity.opportunity && opportunity.side === 'BOTH', 'liquid market enters the monitor for both long and short sweeps', opportunity.reason);
+  assert(opportunity.emaGapAtr === 0, 'EMA gap is not used as an entry/monitoring gate');
+  assert(opportunity.setupScore === 85, `monitor score is ranking metadata only (${opportunity.setupScore.toFixed(0)})`);
 
   let activeWorkers = 0, maxWorkers = 0, completedAssets = 0;
   await __scanInternals.mapConcurrent(Array.from({ length: 50 }, (_, i) => i), 8, async () => {

@@ -1,17 +1,17 @@
 /**
- * Trade executor — multi-position state machine implementing your rules:
- *   TP1  -> close 33% of position, SL moves to BREAKEVEN
- *   TP2  -> close 50% of remaining, SL moves to TP1
- *   TP3  -> close the rest (FULL profit)
- *   Opposite signal on the same symbol -> close & reverse
+ * Trade executor — multi-position state machine.
  *
- * Multi-position model (your spec):
- *   • Up to **8** simultaneous positions (hard cap), one per symbol, each
- *     selected by the market scanner from high-volatility trending markets.
- *   • The bot ONLY manages trades it opened itself. Orders it places are
- *     tagged `VX<tradeId>…`, every exit order is `reduceOnly` with an explicit
- *     quantity, and entries refuse a symbol that already carries a position —
- *     so a manual/external position can never be closed, reversed or adopted.
+ * New liquidity-sweep trades use five equal scale-outs at 1R..5R:
+ *   TP1..TP4 close ~20% each; the stop advances BE, 1R, 2R, 3R respectively;
+ *   TP5 closes the final remainder. Existing journalled trades retain their
+ *   legacy three-target ladder until they are flat.
+ *
+ * Multi-position model:
+ *   • Up to **8** simultaneous positions (hard cap), one per symbol; scanner
+ *     selection is a monitor list, while signal direction comes from the 5m setup.
+ *   • The bot ONLY manages trades it opened itself. Orders are tagged
+ *     `VX<tradeId>…`, exits carry explicit reduce-only quantities, and a symbol
+ *     already carrying a position is never adopted or reversed by a new POC signal.
  *
  * Stops and take-profits are Binance Algo Service orders (POST /fapi/v1/algoOrder,
  * the only place STOP_MARKET / TAKE_PROFIT_MARKET are accepted since 2025-12-09).
@@ -19,15 +19,16 @@
  * and double-checked by the REST reconcile loop, so a missed WebSocket frame can
  * never leave the journal out of step with the exchange.
  *
- * Every fill, commission, funding payment and realised PnL number is taken from
- * Binance (ORDER_TRADE_UPDATE, /fapi/v1/userTrades, /fapi/v1/income). Nothing is
- * simulated and nothing is estimated: if the exchange has not reported a
- * number, the trade simply does not have it yet.
+ * The live executor reads fills, commissions, funding and realised PnL from
+ * Binance (ORDER_TRADE_UPDATE, /fapi/v1/userTrades, /fapi/v1/income). The
+ * historical OHLCV simulator is a separate pure module and never calls this
+ * state machine.
  */
 import { AlgoLegState, api, floorToStep, roundToTick, fmtQty } from './binance';
 import { SignalSide } from './indicators';
 import {
-  markSignalActed, openTradeOn, openTrades, remainingQtyOf, saveTrade, SignalRecord, Trade,
+  isFiveRTrade, markSignalActed, openTradeOn, openTrades, remainingQtyOf, saveTrade, SignalRecord, Trade,
+  tpCountOf, tpFilledOf, tpPriceOf, tpQtyOf,
 } from './store';
 import { getSettings, MAX_POSITIONS_CAP, updateSettings } from './settings';
 import { priceOf, setPrice } from './prices';
@@ -39,6 +40,8 @@ export interface OpenSignal {
   side: SignalSide;
   price: number;
   atr: number;
+  /** Locked sweep-wick stop from the liquidity strategy. Absent only on legacy/test signals. */
+  stopPrice?: number;
 }
 
 export interface ExecutionGate {
@@ -89,10 +92,34 @@ export function splitQty(qty: number, step: number, p1: number, p2: number): { q
   return { q1, q2, q3 };
 }
 
+/** Five approximately equal exchange-step-aware slices; every leg must be placeable. */
+export function splitFiveWayQty(
+  qty: number,
+  step: number,
+  minLegQty = step,
+): { q1: number; q2: number; q3: number; q4: number; q5: number } | null {
+  if (!(qty > 0) || !(step > 0) || !(minLegQty > 0)) return null;
+  const totalSteps = Math.round(qty / step);
+  const minSteps = Math.max(1, Math.ceil(minLegQty / step - 1e-9));
+  if (totalSteps < 5 * minSteps) return null;
+  const base = Math.floor(totalSteps / 5);
+  const extra = totalSteps % 5;
+  const steps = Array.from({ length: 5 }, (_, i) => base + (i < extra ? 1 : 0));
+  if (steps.some((count) => count < minSteps)) return null;
+  const parts = steps.map((count) => Number((count * step).toPrecision(12)));
+  // Avoid cumulative binary rounding from making the final reduce-only quantity
+  // differ from the position quantity by a few floating-point ulps.
+  parts[4] = Number((qty - parts.slice(0, 4).reduce((sum, value) => sum + value, 0)).toPrecision(12));
+  if (parts[4] < minLegQty - step * 1e-8) return null;
+  return { q1: parts[0], q2: parts[1], q3: parts[2], q4: parts[3], q5: parts[4] };
+}
+
 class Trader {
   /** Symbols with an entry round-trip in flight — blocks duplicates and reserves slots. */
   private entering = new Set<string>();
   private slBusy = new Set<string>();
+  /** A newer TP can arrive while a stop replacement is in flight; rerun it after the current POST. */
+  private slMoveRequested = new Set<string>();
   /** Trades whose market close is in flight — the recovery loop must not re-arm legs under it. */
   private closing = new Set<string>();
   /** Re-entrancy guard for the 10 s recovery loop (a slow pass must never overlap the next). */
@@ -149,6 +176,15 @@ class Trader {
       this.log('error', `${symbol}: invalid signal price/ATR — entry rejected`);
       return;
     }
+    const liquiditySignal = sig.record.strategy === 'LIQUIDITY_SWEEP_POC_RETEST';
+    if (liquiditySignal && sig.stopPrice === undefined) {
+      this.log('error', `${symbol}: liquidity signal has no sweep-based stop — entry rejected`);
+      return;
+    }
+    if (sig.stopPrice !== undefined && (!Number.isFinite(sig.stopPrice) || dir(sig.side) * (sig.price - sig.stopPrice) <= 0)) {
+      this.log('error', `${symbol}: sweep stop is invalid for ${sig.side} at the signal price — entry rejected`);
+      return;
+    }
     if (Date.now() - sig.record.detectedAt > 120_000) {
       this.log('error', `${symbol}: stale signal (${Math.round((Date.now() - sig.record.detectedAt) / 1000)}s) — never replaying an old entry`);
       return;
@@ -156,16 +192,23 @@ class Trader {
 
     const current = openTradeOn(symbol);
     if (current) {
+      // A new liquidity setup is an independent reversal thesis, not an
+      // instruction to liquidate an already managed position. Keep the first
+      // trade protected; the fresh setup is consumed and ignored.
+      if (sig.stopPrice !== undefined || sig.record.strategy === 'LIQUIDITY_SWEEP_POC_RETEST') {
+        this.log('info', `${symbol}: ${sig.side} POC setup ignored — a bot-owned ${current.side} trade is already open`);
+        return;
+      }
+      // Compatibility only for old journal/test signals during migration.
       const opposite = (sig.side === 'LONG' && current.side === 'SHORT') || (sig.side === 'SHORT' && current.side === 'LONG');
-      if (opposite) {
-        this.log('info', `${symbol}: opposite ${sig.side} signal → closing bot ${current.side} trade (close & reverse)`);
-        const closed = await this.closeByMarket(current, 'REVERSE');
-        if (!closed) {
-          this.log('error', `${symbol}: reverse aborted because the existing position could not be confirmed closed`);
-          return;
-        }
-      } else {
+      if (!opposite) {
         this.log('info', `${symbol}: same-direction signal while a bot trade is open — keeping current trade`);
+        return;
+      }
+      this.log('info', `${symbol}: legacy opposite signal → closing bot ${current.side} trade`);
+      const closed = await this.closeByMarket(current, 'REVERSE');
+      if (!closed) {
+        this.log('error', `${symbol}: reverse aborted because the existing position could not be confirmed closed`);
         return;
       }
     }
@@ -289,6 +332,30 @@ class Trader {
       }
       if (qty <= 0) throw new Error('Computed quantity is zero — increase trade size or balance');
 
+      const useFiveR = Number.isFinite(sig.stopPrice) && Number(sig.stopPrice) > 0;
+      if (useFiveR) {
+        // All five reduce-only targets must meet the exchange's per-order
+        // quantity/notional floor. Skip rather than silently omit a 20% exit.
+        const minLegQty = Math.max(info.minQty, info.minNotional / entry);
+        const minLegSteps = Math.max(1, Math.ceil(minLegQty / info.stepSize - 1e-9));
+        const minLadderQty = minLegSteps * info.stepSize * 5;
+        if (qty < minLadderQty - info.stepSize * 1e-8) {
+          const needMargin = (minLadderQty * entry) / leverage;
+          const availableCap = Math.max(0, Math.min(available, equity) * 0.95 - marginUsed);
+          if (needMargin > availableCap) {
+            throw new Error(`${symbol}: five 20% take-profit legs need ~${needMargin.toFixed(2)} USDT margin, above free margin`);
+          }
+          if (needMargin > perTrade * MIN_NOTIONAL_BUMP_LIMIT) {
+            throw new Error(`${symbol}: exchange minimums cannot support five 20% exits within ${MIN_NOTIONAL_BUMP_LIMIT}× configured margin; skipping`);
+          }
+          qty = minLadderQty;
+          this.log('info', `${symbol}: size raised to ${fmtQty(qty)} so all five 20% exits meet exchange minimums`);
+        }
+        if (!splitFiveWayQty(qty, info.stepSize, minLegSteps * info.stepSize)) {
+          throw new Error(`${symbol}: quantity cannot be divided into five valid exchange-sized exits — skipping`);
+        }
+      }
+
       await api.setLeverage(symbol, leverage);
       await api.setIsolated(symbol);
 
@@ -356,15 +423,51 @@ class Trader {
       const filledAvg = await this.entryFillPrice(symbol, entryCid, Number(entryRes?.avgPrice || 0));
       if (filledAvg > 0) entry = filledAvg;
 
-      const slDist = sig.atr * s.atrSlMultiplier;
-      const sl = entry - dir(sig.side) * slDist;
-      const tp1 = entry + dir(sig.side) * slDist * s.tpRrFactor;
-      const tp2 = entry + dir(sig.side) * slDist * s.tpRrFactor * 2;
-      const tp3 = entry + dir(sig.side) * slDist * s.tpRrFactor * 3;
+      let rawStop = useFiveR ? Number(sig.stopPrice) : entry - dir(sig.side) * sig.atr * s.atrSlMultiplier;
+      let slInitial = roundToTick(rawStop, info.tickSize);
+      let riskDistance = dir(sig.side) * (entry - slInitial);
+      let invalidatedAtFill = false;
+      if (!(riskDistance > 0) || !Number.isFinite(riskDistance)) {
+        if (!useFiveR) throw new Error('could not construct a valid protective stop from the signal');
+        // A market gap can put the fill past the planned sweep stop. Persist a
+        // safe temporary stop, arm it, then immediately flatten rather than
+        // leaving an unprotected/unowned exchange position.
+        invalidatedAtFill = true;
+        riskDistance = Math.max(info.tickSize, sig.atr * Math.max(0.1, s.strategy.stopBufferAtr));
+        rawStop = entry - dir(sig.side) * riskDistance;
+        slInitial = roundToTick(rawStop, info.tickSize);
+        riskDistance = Math.max(info.tickSize, dir(sig.side) * (entry - slInitial));
+        this.log('error', `${symbol}: market fill crossed the sweep stop — arming emergency protection and flattening`);
+      }
+
+      const tpCount = useFiveR ? 5 : 3;
+      const targetPrices = Array.from({ length: tpCount }, (_, i) =>
+        roundToTick(entry + dir(sig.side) * riskDistance * (useFiveR ? i + 1 : s.tpRrFactor * (i + 1)), info.tickSize),
+      );
       const notional = qty * entry;
       margin = notional / leverage;
-      const { q1, q2, q3 } = splitQty(qty, info.stepSize, s.tp1ClosePct, s.tp2ClosePct);
 
+      let q1 = 0, q2 = 0, q3 = 0, q4 = 0, q5 = 0;
+      if (useFiveR) {
+        const minLegQty = Math.max(info.minQty, info.minNotional / entry);
+        const minLegSteps = Math.max(1, Math.ceil(minLegQty / info.stepSize - 1e-9));
+        const slices = splitFiveWayQty(qty, info.stepSize, minLegSteps * info.stepSize);
+        if (slices) ({ q1, q2, q3, q4, q5 } = slices);
+        else {
+          // Entry is already filled. Do not attempt an invalid partial ladder;
+          // place a stop for the full size and flatten immediately.
+          invalidatedAtFill = true;
+          q5 = qty;
+        }
+      } else {
+        const legacy = splitQty(qty, info.stepSize, s.tp1ClosePct, s.tp2ClosePct);
+        q1 = legacy.q1; q2 = legacy.q2; q3 = legacy.q3;
+      }
+      const tp1 = targetPrices[0];
+      const tp2 = targetPrices[1];
+      const tp3 = targetPrices[2];
+      const tp4 = targetPrices[3];
+      const tp5 = targetPrices[4];
       const scanRow = scanner.result()?.rows.find((r) => r.symbol === symbol) ?? null;
       const trade: Trade = {
         id,
@@ -372,15 +475,18 @@ class Trader {
         side: sig.side,
         status: 'OPEN',
         qty,
-        q1, q2, q3,
+        q1, q2, q3, q4, q5,
+        exitPlan: useFiveR ? 'LIQUIDITY_5R' : 'LEGACY_3TP',
         entryPrice: entry,
         atrAtEntry: sig.atr,
-        slInitial: roundToTick(sl, info.tickSize),
-        slCurrent: roundToTick(sl, info.tickSize),
+        slInitial,
+        slCurrent: slInitial,
         slStage: 0,
-        tp1: roundToTick(tp1, info.tickSize),
-        tp2: roundToTick(tp2, info.tickSize),
-        tp3: roundToTick(tp3, info.tickSize),
+        tp1,
+        tp2,
+        tp3,
+        tp4,
+        tp5,
         notional,
         margin,
         leverage,
@@ -390,12 +496,14 @@ class Trader {
         tp1Filled: false,
         tp2Filled: false,
         tp3Filled: false,
+        tp4Filled: useFiveR ? false : undefined,
+        tp5Filled: useFiveR ? false : undefined,
         realizedPnl: 0,
         fees: 0,
         funding: 0,
         binanceRealizedPnl: 0,
         commissionOtherAsset: 0,
-        initialRisk: slDist * qty,
+        initialRisk: riskDistance * qty,
         // Predeclare deterministic client ids before any protective POST. If a
         // response is lost, emergency finalization can still cancel every
         // possibly-accepted order by id.
@@ -404,7 +512,9 @@ class Trader {
           sl: `${prefix}S0`,
           tp1: q1 > 0 ? `${prefix}1` : undefined,
           tp2: q2 > 0 ? `${prefix}2` : undefined,
-          tp3: `${prefix}3`,
+          tp3: q3 > 0 ? `${prefix}3` : undefined,
+          tp4: q4 > 0 ? `${prefix}4` : undefined,
+          tp5: q5 > 0 ? `${prefix}5` : undefined,
         },
         mode: s.mode,
         result: null,
@@ -437,19 +547,21 @@ class Trader {
         await api.protectiveStop(symbol, closeSide(trade.side), trade.slInitial, qty, `${prefix}S0`);
         trade.orders.sl = `${prefix}S0`;
         saveTrade(trade);
-        if (q1 > 0) {
-          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp1, q1, { clientAlgoId: `${prefix}1` });
-          trade.orders.tp1 = `${prefix}1`;
+        if (invalidatedAtFill) {
+          await this.closeByMarket(trade, 'KILL');
+          return;
+        }
+        const quantities = [q1, q2, q3, q4, q5];
+        const prices = [trade.tp1, trade.tp2, trade.tp3, trade.tp4, trade.tp5];
+        for (let level = 1; level <= tpCount; level++) {
+          const targetQty = quantities[level - 1];
+          if (targetQty <= 0) continue;
+          const key = `tp${level}` as 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5';
+          const cid = `${prefix}${level}`;
+          await api.takeProfitMarket(symbol, closeSide(trade.side), Number(prices[level - 1]), targetQty, { clientAlgoId: cid });
+          trade.orders[key] = cid;
           saveTrade(trade);
         }
-        if (q2 > 0) {
-          await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp2, q2, { clientAlgoId: `${prefix}2` });
-          trade.orders.tp2 = `${prefix}2`;
-          saveTrade(trade);
-        }
-        await api.takeProfitMarket(symbol, closeSide(trade.side), trade.tp3, q3, { clientAlgoId: `${prefix}3` });
-        trade.orders.tp3 = `${prefix}3`;
-        saveTrade(trade);
       } catch (err: any) {
         this.log('error', `Protective ladder failed (${err?.message}) — emergency flatten requested`);
         emit('error', { message: `${symbol}: protective ladder failed — emergency close requested` });
@@ -468,7 +580,7 @@ class Trader {
 
       this.log(
         'info',
-        `${trade.mode.toUpperCase()} ${trade.side} ${fmtQty(qty)} ${symbol} @ ${trade.entryPrice} | SL ${trade.slInitial} | TP ${trade.tp1}/${trade.tp2}/${trade.tp3}`,
+        `${trade.mode.toUpperCase()} ${trade.side} ${fmtQty(qty)} ${symbol} @ ${trade.entryPrice} | SL ${trade.slInitial} | ${useFiveR ? `TP 1R–5R ${trade.tp1}/${trade.tp2}/${trade.tp3}/${trade.tp4}/${trade.tp5}` : `legacy TP ${trade.tp1}/${trade.tp2}/${trade.tp3}`}`,
       );
       emit('trade', { event: 'opened', trade });
       emit('log', {
@@ -522,42 +634,51 @@ class Trader {
     t.realizedPnl = t.binanceRealizedPnl - t.fees;
   }
 
-  fillTP(t: Trade, n: 1 | 2 | 3, price: number, binance?: { rp?: number; commission?: number; commissionAsset?: string }): void {
-    if (t.status !== 'OPEN') return;
+  fillTP(t: Trade, n: 1 | 2 | 3 | 4 | 5, price: number, binance?: { rp?: number; commission?: number; commissionAsset?: string }): void {
+    if (t.status !== 'OPEN' || n > tpCountOf(t)) return;
     // The same fill can arrive through ORDER_TRADE_UPDATE, ALGO_UPDATE and the
     // REST reconcile — each leg is processed exactly once.
-    if ((n === 1 && t.tp1Filled) || (n === 2 && t.tp2Filled) || (n === 3 && t.tp3Filled)) return;
-    const q = n === 1 ? t.q1 : n === 2 ? t.q2 : t.q3;
-    if (q <= 0 && n !== 3) return;
+    if (tpFilledOf(t, n)) return;
+    const q = tpQtyOf(t, n);
+    if (q <= 0) return;
 
     if (binance) this.applyBinanceNumbers(t, binance.rp, binance.commission, binance.commissionAsset);
+    (t as any)[`tp${n}Filled`] = true;
 
+    const finalLevel = tpCountOf(t);
     if (n === 1) {
-      t.tp1Filled = true;
       if (t.slStage < 1) {
         t.slStage = 1;
         t.slCurrent = t.entryPrice;
       }
       this.log('info', `${t.symbol}: TP1 hit @ ${price} — closed ${fmtQty(q)}, SL → breakeven (${t.entryPrice})`);
-      emit('log', { level: 'win', msg: `${t.symbol} TP1 ✅ closed @ ${price} — SL moved to breakeven` });
-    } else if (n === 2) {
-      t.tp2Filled = true;
-      if (t.slStage < 2) {
-        t.slStage = 2;
-        t.slCurrent = t.tp1;
+      emit('log', { level: 'win', msg: `${t.symbol} TP1 ✅ closed ~20% @ ${price} — SL moved to breakeven` });
+    } else if (n < finalLevel) {
+      const lockAt = tpPriceOf(t, n - 1);
+      if (t.slStage < n) {
+        t.slStage = n;
+        t.slCurrent = lockAt;
       }
-      this.log('info', `${t.symbol}: TP2 hit @ ${price} — closed ${fmtQty(q)} of remaining, SL → TP1 (${t.tp1})`);
-      emit('log', { level: 'win', msg: `${t.symbol} TP2 ✅ closed @ ${price} — SL moved to TP1` });
+      this.log('info', `${t.symbol}: TP${n} hit @ ${price} — closed ${fmtQty(q)}, SL → ${n - 1}R (${lockAt})`);
+      emit('log', { level: 'win', msg: `${t.symbol} TP${n} ✅ closed ~20% @ ${price} — SL moved to ${n - 1}R` });
     } else {
-      t.tp3Filled = true;
-      this.log('info', `${t.symbol}: TP3 hit @ ${price} — full profit booked (${fmtQty(q)})`);
-      emit('log', { level: 'win', msg: `${t.symbol} TP3 🎯 FULL profit booked @ ${price}` });
+      this.log('info', `${t.symbol}: TP${n} hit @ ${price} — final remainder closed (${fmtQty(q)})`);
+      emit('log', { level: 'win', msg: `${t.symbol} TP${n} 🎯 full position closed @ ${price}` });
     }
     saveTrade(t);
     emit('trade', { event: 'fill', level: n, price, trade: t });
 
-    if (n === 3) {
-      void this.finalize(t, 'TP3', price);
+    if (n === finalLevel) {
+      const unaccountedQty = remainingQtyOf(t);
+      if (unaccountedQty <= Math.max(1e-10, t.qty * 1e-8)) {
+        void this.finalize(t, isFiveRTrade(t) ? 'TP5' : 'TP3', price);
+      } else {
+        // A final-leg event can arrive before earlier TP events over WS/REST.
+        // That final order is only its planned tranche, not permission to drop
+        // the journal while earlier slices (and the actual position) remain.
+        this.log('error', `${t.symbol}: TP${n} filled before earlier scale-outs were confirmed; ${fmtQty(unaccountedQty)} remains protected while reconciling`);
+        void this.reconcile();
+      }
     } else {
       void this.moveSL(t);
       // ALGO_UPDATE carries no commission / PnL — read them from the ledger.
@@ -570,7 +691,7 @@ class Trader {
     const d = dir(t.side);
     const remaining = remainingQtyOf(t);
     if (remaining <= 0) {
-      void this.finalize(t, 'TP3', stopPrice);
+      void this.finalize(t, isFiveRTrade(t) ? 'TP5' : 'TP3', stopPrice);
       return;
     }
     // A stop that gapped through fills at the market, never better than the
@@ -578,12 +699,12 @@ class Trader {
     const market = Number.isFinite(marketPrice) && marketPrice > 0 ? marketPrice : stopPrice;
     const fill = d > 0 ? Math.min(stopPrice, market) : Math.max(stopPrice, market);
     if (binance) this.applyBinanceNumbers(t, binance.rp, binance.commission, binance.commissionAsset);
-    const anyTP = t.tp1Filled || t.tp2Filled;
+    const anyTP = Array.from({ length: tpCountOf(t) }, (_, i) => tpFilledOf(t, i + 1)).some(Boolean);
     const reason: Trade['closeReason'] = anyTP ? 'SL_PARTIAL' : 'SL';
     this.log('info', `${t.symbol}: SL hit @ ${fill} — remaining closed, PnL ${t.realizedPnl >= 0 ? '+' : ''}${t.realizedPnl.toFixed(2)} USDT`);
     emit('log', {
-      level: anyTP ? 'win' : 'loss',
-      msg: `${t.symbol} SL ${anyTP ? '(after TP — still a WIN 🟢)' : '🔴'} hit @ ${fill}, PnL ${t.realizedPnl.toFixed(2)} USDT`,
+      level: anyTP ? 'info' : 'loss',
+      msg: `${t.symbol} SL ${anyTP ? 'after one or more partial take-profits' : 'before any take-profit'} hit @ ${fill}, current realised PnL ${t.realizedPnl.toFixed(2)} USDT`,
     });
     void this.finalize(t, reason, fill);
   }
@@ -616,7 +737,8 @@ class Trader {
       const mine = new Set<string>(
         orders.filter((o) => String(o.clientOrderId || '').startsWith(prefix)).map((o) => String(o.orderId)),
       );
-      for (const cid of [t.orders.sl, t.orders.tp1, t.orders.tp2, t.orders.tp3]) {
+      const algoIds = [t.orders.sl, ...Array.from({ length: tpCountOf(t) }, (_, i) => t.orders[`tp${i + 1}` as 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5'])];
+      for (const cid of algoIds) {
         if (!cid) continue;
         try {
           const algo = await api.queryAlgoOrder(cid);
@@ -768,8 +890,11 @@ class Trader {
     this.unsureStrikes.delete(t.id);
     t.closedAt = Date.now();
     t.closeReason = reason;
-    t.result = reason === 'TP3' || reason === 'SL_PARTIAL' ? 'WIN' : reason === 'SL' ? 'LOSS' : null;
+    t.result = null;
     await this.reconcileBinanceNumbers(t);
+    if (reason !== 'EXTERNAL' && t.realizedPnl !== 0) t.result = t.realizedPnl > 0 ? 'WIN' : 'LOSS';
+    else if (reason === 'SL_PARTIAL' || reason === 'TP3' || reason === 'TP5') t.result = 'WIN';
+    else if (reason === 'SL') t.result = 'LOSS';
     await this.refreshFunding(t);
     saveTrade(t);
     await this.cancelLadder(t);
@@ -790,7 +915,7 @@ class Trader {
    * afterwards asks Binance what is genuinely still resting and retries once.
    */
   private async cancelLadder(t: Trade): Promise<void> {
-    for (const key of ['sl', 'tp1', 'tp2', 'tp3'] as const) {
+    for (const key of ['sl', 'tp1', 'tp2', 'tp3', 'tp4', 'tp5'] as const) {
       const cid = t.orders[key];
       if (!cid) continue;
       try {
@@ -827,42 +952,59 @@ class Trader {
   }
 
   private async moveSL(t: Trade): Promise<void> {
-    if (t.status !== 'OPEN' || this.slBusy.has(t.id)) return;
+    if (t.status !== 'OPEN') return;
+    if (this.slBusy.has(t.id)) {
+      this.slMoveRequested.add(t.id);
+      return;
+    }
     this.slBusy.add(t.id);
     try {
       const info = await api.exchangeInfo(t.symbol);
-      const newStop = roundToTick(t.slCurrent, info.tickSize);
-      t.slCurrent = newStop;
-      const oldCid = t.orders.sl;
-      if (oldCid) {
-        try {
-          await api.cancelAlgoOrder(t.symbol, oldCid);
-        } catch (e: any) {
-          // The cleanup sweep in cancelLadder() removes a stop that survived.
-          this.log('error', `${t.symbol}: SL cancel failed: ${e?.message} — continuing, will verify position`);
+      do {
+        this.slMoveRequested.delete(t.id);
+        if (t.status !== 'OPEN') return;
+        const stage = t.slStage;
+        const newStop = roundToTick(t.slCurrent, info.tickSize);
+        t.slCurrent = newStop;
+        const oldCid = t.orders.sl;
+        if (oldCid) {
+          try {
+            await api.cancelAlgoOrder(t.symbol, oldCid);
+          } catch (e: any) {
+            // The cleanup sweep in cancelLadder() removes a stop that survived.
+            this.log('error', `${t.symbol}: SL cancel failed: ${e?.message} — continuing, will verify position`);
+          }
         }
-      }
-      const newCid = `VX${t.id}S${t.slStage}`;
-      const qty = remainingQtyOf(t);
-      if (qty <= 0) {
-        await this.closeByMarket(t, 'KILL');
-        return;
-      }
-      try {
-        // Explicit quantity + reduceOnly: the stop can only ever close the
-        // bot's remaining size — never a manual position on the same symbol.
-        await api.protectiveStop(t.symbol, closeSide(t.side), newStop, qty, newCid);
-        t.orders.sl = newCid;
-        saveTrade(t);
-        emit('trade', { event: 'sl-moved', trade: t });
-        this.log('info', `${t.symbol}: SL moved to ${newStop} (stage ${t.slStage})`);
-      } catch (e: any) {
-        this.log('error', `${t.symbol}: SL replacement failed: ${e?.message} — FLATTENING for safety`);
-        emit('error', { message: `${t.symbol}: SL replacement failed — closing bot position for safety` });
-        await this.closeByMarket(t, 'KILL');
-      }
+        const newCid = `VX${t.id}S${stage}`;
+        const qty = remainingQtyOf(t);
+        if (qty <= 0) {
+          await this.closeByMarket(t, 'KILL');
+          return;
+        }
+        try {
+          // Explicit quantity + reduceOnly: the stop can only ever close the
+          // bot's remaining size — never a manual position on the same symbol.
+          await api.protectiveStop(t.symbol, closeSide(t.side), newStop, qty, newCid);
+          t.orders.sl = newCid;
+          saveTrade(t);
+          emit('trade', { event: 'sl-moved', trade: t });
+          this.log('info', `${t.symbol}: SL moved to ${newStop} (stage ${stage})`);
+        } catch (e: any) {
+          this.log('error', `${t.symbol}: SL replacement failed: ${e?.message} — FLATTENING for safety`);
+          emit('error', { message: `${t.symbol}: SL replacement failed — closing bot position for safety` });
+          await this.closeByMarket(t, 'KILL');
+          return;
+        }
+        // A TP fill may have advanced the requested stop while the cancel/POST
+        // was awaiting the exchange. Never leave the older (looser) stop as the
+        // final resting protection after a faster follow-on fill.
+        if (t.status === 'OPEN' && (t.slStage !== stage || roundToTick(t.slCurrent, info.tickSize) !== newStop)) {
+          this.slMoveRequested.add(t.id);
+        }
+      } while (t.status === 'OPEN' && this.slMoveRequested.has(t.id));
     } finally {
       this.slBusy.delete(t.id);
+      this.slMoveRequested.delete(t.id);
     }
   }
 
@@ -893,16 +1035,16 @@ class Trader {
 
     if (cid.startsWith(`VX${t.id}S`)) {
       this.fillSL(t, Number(o.sp) || t.slCurrent, price || t.slCurrent, binance);
-    } else if (cid === t.orders.tp1 && !t.tp1Filled) {
-      this.fillTP(t, 1, price || t.tp1, binance);
-    } else if (cid === t.orders.tp2 && !t.tp2Filled) {
-      this.fillTP(t, 2, price || t.tp2, binance);
-    } else if (cid === t.orders.tp3 && !t.tp3Filled) {
-      this.fillTP(t, 3, price || t.tp3, binance);
-    } else if (cid === t.orders.entry) {
-      const avg = Number(ev.ap) || 0;
-      if (avg > 0 && Math.abs(avg - t.entryPrice) / t.entryPrice > 0.001) {
-        this.log('info', `${t.symbol}: entry fill confirmed @ ${avg}`);
+    } else {
+      const level = Array.from({ length: tpCountOf(t) }, (_, i) => i + 1)
+        .find((n) => t.orders[`tp${n}` as 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5'] === cid);
+      if (level && !tpFilledOf(t, level)) {
+        this.fillTP(t, level as 1 | 2 | 3 | 4 | 5, price || tpPriceOf(t, level), binance);
+      } else if (cid === t.orders.entry) {
+        const avg = Number(ev.ap) || 0;
+        if (avg > 0 && Math.abs(avg - t.entryPrice) / t.entryPrice > 0.001) {
+          this.log('info', `${t.symbol}: entry fill confirmed @ ${avg}`);
+        }
       }
     }
   }
@@ -933,9 +1075,11 @@ class Trader {
       }
       const price = Number(o.ap) || 0;
       if (caid.startsWith(`VX${t.id}S`)) this.fillSL(t, Number(o.tp) || t.slCurrent, price || t.slCurrent);
-      else if (caid === t.orders.tp1) this.fillTP(t, 1, price || t.tp1);
-      else if (caid === t.orders.tp2) this.fillTP(t, 2, price || t.tp2);
-      else if (caid === t.orders.tp3) this.fillTP(t, 3, price || t.tp3);
+      else {
+        const level = Array.from({ length: tpCountOf(t) }, (_, i) => i + 1)
+          .find((n) => t.orders[`tp${n}` as 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5'] === caid);
+        if (level) this.fillTP(t, level as 1 | 2 | 3 | 4 | 5, price || tpPriceOf(t, level));
+      }
       return;
     }
     if (status === 'EXPIRED' || status === 'REJECTED') {
@@ -990,11 +1134,10 @@ class Trader {
     // The open list is the cheap path. A leg that is not on it is looked up by
     // its client id, so "not on the list" is never mistaken for "gone".
     const resting = new Set((await api.openAlgoOrders(t.symbol)).map((o) => String(o.clientAlgoId || '')));
-    const legs: { key: 'sl' | 'tp1' | 'tp2' | 'tp3'; skip: boolean }[] = [
+    const tpKeys = Array.from({ length: tpCountOf(t) }, (_, i) => `tp${i + 1}` as 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5');
+    const legs: { key: 'sl' | 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5'; skip: boolean }[] = [
       { key: 'sl', skip: false },
-      { key: 'tp3', skip: t.tp3Filled },
-      { key: 'tp1', skip: t.tp1Filled || t.q1 <= 0 },
-      { key: 'tp2', skip: t.tp2Filled || t.q2 <= 0 },
+      ...tpKeys.map((key, i) => ({ key, skip: tpFilledOf(t, i + 1) || tpQtyOf(t, i + 1) <= 0 })),
     ];
     const state = new Map<string, AlgoLegState>();
     for (const leg of legs) {
@@ -1013,8 +1156,8 @@ class Trader {
         this.scheduleLedger(t);
         return;
       }
-      const level = leg.key === 'tp1' ? 1 : leg.key === 'tp2' ? 2 : 3;
-      this.fillTP(t, level, st.avgPrice || t[leg.key]);
+      const level = Number(leg.key.slice(2));
+      this.fillTP(t, level as 1 | 2 | 3 | 4 | 5, st.avgPrice || tpPriceOf(t, level));
       if (t.status !== 'OPEN') return;
     }
     if (t.status !== 'OPEN') return;
@@ -1024,8 +1167,13 @@ class Trader {
     const directionalPos = pos * dir(t.side);
     if (Math.abs(pos) < info.stepSize / 2) {
       // Flat, yet a leg that fired could not be classified (Binance could not
-      // say right now): wait a few passes rather than losing the WIN/LOSS tag.
+      // say right now): wait a few passes rather than losing the close reason.
       if (this.holdForUnknownLeg(t, state)) return;
+      const allTargetsFilled = Array.from({ length: tpCountOf(t) }, (_, i) => tpFilledOf(t, i + 1)).every(Boolean);
+      if (allTargetsFilled) {
+        void this.finalize(t, isFiveRTrade(t) ? 'TP5' : 'TP3', tpPriceOf(t, tpCountOf(t)));
+        return;
+      }
       this.log('info', `${t.symbol}: position flat (external fill detected) — closing bot trade record`);
       void this.finalize(t, 'EXTERNAL', priceOf(t.symbol) || t.entryPrice);
       return;
@@ -1052,7 +1200,7 @@ class Trader {
       if (t.status !== 'OPEN') await api.cancelAlgoOrder(t.symbol, cid).catch(() => null);
     };
 
-    if (state.get('sl')?.state === 'gone' && !t.tp3Filled) {
+    if (state.get('sl')?.state === 'gone' && remainingQtyOf(t) > 0) {
       this.log('error', `${t.symbol}: SL order missing while position open — re-arming SL`);
       const cid = `VX${t.id}S${t.slStage}R${Date.now().toString(36).slice(-4)}`;
       try {
@@ -1080,8 +1228,8 @@ class Trader {
     // route future fills through their newly persisted client ids.
     let capacity = protectedQty;
     const ensureTp = async (
-      key: 'tp1' | 'tp2' | 'tp3',
-      level: 1 | 2 | 3,
+      key: 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5',
+      level: 1 | 2 | 3 | 4 | 5,
       filled: boolean,
       target: number,
       plannedQty: number,
@@ -1100,11 +1248,16 @@ class Trader {
     };
     // Each leg is independent: one that cannot be re-armed (e.g. its price was
     // already crossed, -2021) must not starve the others on every pass.
-    const ladder = [
-      ['tp1', 1, t.tp1Filled, t.tp1, t.q1],
-      ['tp2', 2, t.tp2Filled, t.tp2, t.q2],
-      ['tp3', 3, t.tp3Filled, t.tp3, t.q3],
-    ] as const;
+    const ladder = Array.from({ length: tpCountOf(t) }, (_, i) => {
+      const level = i + 1;
+      return [
+        `tp${level}` as 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'tp5',
+        level as 1 | 2 | 3 | 4 | 5,
+        tpFilledOf(t, level),
+        tpPriceOf(t, level),
+        tpQtyOf(t, level),
+      ] as const;
+    });
     for (const [key, level, filled, target, planned] of ladder) {
       try {
         await ensureTp(key, level, filled, target, planned);

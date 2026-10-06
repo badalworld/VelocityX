@@ -13,24 +13,31 @@ export interface Trade {
   qty: number;
   q1: number; // TP1 slice
   q2: number; // TP2 slice (of remaining)
-  q3: number; // TP3 slice (rest)
+  q3: number; // legacy TP3 slice / POC strategy third 20% slice
+  q4?: number;
+  q5?: number;
+  exitPlan?: 'LEGACY_3TP' | 'LIQUIDITY_5R';
   entryPrice: number;
   atrAtEntry: number;
   slInitial: number;
   slCurrent: number;
-  slStage: 0 | 1 | 2; // 0 = initial, 1 = breakeven, 2 = at TP1
+  slStage: number; // 0 = initial; five-step plan advances through 4R protection
   tp1: number;
   tp2: number;
   tp3: number;
+  tp4?: number;
+  tp5?: number;
   notional: number;
   margin: number;
   leverage: number;
   openedAt: number;
   closedAt: number | null;
-  closeReason: 'TP3' | 'SL' | 'SL_PARTIAL' | 'REVERSE' | 'KILL' | 'EXTERNAL' | null;
+  closeReason: 'TP3' | 'TP5' | 'SL' | 'SL_PARTIAL' | 'REVERSE' | 'KILL' | 'EXTERNAL' | null;
   tp1Filled: boolean;
   tp2Filled: boolean;
   tp3Filled: boolean;
+  tp4Filled?: boolean;
+  tp5Filled?: boolean;
   realizedPnl: number; // net of fees
   fees: number;
   /** Binance funding paid/received while this trade was open (USDT, real data). */
@@ -41,7 +48,7 @@ export interface Trade {
   commissionOtherAsset: number;
   initialRisk: number; // |entry-sl| * qty (price risk at open)
   /** Binance client order ids (VX<tradeId><suffix>) for this trade's ladder. */
-  orders: { entry?: string; sl?: string; tp1?: string; tp2?: string; tp3?: string };
+  orders: { entry?: string; sl?: string; tp1?: string; tp2?: string; tp3?: string; tp4?: string; tp5?: string };
   mode: 'testnet' | 'live';
   result: 'WIN' | 'LOSS' | null;
   /** Always true: the bot NEVER adopts or manages trades it did not open. */
@@ -68,6 +75,13 @@ export interface SignalRecord {
   atr: number;
   acted: boolean; // bot opened a trade for this signal
   tradeId: string | null;
+  strategy?: 'LIQUIDITY_SWEEP_POC_RETEST';
+  pocPrice?: number;
+  sweptLevel?: number;
+  sweepExtreme?: number;
+  stopPrice?: number;
+  riskDistance?: number;
+  sweepTime?: number;
 }
 type SignalSide_ = 'LONG' | 'SHORT';
 
@@ -117,9 +131,34 @@ let trades: Trade[] = readJson<Trade[]>(TRADES_FILE, []);
 export function allTrades(): Trade[] {
   return trades;
 }
-/** Remaining quantity of a trade after the scale-out ladder fills. */
+/** True for the new fixed 1R..5R liquidity strategy; missing is the legacy 3-leg plan. */
+export function isFiveRTrade(t: Trade): boolean {
+  return t.exitPlan === 'LIQUIDITY_5R';
+}
+
+export function tpCountOf(t: Trade): number {
+  return isFiveRTrade(t) ? 5 : 3;
+}
+
+export function tpQtyOf(t: Trade, level: number): number {
+  return Number((t as any)[`q${level}`]) || 0;
+}
+
+export function tpPriceOf(t: Trade, level: number): number {
+  return Number((t as any)[`tp${level}`]) || 0;
+}
+
+export function tpFilledOf(t: Trade, level: number): boolean {
+  return Boolean((t as any)[`tp${level}Filled`]);
+}
+
+/** Remaining quantity after whichever scale-out legs belong to this trade plan. */
 export function remainingQtyOf(t: Trade): number {
-  return t.qty - (t.tp1Filled ? t.q1 : 0) - (t.tp2Filled ? t.q2 : 0) - (t.tp3Filled ? t.q3 : 0);
+  let closed = 0;
+  for (let level = 1; level <= tpCountOf(t); level++) {
+    if (tpFilledOf(t, level)) closed += tpQtyOf(t, level);
+  }
+  return Math.max(0, t.qty - closed);
 }
 
 /** All OPEN trades the bot itself opened (≤ maxPositions). */

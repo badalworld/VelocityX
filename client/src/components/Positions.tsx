@@ -41,7 +41,10 @@ export function PositionCard({ pos, slot, max, onClose }: { pos: ManagedPosition
   const t = pos.trade;
   const long = t.side === 'LONG';
   const up = pos.unrealized >= 0;
-  const slLabel = t.slStage === 0 ? 'ATR STOP' : t.slStage === 1 ? 'BREAKEVEN' : 'LOCKED AT TP1';
+  const fiveR = t.exitPlan === 'LIQUIDITY_5R';
+  const slLabel = fiveR
+    ? (['INITIAL STOP', 'BREAKEVEN', 'LOCKED AT 1R', 'LOCKED AT 2R', 'LOCKED AT 3R'][Math.min(4, Math.max(0, t.slStage))] || 'LOCKED STOP')
+    : t.slStage === 0 ? 'INITIAL STOP' : t.slStage === 1 ? 'BREAKEVEN' : 'LOCKED AT TP1';
   return (
     <article className={`panel glass-frost pos-item ${up ? 'tone-green' : 'tone-red'}`}>
       <div className="pos-item-head">
@@ -119,9 +122,21 @@ export function PositionCard({ pos, slot, max, onClose }: { pos: ManagedPosition
           tone={t.slStage >= 1 ? 'lvl-sl lvl-be' : 'lvl-sl'}
           fill={progressTo(pos.markPrice, t.entryPrice, t.slCurrent)}
         />
-        <LevelRow label="TP1" price={t.tp1} value={`${fmtQtyN(t.q1)} · SL→BE`} hit={t.tp1Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp1)} />
-        <LevelRow label="TP2" price={t.tp2} value={`${fmtQtyN(t.q2)} · SL→TP1`} hit={t.tp2Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp2)} />
-        <LevelRow label="TP3" price={t.tp3} value={`${fmtQtyN(t.q3)} · full exit`} hit={t.tp3Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp3)} />
+        {fiveR ? (
+          <>
+            <LevelRow label="TP1 · 1R" price={t.tp1} value={`${fmtQtyN(t.q1)} · ~20% · SL→BE`} hit={t.tp1Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp1)} />
+            <LevelRow label="TP2 · 2R" price={t.tp2} value={`${fmtQtyN(t.q2)} · ~20% · SL→1R`} hit={t.tp2Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp2)} />
+            <LevelRow label="TP3 · 3R" price={t.tp3} value={`${fmtQtyN(t.q3)} · ~20% · SL→2R`} hit={t.tp3Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp3)} />
+            <LevelRow label="TP4 · 4R" price={t.tp4 || 0} value={`${fmtQtyN(t.q4 || 0)} · ~20% · SL→3R`} hit={!!t.tp4Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp4 || t.entryPrice)} />
+            <LevelRow label="TP5 · 5R" price={t.tp5 || 0} value={`${fmtQtyN(t.q5 || 0)} · remainder`} hit={!!t.tp5Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp5 || t.entryPrice)} />
+          </>
+        ) : (
+          <>
+            <LevelRow label="TP1" price={t.tp1} value={`${fmtQtyN(t.q1)} · SL→BE`} hit={t.tp1Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp1)} />
+            <LevelRow label="TP2" price={t.tp2} value={`${fmtQtyN(t.q2)} · SL→TP1`} hit={t.tp2Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp2)} />
+            <LevelRow label="TP3" price={t.tp3} value={`${fmtQtyN(t.q3)} · full exit`} hit={t.tp3Filled} tone="lvl-tp" fill={progressTo(pos.markPrice, t.entryPrice, t.tp3)} />
+          </>
+        )}
       </div>
 
       <div className="row mt" style={{ flexWrap: 'wrap' }}>
@@ -157,8 +172,7 @@ export function ManagedPositions({ data, onClose }: { data: PositionsPayload | n
     >
       {managed.length === 0 ? (
         <div className="empty">
-          No open position. The scanner is ranking the market — the bot opens up to {max} positions on trending
-          high-volatility markets only, and never touches anything it did not open itself.
+          No open position. The scanner is monitoring liquid markets for closed 5m liquidity-sweep / POC-retest setups. The bot never touches anything it did not open itself.
         </div>
       ) : (
         <div className="pos-grid-wrap">

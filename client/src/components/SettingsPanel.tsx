@@ -3,6 +3,7 @@ import { Settings } from '../types';
 import { apiPost, getApiToken, setApiToken } from '../api';
 import { Btn, Panel, Segmented } from '../motion/primitives';
 import { IconAlert, IconCheck, IconChart, IconCoins, IconRadar, IconSettings, IconTrend } from '../motion/Icons';
+import BacktestPanel from './BacktestPanel';
 
 /** Deep clone that also works on browsers/patchy webviews without structuredClone. */
 function clone<T>(value: T): T {
@@ -22,13 +23,13 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-type Tab = 'conn' | 'trade' | 'scanner' | 'ind';
+type Tab = 'conn' | 'trade' | 'scanner' | 'strategy';
 
 const TABS: { value: Tab; label: string; icon: React.ReactNode }[] = [
   { value: 'conn', label: 'Connection', icon: <IconSettings /> },
   { value: 'trade', label: 'Trading', icon: <IconCoins /> },
   { value: 'scanner', label: 'Scanner', icon: <IconRadar /> },
-  { value: 'ind', label: 'Indicator', icon: <IconTrend /> },
+  { value: 'strategy', label: 'Strategy & Backtest', icon: <IconTrend /> },
 ];
 
 export default function SettingsPanel({ settings, onSaved, onError }: Props) {
@@ -231,7 +232,7 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
                   value={draft.autoScan ? 'auto' : 'manual'}
                   onChange={(e) => set({ autoScan: e.target.value === 'auto' })}
                 >
-                  <option value="auto">Scanner — trade the top trending high-volatility markets</option>
+                  <option value="auto">Scanner — monitor liquid markets for 5m sweeps and POC retests</option>
                   <option value="manual">Manual — only the primary symbol below</option>
                 </select>
               </label>
@@ -297,42 +298,14 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
               </label>
             </div>
             <div className="hint">
-              Every trade uses <b>{draft.tradeSizePercent}% of equity</b> as margin × <b>{draft.leverage}x</b> leverage, up
-              to <b>{draft.maxPositions}</b> positions. SL = ATR(14) × {draft.atrSlMultiplier}, TPs at {draft.tpRrFactor}R /{' '}
-              {draft.tpRrFactor * 2}R / {draft.tpRrFactor * 3}R. Equity, PNL, ROI, fees and funding are always read from
-              Binance — there is no manual balance to enter.
+              Live entries use up to <b>{draft.tradeSizePercent}% of equity</b> as margin × <b>{draft.leverage}x</b> leverage, up to <b>{draft.maxPositions}</b> positions. Entry signals are 5m liquidity sweeps followed by a POC reclaim and retest. Every exchange order is real when auto-trade is armed.
             </div>
           </div>
 
           <div className="settings-sec">
-            <h4>Scale-out ladder</h4>
-            <div className="frow">
-              <label className="field">
-                <span className="field-label">TP1 closes (% of position)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  max={90}
-                  value={draft.tp1ClosePct}
-                  onChange={(e) => set({ tp1ClosePct: Number(e.target.value) })}
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">TP2 closes (% of remaining)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  max={90}
-                  value={draft.tp2ClosePct}
-                  onChange={(e) => set({ tp2ClosePct: Number(e.target.value) })}
-                />
-              </label>
-            </div>
+            <h4>Five-target risk ladder</h4>
             <div className="hint">
-              TP1 → close {draft.tp1ClosePct}% + <b>SL to breakeven</b> · TP2 → close {draft.tp2ClosePct}% of the rest +{' '}
-              <b>SL to TP1</b> · TP3 → <b>full exit</b>.
+              Close 20% of the original position at each of <b>1R, 2R, 3R and 4R</b>; close the remainder at <b>5R</b>. After TP1/2/3/4, move the stop to breakeven/1R/2R/3R, respectively. Actual quantities are rounded to the symbol's exchange step size; legacy open trades keep their original exit plan.
             </div>
           </div>
 
@@ -374,193 +347,113 @@ export default function SettingsPanel({ settings, onSaved, onError }: Props) {
           </div>
 
           <div className="settings-sec">
-            <h4>Trending &amp; volatility gates</h4>
+            <h4>Liquidity &amp; volatility gates</h4>
             <div className="frow two">
               <label className="field">
                 <span className="field-label">Min 24h quote volume (USDT)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step={1_000_000}
-                  value={draft.scanner.minQuoteVolume24h}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, minQuoteVolume24h: Number(e.target.value) } })}
-                />
+                <input className="input" type="number" min={0} step={1_000_000} value={draft.scanner.minQuoteVolume24h}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minQuoteVolume24h: Number(e.target.value) } })} />
               </label>
               <label className="field">
                 <span className="field-label">Min 24h range (%)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step={0.5}
-                  value={draft.scanner.minRange24hPct}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, minRange24hPct: Number(e.target.value) } })}
-                />
+                <input className="input" type="number" min={0} step={0.5} value={draft.scanner.minRange24hPct}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minRange24hPct: Number(e.target.value) } })} />
               </label>
             </div>
             <div className="frow two">
               <label className="field">
                 <span className="field-label">Min ATR(14) 15m (% of price)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step={0.1}
-                  value={draft.scanner.minAtrPct}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, minAtrPct: Number(e.target.value) } })}
-                />
+                <input className="input" type="number" min={0} step={0.1} value={draft.scanner.minAtrPct}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, minAtrPct: Number(e.target.value) } })} />
               </label>
               <label className="field">
-                <span className="field-label">Min ADX(14) — trending gate</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={draft.scanner.minAdx}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, minAdx: Number(e.target.value) } })}
-                />
+                <span className="field-label">Assets analysed per scan</span>
+                <input className="input" type="number" min={10} max={80} value={draft.scanner.candidates}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, candidates: Number(e.target.value) } })} />
               </label>
             </div>
             <div className="frow two">
               <label className="field">
-                <span className="field-label">Assets analysed per scan (default 50)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={10}
-                  max={80}
-                  value={draft.scanner.candidates}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, candidates: Number(e.target.value) } })}
-                />
-              </label>
-              <label className="field">
                 <span className="field-label">Maximum retained opportunity zones</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  max={24}
-                  value={draft.scanner.topN}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, topN: Math.min(24, Number(e.target.value)) } })}
-                />
-              </label>
-            </div>
-            <div className="frow three">
-              <label className="field">
-                <span className="field-label">Min setup quality (0–100)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={draft.scanner.minOpportunityScore}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, minOpportunityScore: Number(e.target.value) } })}
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">Max EMA gap (5m ATR)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0.05}
-                  max={3}
-                  step={0.05}
-                  value={draft.scanner.maxEmaGapAtr}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, maxEmaGapAtr: Number(e.target.value) } })}
-                />
+                <input className="input" type="number" min={1} max={24} value={draft.scanner.topN}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, topN: Math.min(24, Number(e.target.value)) } })} />
               </label>
               <label className="field">
                 <span className="field-label">Zone retention (minutes)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={5}
-                  max={240}
-                  value={draft.scanner.zoneRetentionMin}
-                  onChange={(e) => set({ scanner: { ...draft.scanner, zoneRetentionMin: Number(e.target.value) } })}
-                />
+                <input className="input" type="number" min={5} max={240} value={draft.scanner.zoneRetentionMin}
+                  onChange={(e) => set({ scanner: { ...draft.scanner, zoneRetentionMin: Number(e.target.value) } })} />
               </label>
             </div>
             <div className="hint">
-              The setup score is a deterministic quality ranking, not a promised probability. Zones are retained while
-              the next batch continues, but stale zones expire and a missed signal is never replayed.
+              The scanner's liquidity/activity filters only choose which markets to watch. Entries are not trend-following; both long and short sides use the same closed-candle sweep → POC reclaim → retest rules.
             </div>
             <div className="hint warn" style={{ display: 'flex', gap: 7 }}>
               <IconAlert style={{ width: 14, height: 14, flex: 'none', marginTop: 2 }} />
-              Stable / pegged / staked / wrapped / index markets (USDC, FDUSD, BNSOL, WBETH, BTCDOM…) are rejected
-              automatically — only a retained opportunity zone may reach auto-execution.
+              Stable / pegged / staked / wrapped / index markets (USDC, FDUSD, BNSOL, WBETH, BTCDOM…) are rejected automatically.
             </div>
           </div>
         </>
       )}
 
-      {tab === 'ind' && (
-        <div className="settings-sec">
-          <h4>Indicator parameters (SUPER INDIBOT defaults)</h4>
-          <div className="frow three">
-            <label className="field">
-              <span className="field-label">EMA ribbon (8+, include 11 & 34)</span>
-              <input
-                className="input"
-                value={draft.emaLengths.join(',')}
-                onChange={(e) => {
-                  const arr = e.target.value
-                    .split(',')
-                    .map((x) => parseInt(x.trim(), 10))
-                    .filter((x) => Number.isFinite(x) && x > 0);
-                  if (arr.length >= 8) set({ emaLengths: arr });
-                }}
-              />
-            </label>
-            <label className="field">
-              <span className="field-label">Extra EMA</span>
-              <input
-                className="input"
-                type="number"
-                value={draft.emaExtraLength}
-                onChange={(e) => set({ emaExtraLength: Number(e.target.value) })}
-              />
-            </label>
-            <label className="field">
-              <span className="field-label">ATR length</span>
-              <input
-                className="input"
-                type="number"
-                value={draft.atrLength}
-                onChange={(e) => set({ atrLength: Number(e.target.value) })}
-              />
-            </label>
+      {tab === 'strategy' && (
+        <>
+          <div className="settings-sec">
+            <h4>5-minute liquidity sweep → POC retest</h4>
+            <div className="hint">
+              Signals require a closed-candle sweep of a prior 30-bar extreme, a close back inside, a later POC reclaim, then a directional POC retest/rejection. Long and short setups are evaluated independently. Stops sit beyond the sweep wick plus an ATR buffer.
+            </div>
+            <div className="frow three mt">
+              <label className="field">
+                <span className="field-label">Sweep lookback (bars)</span>
+                <input className="input" type="number" min={10} max={250} step={1} value={draft.strategy.lookbackBars}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, lookbackBars: Number(e.target.value) } })} />
+              </label>
+              <label className="field">
+                <span className="field-label">POC price bins</span>
+                <input className="input" type="number" min={8} max={100} step={1} value={draft.strategy.profileBins}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, profileBins: Number(e.target.value) } })} />
+              </label>
+              <label className="field">
+                <span className="field-label">Setup expiry (bars)</span>
+                <input className="input" type="number" min={1} max={288} step={1} value={draft.strategy.setupExpiryBars}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, setupExpiryBars: Number(e.target.value) } })} />
+              </label>
+            </div>
+            <div className="frow three">
+              <label className="field">
+                <span className="field-label">Minimum sweep size (ATR)</span>
+                <input className="input" type="number" min={0} max={2} step={0.05} value={draft.strategy.sweepMinAtr}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, sweepMinAtr: Number(e.target.value) } })} />
+              </label>
+              <label className="field">
+                <span className="field-label">POC retest tolerance (ATR)</span>
+                <input className="input" type="number" min={0} max={2} step={0.05} value={draft.strategy.retestToleranceAtr}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, retestToleranceAtr: Number(e.target.value) } })} />
+              </label>
+              <label className="field">
+                <span className="field-label">Stop buffer (ATR)</span>
+                <input className="input" type="number" min={0} max={2} step={0.05} value={draft.strategy.stopBufferAtr}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, stopBufferAtr: Number(e.target.value) } })} />
+              </label>
+            </div>
+            <div className="frow">
+              <label className="field">
+                <span className="field-label">Maximum stop distance (ATR)</span>
+                <input className="input" type="number" min={0.1} max={30} step={0.1} value={draft.strategy.maxStopAtr}
+                  onChange={(e) => set({ strategy: { ...draft.strategy, maxStopAtr: Number(e.target.value) } })} />
+              </label>
+              <div className="field hint" style={{ justifyContent: 'center' }}>ATR(14) · closed 5m candles · market entry after confirmed retest</div>
+            </div>
+            <div className="hint warn">
+              POC is an OHLCV approximation: the candle's volume is distributed uniformly across its high-low range and then binned. It is not trade-level volume-at-price. Exchange quantity steps may slightly alter 20% tranches or make a very small tranche unavailable.
+            </div>
           </div>
-          <div className="frow">
-            <label className="field">
-              <span className="field-label">SL = ATR × multiplier</span>
-              <input
-                className="input"
-                type="number"
-                step={0.1}
-                value={draft.atrSlMultiplier}
-                onChange={(e) => set({ atrSlMultiplier: Number(e.target.value) })}
-              />
-            </label>
-            <label className="field">
-              <span className="field-label">TP multiplier (RR per TP)</span>
-              <input
-                className="input"
-                type="number"
-                step={0.1}
-                value={draft.tpRrFactor}
-                onChange={(e) => set({ tpRrFactor: Number(e.target.value) })}
-              />
-            </label>
-          </div>
-          <div className="hint">
-            Signals: <b>confirmed EMA11/EMA34 crossover</b> on a closed 5m bar (entry = signal candle close).
-            The ribbon may include additional lengths, but 11 and 34 are required so scanner qualification and execution
-            always use the same non-repainting rule.
-          </div>
-        </div>
+          <BacktestPanel
+            symbol={draft.symbol}
+            disabled={!!settings && JSON.stringify(draft.strategy) !== JSON.stringify(settings.strategy)}
+            onError={onError}
+          />
+        </>
       )}
 
       <div className="mt" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>

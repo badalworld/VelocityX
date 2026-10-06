@@ -36,9 +36,10 @@ async function main(): Promise<void> {
   pruneOld(settings.historyDays);
 
   // ---- boot safety -------------------------------------------------------
-  // There is no simulation to fall back to: a persisted LIVE + auto-trade
+  // Never fall back to a paper order executor: a persisted LIVE + auto-trade
   // config must not start placing real orders the second the process comes
-  // back up (crash loop, deploy, restart). Without VX_ALLOW_LIVE the bot boots
+  // back up (crash loop, deploy, restart). Historical backtesting is separate.
+  // Without VX_ALLOW_LIVE the bot boots
   // on the same environment but DISARMED.
   if (settings.mode === 'live' && settings.autoTrade && !ALLOW_LIVE) {
     updateSettings({ autoTrade: false });

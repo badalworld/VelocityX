@@ -1,24 +1,26 @@
 /**
  * End-to-end execution test — drives the REAL order path (testnet/live branch)
- * against a stubbed Binance exchange. No simulation lives in the product; this
- * harness only stands in for the exchange so the executor state machine can be
- * verified without sending real orders.
+ * against a stubbed Binance exchange. This harness stands in for Binance so
+ * the executor state machine can be verified without sending real orders; it
+ * is separate from the public-candle strategy backtester.
  *
  * The stub sits at the HTTP boundary (BinanceApi.signed) and behaves like the
  * 2026 exchange: STOP_MARKET / TAKE_PROFIT_MARKET are REJECTED on /fapi/v1/order
  * (-4120) and only accepted by the Algo Service (/fapi/v1/algoOrder). Every
  * order-shaping function in binance.ts therefore runs for real.
  *
- *   1. LONG  → TP1 (33% + SL→BE) → TP2 (50% rest + SL→TP1) → TP3 (full exit)  [WIN]
- *   2. SHORT → SL hit before any TP                                            [LOSS]
- *   3. LONG  → TP1 → opposite signal                                          [CLOSE & REVERSE]
- *   4. SHORT → kill switch                                                     [KILL]
- *   5. Ownership guards: external position blocks entry, canTrade=false blocks
+ *   1. Legacy LONG fixture → three-target exits (migration compatibility)
+ *   2. Liquidity LONG → TP1..TP5 at 1R..5R, 20% original slices and stop ratchet
+ *   3. Fresh opposite POC setup does not reverse an open managed position
+ *   4. Legacy opposite signal retains migration compatibility behavior
+ *   5. SHORT → SL hit before any TP                                            [LOSS]
+ *   6. SHORT → kill switch                                                     [KILL]
+ *   7. Ownership guards: external position blocks entry, canTrade=false blocks
  *      entry, leverage brackets clamp, missing legs are re-armed by reconcile.
- *   6. Recovery: fills the WebSocket missed are booked from REST, flaky answers
+ *   8. Recovery: fills the WebSocket missed are booked from REST, flaky answers
  *      never duplicate a leg, events are idempotent, lost POST responses are
  *      resolved by client id, stale legs are swept, other-mode trades are skipped.
- *   7. Multi-position cap: max 8 bot positions, one per symbol.
+ *   9. Multi-position cap: max 8 bot positions, one per symbol.
  *
  * Every PnL / fee number asserted here comes from the stubbed exchange ledger,
  * exactly the way the executor reads it from Binance in production.
@@ -353,7 +355,7 @@ async function main() {
   assert(tps.some((o) => approx(o.quantity, t1.q1)) && tps.some((o) => approx(o.quantity, t1.q2)) && tps.some((o) => approx(o.quantity, t1.q3)), 'TP legs size q1/q2/q3');
   assert(ex.legacyConditionalAttempts === 0, 'not a single conditional order was sent to /fapi/v1/order');
 
-  console.log('\n— TP1 → breakeven, TP2 → SL at TP1, TP3 → full exit (ALGO_UPDATE) —');
+  console.log('\n— Legacy ladder: TP1 → breakeven, TP2 → stop at TP1, TP3 → exit (ALGO_UPDATE) —');
   // The triggered legs become matching-engine orders with UNRELATED client ids —
   // fills are routed purely by the algo order's own client id.
   const rp1 = 300 * t1.q1;
@@ -386,6 +388,56 @@ async function main() {
   assert(!openOf('BTCUSDT'), 'no open trade after TP3');
   assert(liveAlgo('BTCUSDT').length === 0, 'every remaining ladder order was cancelled on close');
   assert((ex.positions.get('BTCUSDT') ?? 0) === 0, 'the exchange position is flat after the full ladder');
+
+  /* ---------- 1b. New liquidity strategy → five R ladder ---------- */
+  console.log('\n— Liquidity strategy → five targets and staged stop ratchet —');
+  const P5 = 100, A5 = 1;
+  const liquidity = mkSignal('LONG', P5, A5, 'FIVEUSDT');
+  liquidity.stopPrice = P5 - 2;
+  liquidity.record.strategy = 'LIQUIDITY_SWEEP_POC_RETEST';
+  await trader.onSignal(liquidity);
+  let t5 = openOf('FIVEUSDT');
+  assert(!!t5 && t5.exitPlan === 'LIQUIDITY_5R' && t5.slInitial === P5 - 2, 'liquidity signal opens with the structural sweep stop and five-R plan');
+  assert(!!t5 && approx(t5.tp1, P5 + 2) && approx(t5.tp2, P5 + 4) && approx(t5.tp3, P5 + 6) && approx(t5.tp4, P5 + 8) && approx(t5.tp5, P5 + 10), 'targets are placed at exactly 1R, 2R, 3R, 4R and 5R');
+  assert(!!t5 && approx(t5.q1 + t5.q2 + t5.q3 + t5.q4 + t5.q5, t5.qty) && [t5.q1, t5.q2, t5.q3, t5.q4].every((q) => Math.abs(q / t5.qty - 0.2) <= 0.001), 'TP1–TP4 each close about 20% of original quantity and all five slices sum to the position');
+  assert(!!t5 && liveOfTrade(t5.id).filter((o) => o.type === 'TAKE_PROFIT_MARKET').length === 5, 'five reduce-only take-profit algo legs were placed');
+  const ordersBeforeOppositeSetup = ex.orders.filter((o) => o.symbol === 'FIVEUSDT').length;
+  const oppositeLiquidity = mkSignal('SHORT', P5, A5, 'FIVEUSDT');
+  oppositeLiquidity.stopPrice = P5 + 2;
+  oppositeLiquidity.record.strategy = 'LIQUIDITY_SWEEP_POC_RETEST';
+  await trader.onSignal(oppositeLiquidity);
+  assert(openOf('FIVEUSDT')?.side === 'LONG' && ex.orders.filter((o) => o.symbol === 'FIVEUSDT').length === ordersBeforeOppositeSetup, 'a fresh opposite POC setup never reverses an already-open bot trade');
+  for (let level = 1; level <= 4; level++) {
+    const target = t5[`tp${level}`];
+    const quantity = t5[`q${level}`];
+    fireAlgo(cidSuffix(t5.id, String(level)), target, { rp: (target - t5.entryPrice) * quantity, commission: 0.01 });
+    await settle();
+    t5 = openOf('FIVEUSDT');
+    const expectedStop = level === 1 ? t5?.entryPrice : t5?.[`tp${level - 1}`];
+    assert(!!t5 && t5.slStage === level && approx(t5.slCurrent, expectedStop), `TP${level} advances stop to ${level === 1 ? 'breakeven' : `${level - 1}R`}`);
+    const currentStop = liveOfTrade(t5.id).filter((o) => o.type === 'STOP_MARKET');
+    assert(currentStop.length === 1 && approx(currentStop[0].quantity, require('../dist/store').remainingQtyOf(t5)), `after TP${level}, one protective stop covers only the remaining position`);
+  }
+  const finalQty = t5.q5;
+  fireAlgo(cidSuffix(t5.id, '5'), t5.tp5, { rp: (t5.tp5 - t5.entryPrice) * finalQty, commission: 0.01 });
+  await settle();
+  const t5c = allTrades().find((x) => x.id === t5.id);
+  assert(t5c.status === 'CLOSED' && t5c.closeReason === 'TP5' && t5c.tp5Filled && t5c.result === 'WIN', 'TP5 closes the remainder and finalizes the liquidity trade');
+  assert(liveOfTrade(t5.id).length === 0 && approx(ex.positions.get('FIVEUSDT') ?? 0, 0), 'five-R completion cancels every remaining algo leg and leaves the bot position flat');
+
+  console.log('\n— Out-of-order final-target event cannot drop a partial position —');
+  const outOfOrder = mkSignal('LONG', P5, A5, 'ORDERUSDT');
+  outOfOrder.stopPrice = P5 - 2;
+  outOfOrder.record.strategy = 'LIQUIDITY_SWEEP_POC_RETEST';
+  await trader.onSignal(outOfOrder);
+  const outTrade = openOf('ORDERUSDT');
+  fireAlgo(cidSuffix(outTrade.id, '5'), outTrade.tp5, { via: 'rest' });
+  await trader.reconcile();
+  const stillOpen = openOf('ORDERUSDT');
+  assert(!!stillOpen && stillOpen.tp5Filled && stillOpen.status === 'OPEN', 'TP5 arriving before TP1–TP4 does not prematurely close the journal');
+  assert(approx(ex.positions.get('ORDERUSDT'), outTrade.qty - outTrade.q5), 'unaccounted partial quantity remains bot-owned and protected');
+  await trader.kill();
+  assert(!openOf('ORDERUSDT') && approx(ex.positions.get('ORDERUSDT') ?? 0, 0), 'kill switch safely closes the residual quantity after the ordering anomaly');
 
   /* ---------- 2. SHORT → SL hit ---------- */
   console.log('\n— SHORT → stop-loss (no TP) —');
@@ -501,7 +553,7 @@ async function main() {
   const rearmedTp2 = liveAlgo('SOLUSDT').find((o) => o.type === 'TAKE_PROFIT_MARKET' && o.clientAlgoId.startsWith(`VX${sol.id}2R`));
   assert(!!rearmedTp2 && rearmedTp2.reduceOnly && rearmedTp2.quantity > 0, 'reconcile re-armed a missing TP leg with a persisted recovery id');
   assert(openTradeOn('SOLUSDT').orders.tp2 === rearmedTp2?.clientAlgoId, 'the recovery id is persisted so a later fill routes to it');
-  assert(liveAlgo('SOLUSDT').length === 4, 'exactly one stop and three take-profits rest — nothing doubled');
+  assert(liveAlgo('SOLUSDT').length === 4, 'legacy fixture has one stop and three take-profits — nothing doubled');
 
   /* ---------- 8. fills the stream missed ---------- */
   console.log('\n— Reconcile: fills the WebSocket missed are booked from REST —');
